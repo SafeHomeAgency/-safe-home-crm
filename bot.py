@@ -43,6 +43,8 @@ AA_NAME, AA_PHONE = range(8, 10)
 RP_PHONE, RP_ACTIONS, RP_NOTES = range(10, 13)
 # ---- /dayoff საუბრის საფეხურები ----
 DO_DATE, DO_REASON = range(13, 15)
+# ---- /meeting (ყოფილი "შეხვედრები" ფორმა) — ერთი state, სვეტების ჯაჭვით ----
+(MT_FIELD,) = range(15, 16)
 
 PRIORITY_LABELS = ("დაბალი", "საშუალო", "მაღალი")
 
@@ -56,6 +58,27 @@ REPORT_ACTIONS = [
     "გარიგება დაიხურა",
     "არ პასუხობს",
     "არ არის დაინტერესებული",
+]
+
+# ყოფილი Slack "შეხვედრები" ფორმის ველები — თანმიმდევრობით ისე ეკითხება
+# აგენტს, ერთი-ერთზე. (key, კითხვა). agent_id/agent_name/agent_phone
+# ავტომატურად ივსება რეგისტრირებული აგენტის მონაცემებით — არ ეკითხებით.
+MEETING_FIELDS = [
+    ("owner_phone", "მეპატრონის ნომერი?"),
+    ("myhome_link", "myhome ბმული? (თუ არ არის — დაწერეთ „-“)"),
+    ("myhome_id", "myhome ID? (თუ არ არის — „-“)"),
+    ("ssge_link", "ss.ge ბმული? (თუ არ არის — „-“)"),
+    ("ssge_id", "ss.ge ID? (თუ არ არის — „-“)"),
+    ("condition", "მდგომარეობა?"),
+    ("client_phone", "კლიენტის ნომერი?"),
+    ("district", "რაიონი?"),
+    ("address", "მისამართი?"),
+    ("meeting_date", "შეხვედრის თარიღი? (მაგ. 2026-09-15)"),
+    ("price", "ფასი?"),
+    ("percent", "პროცენტი %?"),
+    ("time", "დრო? (შეხვედრის საათი)"),
+    ("internal_number", "შიდა ნომერი? (თუ არ არის — „-“)"),
+    ("team_leader", "თიმლიდერი?"),
 ]
 
 
@@ -76,7 +99,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "/report — დღევანდელი რეპორტი\n"
             "/ranking — აგენტების რეიტინგი (ბოლო 30 დღე)\n"
             "/findclient <ტელეფონი> — კლიენტის სრული ისტორია\n"
-            "/dayoffs — დასამტკიცებელი Day off მოთხოვნები"
+            "/dayoffs — დასამტკიცებელი Day off მოთხოვნები\n"
+            "/meetings — ბოლო დარეგისტრირებული შეხვედრები"
         )
         return
 
@@ -86,6 +110,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"გამარჯობა, {agent['name']}! ბრძანებები:\n"
             "/mytasks — შენი დავალებები\n"
             "/clientreport — კლიენტთან შესრულებული სამუშაოს რეპორტი\n"
+            "/meeting — შეხვედრის/ნახვის მონაცემების დარეგისტრირება\n"
             "/dayoff — დასვენების დღის მოთხოვნა"
         )
         return
@@ -548,6 +573,83 @@ async def dayoffs_pending(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 
+# ------------------------------------------------------------ /meeting (agent)
+# ყოფილი Slack "შეხვედრები" ფორმის შემცვლელი — კლიენტთან შეხვედრის/ნახვის
+# დანიშვნისას აგენტი ავსებს ყველა იმ ველს, რასაც ადრე ფორმაში წერდა.
+
+async def meeting_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    agent = sheets.find_agent_by_chat_id(update.effective_chat.id)
+    if not agent:
+        await update.message.reply_text("ჯერ დარეგისტრირდით — გამოიყენეთ /start.")
+        return ConversationHandler.END
+    context.user_data["mt_agent"] = agent
+    context.user_data["mt_data"] = {}
+    context.user_data["mt_idx"] = 0
+    await update.message.reply_text(
+        "ვავსებთ შეხვედრის მონაცემებს. სადაც აქტუალური არაა, დაწერეთ „-“.\n\n"
+        + MEETING_FIELDS[0][1]
+    )
+    return MT_FIELD
+
+
+async def meeting_field(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    idx = context.user_data.get("mt_idx", 0)
+    key, _ = MEETING_FIELDS[idx]
+    value = update.message.text.strip()
+    context.user_data["mt_data"][key] = "" if value == "-" else value
+    idx += 1
+    context.user_data["mt_idx"] = idx
+
+    if idx < len(MEETING_FIELDS):
+        await update.message.reply_text(MEETING_FIELDS[idx][1])
+        return MT_FIELD
+
+    agent = context.user_data["mt_agent"]
+    d = context.user_data["mt_data"]
+    fields = dict(d)
+    fields["agent_id"] = agent["agent_id"]
+    fields["agent_name"] = agent["name"]
+    fields["agent_phone"] = agent.get("phone", "")
+    meeting_id = sheets.create_meeting(fields)
+
+    await update.message.reply_text(f"✅ შეხვედრის მონაცემები შენახულია (id: {meeting_id}).")
+
+    summary = (
+        f"📅 ახალი შეხვედრა — {agent['name']}\n"
+        f"კლიენტი: {d.get('client_phone') or '-'} | მეპატრონე: {d.get('owner_phone') or '-'}\n"
+        f"რაიონი/მისამართი: {d.get('district') or '-'}, {d.get('address') or '-'}\n"
+        f"თარიღი/დრო: {d.get('meeting_date') or '-'} {d.get('time') or ''}\n"
+        f"ფასი: {d.get('price') or '-'} | %: {d.get('percent') or '-'}\n"
+        f"myhome ID: {d.get('myhome_id') or '-'} | ss.ge ID: {d.get('ssge_id') or '-'}"
+    )
+    for admin_id in config.ADMIN_CHAT_IDS:
+        try:
+            await context.bot.send_message(chat_id=admin_id, text=summary)
+        except Exception:
+            log.exception("შეხვედრის შეტყობინება ვერ გაეგზავნა admin=%s", admin_id)
+
+    context.user_data.clear()
+    return ConversationHandler.END
+
+
+async def meetings_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_chat.id):
+        return
+    rows = sheets.get_meetings()
+    if not rows:
+        await update.message.reply_text("შეხვედრები ჯერ არ დარეგისტრირებულა.")
+        return
+    rows = rows[-15:][::-1]
+    lines = ["📅 ბოლო შეხვედრები:", ""]
+    for r in rows:
+        lines.append(
+            f"• {r.get('meeting_date') or '-'} {r.get('time') or ''} — {r.get('agent_name')}\n"
+            f"   კლიენტი: {r.get('client_phone') or '-'} | {r.get('district') or '-'}, {r.get('address') or '-'}\n"
+            f"   ფასი: {r.get('price') or '-'} | %: {r.get('percent') or '-'}"
+        )
+    await update.message.reply_text("\n\n".join(lines))
+
+
 # --------------------------------------------------------- /findclient (admin)
 async def findclient(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_chat.id):
@@ -557,7 +659,7 @@ async def findclient(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     phone = context.args[0]
     hist = sheets.get_client_history(phone)
-    if not hist["tasks"] and not hist["reports"]:
+    if not hist["tasks"] and not hist["reports"] and not hist["meetings"]:
         await update.message.reply_text("ამ ნომერზე ისტორია ვერ მოიძებნა.")
         return
 
@@ -568,6 +670,14 @@ async def findclient(update: Update, context: ContextTypes.DEFAULT_TYPE):
         for t in hist["tasks"]:
             name = agents_by_id.get(str(t.get("assigned_to")), t.get("assigned_to"))
             lines.append(f"• [{t['task_id']}] {t['title']} — {name} — {t['status']} ({t.get('created_at')})")
+        lines.append("")
+    if hist["meetings"]:
+        lines.append("შეხვედრები:")
+        for m in hist["meetings"]:
+            lines.append(
+                f"• {m.get('meeting_date') or '-'} {m.get('time') or ''} — {m.get('agent_name')} "
+                f"— {m.get('district') or '-'}, {m.get('address') or '-'} (ფასი: {m.get('price') or '-'})"
+            )
         lines.append("")
     if hist["reports"]:
         lines.append("რეპორტები:")
@@ -606,9 +716,11 @@ def _build_report_text() -> str:
     import datetime as _dt
     today_str = _dt.datetime.now().strftime("%Y-%m-%d")
     reports_today = [r for r in sheets.get_reports() if str(r.get("created_at", "")).startswith(today_str)]
+    meetings_today = [m for m in sheets.get_meetings() if str(m.get("timestamp", "")).startswith(today_str)]
     pending_dayoffs = sheets.get_dayoff_requests(status="pending")
     lines.append("")
     lines.append(f"დღეს შემოსული კლიენტის რეპორტები: {len(reports_today)}")
+    lines.append(f"დღეს დარეგისტრირებული შეხვედრები: {len(meetings_today)}")
     if pending_dayoffs:
         lines.append(f"⏳ დასამტკიცებელი Day off მოთხოვნები: {len(pending_dayoffs)} (/dayoffs)")
     return "\n".join(lines)
@@ -709,6 +821,7 @@ def main():
     app.add_handler(CommandHandler("ranking", ranking))
     app.add_handler(CommandHandler("findclient", findclient))
     app.add_handler(CommandHandler("dayoffs", dayoffs_pending))
+    app.add_handler(CommandHandler("meetings", meetings_list))
     app.add_handler(CallbackQueryHandler(dayoff_decide, pattern=r"^do_(ok|no):"))
 
     app.add_handler(ConversationHandler(
@@ -757,6 +870,14 @@ def main():
         states={
             DO_DATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, dayoff_date)],
             DO_REASON: [MessageHandler(filters.TEXT & ~filters.COMMAND, dayoff_reason)],
+        },
+        fallbacks=[CommandHandler("cancel", cancel), MessageHandler(filters.COMMAND, busy_fallback)],
+    ))
+
+    app.add_handler(ConversationHandler(
+        entry_points=[CommandHandler("meeting", meeting_start)],
+        states={
+            MT_FIELD: [MessageHandler(filters.TEXT & ~filters.COMMAND, meeting_field)],
         },
         fallbacks=[CommandHandler("cancel", cancel), MessageHandler(filters.COMMAND, busy_fallback)],
     ))

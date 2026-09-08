@@ -36,6 +36,7 @@ AGENTS_SHEET_NAME = "Agents"
 TASKS_SHEET_NAME = "Tasks"
 REPORTS_SHEET_NAME = "Reports"
 DAYOFF_SHEET_NAME = "DayOff"
+MEETINGS_SHEET_NAME = "Meetings"
 
 
 def validate():

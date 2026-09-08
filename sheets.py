@@ -57,6 +57,13 @@ DAYOFF_HEADERS = [
     "request_id", "agent_id", "date", "reason", "status",
     "created_at", "decided_at",
 ]
+# ყოფილი Slack "შეხვედრები" (meetings/viewings) ფორმის სვეტები
+MEETINGS_HEADERS = [
+    "meeting_id", "timestamp", "owner_phone", "myhome_link", "myhome_id",
+    "ssge_link", "ssge_id", "condition", "client_phone", "district",
+    "address", "meeting_date", "agent_id", "agent_name", "price",
+    "percent", "time", "internal_number", "agent_phone", "team_leader",
+]
 
 
 def _get_client():
@@ -130,6 +137,16 @@ def ensure_sheets():
                 ws4.resize(cols=len(DAYOFF_HEADERS))
             ws4.update("A1", [DAYOFF_HEADERS])
 
+    if config.MEETINGS_SHEET_NAME not in existing:
+        ws5 = ss.add_worksheet(config.MEETINGS_SHEET_NAME, rows=1000, cols=len(MEETINGS_HEADERS))
+        ws5.append_row(MEETINGS_HEADERS)
+    else:
+        ws5 = existing[config.MEETINGS_SHEET_NAME]
+        if ws5.row_values(1) != MEETINGS_HEADERS:
+            if ws5.col_count < len(MEETINGS_HEADERS):
+                ws5.resize(cols=len(MEETINGS_HEADERS))
+            ws5.update("A1", [MEETINGS_HEADERS])
+
 
 def _agents_ws():
     return _get_spreadsheet().worksheet(config.AGENTS_SHEET_NAME)
@@ -145,6 +162,10 @@ def _reports_ws():
 
 def _dayoff_ws():
     return _get_spreadsheet().worksheet(config.DAYOFF_SHEET_NAME)
+
+
+def _meetings_ws():
+    return _get_spreadsheet().worksheet(config.MEETINGS_SHEET_NAME)
 
 
 def _now():
@@ -366,14 +387,15 @@ def get_reports(agent_id: str | None = None, client_phone: str | None = None) ->
 
 
 def get_client_history(client_phone: str) -> dict:
-    """ერთი კლიენტის მთელი ისტორია — დავალებები + აგენტის რეპორტები."""
+    """ერთი კლიენტის მთელი ისტორია — დავალებები + აგენტის რეპორტები + შეხვედრები."""
     needle = client_phone.strip().lstrip("+")
     tasks = [
         t for t in get_tasks()
         if str(t.get("client_phone", "")).strip().lstrip("+") == needle
     ]
     reports = get_reports(client_phone=client_phone)
-    return {"tasks": tasks, "reports": reports}
+    meetings = get_meetings(client_phone=client_phone)
+    return {"tasks": tasks, "reports": reports, "meetings": meetings}
 
 
 # ---------- Day off მოთხოვნები ----------
@@ -405,3 +427,38 @@ def decide_dayoff(request_id: str, status: str) -> dict | None:
         ws.update_cell(cell.row, DAYOFF_HEADERS.index("decided_at") + 1, _now())
         row = ws.row_values(cell.row)
         return dict(zip(DAYOFF_HEADERS, row))
+
+
+# ---------- შეხვედრები (ყოფილი "შეხვედრები" Google Form) ----------
+
+def create_meeting(fields: dict) -> str:
+    """
+    fields უნდა შეიცავდეს MEETINGS_HEADERS-ის ყველა სვეტს, გარდა
+    meeting_id და timestamp-ისა (ეს ავტომატურად ივსება).
+    """
+    with _lock:
+        meeting_id = uuid.uuid4().hex[:8]
+        row = []
+        for h in MEETINGS_HEADERS:
+            if h == "meeting_id":
+                row.append(meeting_id)
+            elif h == "timestamp":
+                row.append(_now())
+            else:
+                row.append(fields.get(h, ""))
+        _meetings_ws().append_row(row)
+        return meeting_id
+
+
+def get_meetings(agent_id: str | None = None, client_phone: str | None = None) -> list[dict]:
+    with _lock:
+        rows = _meetings_ws().get_all_records()
+    if agent_id:
+        rows = [r for r in rows if str(r.get("agent_id")) == str(agent_id)]
+    if client_phone:
+        needle = client_phone.strip().lstrip("+")
+        rows = [
+            r for r in rows
+            if str(r.get("client_phone", "")).strip().lstrip("+") == needle
+        ]
+    return rows
