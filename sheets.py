@@ -41,7 +41,7 @@ _sheet = None
 
 AGENTS_HEADERS = [
     "agent_id", "name", "phone", "telegram_username",
-    "telegram_chat_id", "active", "registered_at",
+    "telegram_chat_id", "active", "registered_at", "team",
 ]
 TASKS_HEADERS = [
     "task_id", "title", "description", "assigned_to", "status",
@@ -74,6 +74,7 @@ SCHEDULE_HEADERS = ["agent_id"] + WEEKDAY_KEYS + ["updated_at"]
 # დღიური გამოცხადება/დასრულება (clock-in / clock-out)
 ATTENDANCE_HEADERS = [
     "attendance_id", "agent_id", "date", "mode", "clock_in", "clock_out",
+    "count_submitted",
 ]
 
 # გაფრთხილებები (დაგვიანებული/გამოტოვებული ანგარიში, დაგვიანება,
@@ -120,6 +121,8 @@ def ensure_sheets():
     else:
         ws = existing[config.AGENTS_SHEET_NAME]
         if ws.row_values(1) != AGENTS_HEADERS:
+            if ws.col_count < len(AGENTS_HEADERS):
+                ws.resize(cols=len(AGENTS_HEADERS))
             ws.update("A1", [AGENTS_HEADERS])
 
     if config.TASKS_SHEET_NAME not in existing:
@@ -262,14 +265,24 @@ def register_agent_chat_id(agent_id: str, chat_id: int, username: str):
         return True
 
 
-def add_agent(name: str, phone: str) -> str:
+def add_agent(name: str, phone: str, team: str = "") -> str:
     """ადმინი ამატებს ახალ აგენტს (ტელეფონით). აბრუნებს agent_id-ს."""
     with _lock:
         agent_id = uuid.uuid4().hex[:8]
         _agents_ws().append_row([
-            agent_id, name, phone, "", "", "yes", _now(),
+            agent_id, name, phone, "", "", "yes", _now(), team,
         ])
         return agent_id
+
+
+def set_agent_team(agent_id: str, team: str) -> bool:
+    with _lock:
+        ws = _agents_ws()
+        cell = ws.find(agent_id, in_column=1)
+        if not cell:
+            return False
+        ws.update_cell(cell.row, AGENTS_HEADERS.index("team") + 1, team)
+        return True
 
 
 def set_agent_active(agent_id: str, value: str) -> bool:
@@ -584,7 +597,7 @@ def clock_in(agent_id: str) -> str:
                 return "ok"
         mode = get_today_mode(agent_id)
         attendance_id = uuid.uuid4().hex[:8]
-        ws.append_row([attendance_id, agent_id, today, mode, _now(), ""])
+        ws.append_row([attendance_id, agent_id, today, mode, _now(), "", ""])
         return "ok"
 
 
@@ -611,6 +624,28 @@ def get_today_attendance(agent_id: str) -> dict | None:
         if str(r.get("agent_id")) == str(agent_id) and str(r.get("date")) == today:
             return r
     return None
+
+
+def set_daily_count(agent_id: str, count: int) -> bool:
+    """ინახავს დღეს შეყვანილი განცხადებების რაოდენობას (ყოფილი
+    "ანგარიშფაქტურა" ფორმის "შეყვანილი რაოდენობა"). აგენტს უნდა ჰქონდეს
+    დღეს უკვე დაწყებული (/clockin) — მისი სტრიქონი Attendance-ში."""
+    today = _today_str()
+    with _lock:
+        ws = _attendance_ws()
+        records = ws.get_all_records()
+        for idx, r in enumerate(records, start=2):
+            if str(r.get("agent_id")) == str(agent_id) and str(r.get("date")) == today:
+                ws.update_cell(idx, ATTENDANCE_HEADERS.index("count_submitted") + 1, count)
+                return True
+        return False
+
+
+def get_today_attendance_all() -> list[dict]:
+    today = _today_str()
+    with _lock:
+        rows = _attendance_ws().get_all_records()
+    return [r for r in rows if str(r.get("date")) == today]
 
 
 def is_clocked_in_today(agent_id: str) -> bool:

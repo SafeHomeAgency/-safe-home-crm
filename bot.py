@@ -40,15 +40,17 @@ log = logging.getLogger("safehome-crm-bot")
     NL_LISTING_AGENT, NL_LISTING_ID, NL_LISTING_PHONE, NL_LISTING_TIME,
 ) = range(8)
 # ---- /addagent საუბრის საფეხურები ----
-AA_NAME, AA_PHONE = range(8, 10)
+AA_NAME, AA_PHONE, AA_TEAM = range(8, 11)
 # ---- /clientreport (ყოფილი "AgentReports" ფორმა) საუბრის საფეხურები ----
-RP_PHONE, RP_ACTIONS, RP_NOTES = range(10, 13)
+RP_PHONE, RP_ACTIONS, RP_NOTES = range(11, 14)
 # ---- /dayoff საუბრის საფეხურები ----
-DO_DATE, DO_REASON = range(13, 15)
+DO_DATE, DO_REASON = range(14, 16)
 # ---- /meeting (ყოფილი "შეხვედრები" ფორმა) — ერთი state, სვეტების ჯაჭვით ----
-(MT_FIELD,) = range(15, 16)
+(MT_FIELD,) = range(16, 17)
 # ---- /setschedule (admin) საუბრის საფეხურები ----
-SC_AGENT, SC_DAY = range(16, 18)
+SC_AGENT, SC_DAY = range(17, 19)
+# ---- /clockout (agent) — დღიური რაოდენობის კითხვა ----
+(CO_COUNT,) = range(19, 20)
 
 PRIORITY_LABELS = ("დაბალი", "საშუალო", "მაღალი")
 
@@ -120,7 +122,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "/setschedule — აგენტის კვირის გრაფიკის დაყენება\n"
             "/schedule — დღევანდელი გამოცხადების სტატუსი ყველაზე\n"
             "/warnings — გაფრთხილებები (ბოლო 30 დღე)\n"
-            "/reactivate <agent_id> — გამორთული აგენტის დაბრუნება"
+            "/reactivate <agent_id> — გამორთული აგენტის დაბრუნება\n"
+            "/setteam <agent_id> <თიმლიდერი> — აგენტის თიმის დაყენება"
         )
         return
 
@@ -248,9 +251,17 @@ async def addagent_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def addagent_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    phone = update.message.text.strip()
+    context.user_data["aa_phone"] = update.message.text.strip()
+    await update.message.reply_text("თიმლიდერი/გუნდი? (თუ არ არის — დაწერეთ „-“)")
+    return AA_TEAM
+
+
+async def addagent_team(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    team_raw = update.message.text.strip()
+    team = "" if team_raw == "-" else team_raw
     name = context.user_data.pop("aa_name")
-    agent_id = sheets.add_agent(name, phone)
+    phone = context.user_data.pop("aa_phone")
+    agent_id = sheets.add_agent(name, phone, team=team)
     await update.message.reply_text(
         f"დამატებულია: {name} ({phone}), agent_id={agent_id}.\n"
         f"აგენტმა უნდა დაწეროს ბოტს /start და გაუზიაროს ნომერი."
@@ -758,7 +769,9 @@ async def myschedule(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if att and att.get("clock_in") and not att.get("clock_out"):
         lines.append(f"✅ დღეს გამოცხადებული ხართ — დაწყება: {att['clock_in']}")
     elif att and att.get("clock_out"):
-        lines.append(f"დღეს დასრულებულია — {att['clock_in']} → {att['clock_out']}")
+        count = att.get("count_submitted")
+        count_str = f" | შეყვანილია: {count}" if count not in (None, "") else ""
+        lines.append(f"დღეს დასრულებულია — {att['clock_in']} → {att['clock_out']}{count_str}")
     else:
         lines.append("⏳ დღეს ჯერ არ დაგირეგისტრირებიათ დაწყება — /clockin")
     await update.message.reply_text("\n".join(lines))
@@ -784,15 +797,57 @@ async def clockin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def clockout_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """ყოფილი "ანგარიშფაქტურა" ფორმის ჩამნაცვლებელი: სამუშაო დღის
+    დასრულებისას (მოსვლის/წასვლის დრო უკვე /clockin-/clockout-ითაა
+    ცნობილი) ერთადერთი დამატებითი კითხვა — რამდენი განცხადება
+    შეიყვანა დღეს."""
     agent = sheets.find_agent_by_chat_id(update.effective_chat.id)
     if not agent:
         await update.message.reply_text("ჯერ დარეგისტრირდით — გამოიყენეთ /start.")
-        return
-    result = sheets.clock_out(agent["agent_id"])
-    if result == "not_in":
+        return ConversationHandler.END
+    att = sheets.get_today_attendance(agent["agent_id"])
+    if not att or not att.get("clock_in"):
         await update.message.reply_text("დღეს ჯერ არ დაგირეგისტრირებიათ დაწყება (/clockin).")
-    else:
-        await update.message.reply_text("✅ სამუშაო დღე დასრულებულია. კარგად დაისვენეთ!")
+        return ConversationHandler.END
+    if att.get("clock_out"):
+        await update.message.reply_text("დღეს უკვე დასრულებული გაქვთ.")
+        return ConversationHandler.END
+    context.user_data["co_agent"] = agent
+    await update.message.reply_text("რამდენი განცხადება შეიყვანეთ/დაამუშავეთ დღეს? (მხოლოდ რიცხვი, მაგ. 20)")
+    return CO_COUNT
+
+
+async def clockout_count(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text.strip()
+    try:
+        count = int(text)
+    except ValueError:
+        await update.message.reply_text("გთხოვთ, დაწერეთ მხოლოდ რიცხვი (მაგ. 20 ან 0).")
+        return CO_COUNT
+
+    agent = context.user_data.pop("co_agent")
+    agent_id = agent["agent_id"]
+    sheets.clock_out(agent_id)
+    sheets.set_daily_count(agent_id, count)
+
+    mode = sheets.get_today_mode(agent_id)
+    note = ""
+    if mode == "online" and count < config.ONLINE_DAILY_QUOTA:
+        note = f"\n\n⚠️ დღევანდელი გეგმა ({config.ONLINE_DAILY_QUOTA}) ვერ შესრულდა — ეცნობებათ მენეჯერს."
+        for admin_id in config.ADMIN_CHAT_IDS:
+            try:
+                await context.bot.send_message(
+                    chat_id=admin_id,
+                    text=(
+                        f"📉 {agent['name']}-მა დღეს ონლაინ გეგმა ვერ შეასრულა: "
+                        f"{count}/{config.ONLINE_DAILY_QUOTA}"
+                    ),
+                )
+            except Exception:
+                log.exception("გეგმის შეტყობინება ვერ გაეგზავნა admin=%s", admin_id)
+
+    await update.message.reply_text(f"✅ სამუშაო დღე დასრულებულია. შეყვანილია: {count}.{note}")
+    return ConversationHandler.END
 
 
 async def schedule_today(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -812,7 +867,9 @@ async def schedule_today(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if att and att.get("clock_in") and not att.get("clock_out"):
             status = f"✅ გამოცხადებული ({att['clock_in']})"
         elif att and att.get("clock_out"):
-            status = f"დასრულებული ({att['clock_in']} → {att['clock_out']})"
+            count = att.get("count_submitted")
+            count_str = f", განცხადება: {count}" if count not in (None, "") else ""
+            status = f"დასრულებული ({att['clock_in']} → {att['clock_out']}{count_str})"
         else:
             status = "⏳ ჯერ არ გამოცხადებულა"
         lines.append(f"• {a['name']}: {SCHEDULE_MODE_LABELS.get(mode, mode)} — {status}")
@@ -862,6 +919,21 @@ async def reactivate_agent(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"✅ აგენტი {agent_id} ისევ აქტიურია.")
     else:
         await update.message.reply_text("ასეთი agent_id ვერ ვიპოვე.")
+
+
+async def setteam_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_chat.id):
+        return
+    if len(context.args) < 2:
+        await update.message.reply_text("გამოყენება: /setteam <agent_id> <თიმლიდერის სახელი>")
+        return
+    agent_id = context.args[0]
+    team = " ".join(context.args[1:])
+    ok = sheets.set_agent_team(agent_id, team)
+    if ok:
+        await update.message.reply_text(f"✅ თიმი განახლდა: {team}")
+    else:
+        await update.message.reply_text("ასეთი agent_id ვერ ვიპოვე. სია: /agents")
 
 
 # --------------------------------------------------------- /findclient (admin)
@@ -933,9 +1005,19 @@ def _build_report_text() -> str:
     meetings_today = [m for m in sheets.get_meetings() if str(m.get("timestamp", "")).startswith(today_str)]
     pending_dayoffs = sheets.get_dayoff_requests(status="pending")
     warnings_today = [w for w in sheets.get_warnings() if str(w.get("created_at", "")).startswith(today_str)]
+    att_today = [a for a in sheets.get_today_attendance_all() if a.get("count_submitted") not in (None, "")]
     lines.append("")
     lines.append(f"დღეს შემოსული კლიენტის რეპორტები: {len(reports_today)}")
     lines.append(f"დღეს დარეგისტრირებული შეხვედრები: {len(meetings_today)}")
+    if att_today:
+        agents_by_id = {a["agent_id"]: a["name"] for a in sheets.get_agents()}
+        total = sum(int(a["count_submitted"]) for a in att_today if str(a["count_submitted"]).isdigit())
+        lines.append(f"დღეს შეყვანილი განცხადებები (დასრულებულებზე): სულ {total}")
+        short = [a for a in att_today if str(a.get("count_submitted", "")).isdigit()
+                 and int(a["count_submitted"]) < config.ONLINE_DAILY_QUOTA]
+        if short:
+            names = ", ".join(agents_by_id.get(a["agent_id"], a["agent_id"]) for a in short)
+            lines.append(f"   გეგმის ({config.ONLINE_DAILY_QUOTA}) ქვემოთ: {names}")
     if pending_dayoffs:
         lines.append(f"⏳ დასამტკიცებელი Day off მოთხოვნები: {len(pending_dayoffs)} (/dayoffs)")
     if warnings_today:
@@ -1158,10 +1240,10 @@ def main():
     app.add_handler(CommandHandler("meetings", meetings_list))
     app.add_handler(CommandHandler("myschedule", myschedule))
     app.add_handler(CommandHandler("clockin", clockin_cmd))
-    app.add_handler(CommandHandler("clockout", clockout_cmd))
     app.add_handler(CommandHandler("schedule", schedule_today))
     app.add_handler(CommandHandler("warnings", warnings_list))
     app.add_handler(CommandHandler("reactivate", reactivate_agent))
+    app.add_handler(CommandHandler("setteam", setteam_cmd))
     app.add_handler(CallbackQueryHandler(dayoff_decide, pattern=r"^do_(ok|no):"))
 
     app.add_handler(ConversationHandler(
@@ -1169,6 +1251,7 @@ def main():
         states={
             AA_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, addagent_name)],
             AA_PHONE: [MessageHandler(filters.TEXT & ~filters.COMMAND, addagent_phone)],
+            AA_TEAM: [MessageHandler(filters.TEXT & ~filters.COMMAND, addagent_team)],
         },
         fallbacks=[CommandHandler("cancel", cancel), MessageHandler(filters.COMMAND, busy_fallback)],
     ))
@@ -1227,6 +1310,14 @@ def main():
         states={
             SC_AGENT: [CallbackQueryHandler(setschedule_agent, pattern=r"^sc_agent:")],
             SC_DAY: [CallbackQueryHandler(setschedule_day, pattern=r"^sc_mode:")],
+        },
+        fallbacks=[CommandHandler("cancel", cancel), MessageHandler(filters.COMMAND, busy_fallback)],
+    ))
+
+    app.add_handler(ConversationHandler(
+        entry_points=[CommandHandler("clockout", clockout_cmd)],
+        states={
+            CO_COUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, clockout_count)],
         },
         fallbacks=[CommandHandler("cancel", cancel), MessageHandler(filters.COMMAND, busy_fallback)],
     ))

@@ -48,6 +48,8 @@ WARNING_WINDOW_DAYS = int(os.environ.get("WARNING_WINDOW_DAYS", "30"))
 REPORT_DEADLINE_HOUR = int(os.environ.get("REPORT_DEADLINE_HOUR", "22"))
 # რამდენი წუთის დაგვიანება ითვლება ჯერ კიდევ დასაშვებად (ოფისის ცვლაზე)
 ATTENDANCE_GRACE_MINUTES = int(os.environ.get("ATTENDANCE_GRACE_MINUTES", "15"))
+# დღიური გეგმა (განცხადებების რაოდენობა) ონლაინ დღეზე მყოფი აგენტისთვის
+ONLINE_DAILY_QUOTA = int(os.environ.get("ONLINE_DAILY_QUOTA", "20"))
 
 
 def validate():
