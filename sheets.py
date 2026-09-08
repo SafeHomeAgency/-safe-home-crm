@@ -65,6 +65,21 @@ MEETINGS_HEADERS = [
     "percent", "time", "internal_number", "agent_phone", "team_leader",
 ]
 
+WEEKDAY_KEYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
+# ერთი სტრიქონი ერთ აგენტზე — კვირის განმეორებადი გრაფიკი (ყოფილი
+# "პირბადული ცხრილი"). მნიშვნელობები: off / office_morning /
+# office_evening / online.
+SCHEDULE_HEADERS = ["agent_id"] + WEEKDAY_KEYS + ["updated_at"]
+
+# დღიური გამოცხადება/დასრულება (clock-in / clock-out)
+ATTENDANCE_HEADERS = [
+    "attendance_id", "agent_id", "date", "mode", "clock_in", "clock_out",
+]
+
+# გაფრთხილებები (დაგვიანებული/გამოტოვებული ანგარიში, დაგვიანება,
+# არ-გამოცხადება). ტიპები: late_report / late_arrival / no_show
+WARNINGS_HEADERS = ["warning_id", "agent_id", "type", "detail", "created_at"]
+
 
 def _get_client():
     """
@@ -147,6 +162,36 @@ def ensure_sheets():
                 ws5.resize(cols=len(MEETINGS_HEADERS))
             ws5.update("A1", [MEETINGS_HEADERS])
 
+    if config.SCHEDULE_SHEET_NAME not in existing:
+        ws6 = ss.add_worksheet(config.SCHEDULE_SHEET_NAME, rows=200, cols=len(SCHEDULE_HEADERS))
+        ws6.append_row(SCHEDULE_HEADERS)
+    else:
+        ws6 = existing[config.SCHEDULE_SHEET_NAME]
+        if ws6.row_values(1) != SCHEDULE_HEADERS:
+            if ws6.col_count < len(SCHEDULE_HEADERS):
+                ws6.resize(cols=len(SCHEDULE_HEADERS))
+            ws6.update("A1", [SCHEDULE_HEADERS])
+
+    if config.ATTENDANCE_SHEET_NAME not in existing:
+        ws7 = ss.add_worksheet(config.ATTENDANCE_SHEET_NAME, rows=2000, cols=len(ATTENDANCE_HEADERS))
+        ws7.append_row(ATTENDANCE_HEADERS)
+    else:
+        ws7 = existing[config.ATTENDANCE_SHEET_NAME]
+        if ws7.row_values(1) != ATTENDANCE_HEADERS:
+            if ws7.col_count < len(ATTENDANCE_HEADERS):
+                ws7.resize(cols=len(ATTENDANCE_HEADERS))
+            ws7.update("A1", [ATTENDANCE_HEADERS])
+
+    if config.WARNINGS_SHEET_NAME not in existing:
+        ws8 = ss.add_worksheet(config.WARNINGS_SHEET_NAME, rows=500, cols=len(WARNINGS_HEADERS))
+        ws8.append_row(WARNINGS_HEADERS)
+    else:
+        ws8 = existing[config.WARNINGS_SHEET_NAME]
+        if ws8.row_values(1) != WARNINGS_HEADERS:
+            if ws8.col_count < len(WARNINGS_HEADERS):
+                ws8.resize(cols=len(WARNINGS_HEADERS))
+            ws8.update("A1", [WARNINGS_HEADERS])
+
 
 def _agents_ws():
     return _get_spreadsheet().worksheet(config.AGENTS_SHEET_NAME)
@@ -166,6 +211,18 @@ def _dayoff_ws():
 
 def _meetings_ws():
     return _get_spreadsheet().worksheet(config.MEETINGS_SHEET_NAME)
+
+
+def _schedule_ws():
+    return _get_spreadsheet().worksheet(config.SCHEDULE_SHEET_NAME)
+
+
+def _attendance_ws():
+    return _get_spreadsheet().worksheet(config.ATTENDANCE_SHEET_NAME)
+
+
+def _warnings_ws():
+    return _get_spreadsheet().worksheet(config.WARNINGS_SHEET_NAME)
 
 
 def _now():
@@ -213,6 +270,16 @@ def add_agent(name: str, phone: str) -> str:
             agent_id, name, phone, "", "", "yes", _now(),
         ])
         return agent_id
+
+
+def set_agent_active(agent_id: str, value: str) -> bool:
+    with _lock:
+        ws = _agents_ws()
+        cell = ws.find(agent_id, in_column=1)
+        if not cell:
+            return False
+        ws.update_cell(cell.row, AGENTS_HEADERS.index("active") + 1, value)
+        return True
 
 
 # ---------- Tasks ----------
@@ -329,12 +396,15 @@ def pick_agent_for_priority(priority: str, days: int = 30) -> str | None:
 
     გასათვალისწინებელია მხოლოდ აქტიური და უკვე Telegram-ში
     დარეგისტრირებული აგენტები (წინააღმდეგ შემთხვევაში შეტყობინებას ვერ
-    მიიღებდნენ).
+    მიიღებდნენ), და — თუ მათთვის გრაფიკი (/setschedule) დაყენებულია —
+    მხოლოდ ისინი, ვინც დღეს გრაფიკითაა გათვალისწინებული და უკვე
+    დააჭირა /clockin-ს (წინააღმდეგ შემთხვევაში კლიენტი არ ერგებათ).
     """
     agents = [
         a for a in get_agents()
         if str(a.get("active", "")).strip().lower() != "no"
         and str(a.get("telegram_chat_id", "")).strip()
+        and agent_available_now(a["agent_id"])
     ]
     if not agents:
         return None
@@ -462,3 +532,147 @@ def get_meetings(agent_id: str | None = None, client_phone: str | None = None) -
             if str(r.get("client_phone", "")).strip().lstrip("+") == needle
         ]
     return rows
+
+
+# ---------- გრაფიკი (ყოფილი "პირბადული ცხრილი") + გამოცხადება ----------
+
+def _today_str() -> str:
+    return datetime.datetime.now().strftime("%Y-%m-%d")
+
+
+def set_agent_schedule(agent_id: str, pattern: dict) -> None:
+    """pattern: {"mon": "office_morning", ...}. გამოტოვებული დღე = 'off'."""
+    with _lock:
+        ws = _schedule_ws()
+        cell = ws.find(agent_id, in_column=1)
+        row = [agent_id] + [pattern.get(k, "off") for k in WEEKDAY_KEYS] + [_now()]
+        if cell:
+            ws.update(f"A{cell.row}", [row])
+        else:
+            ws.append_row(row)
+
+
+def get_agent_schedule(agent_id: str) -> dict | None:
+    with _lock:
+        rows = _schedule_ws().get_all_records()
+    for r in rows:
+        if str(r.get("agent_id")) == str(agent_id):
+            return r
+    return None
+
+
+def get_today_mode(agent_id: str) -> str:
+    """თუ გრაფიკი საერთოდ არ არის დაყენებული, ითვლება 'off'-ად."""
+    sched = get_agent_schedule(agent_id)
+    if not sched:
+        return "off"
+    key = WEEKDAY_KEYS[datetime.datetime.now().weekday()]
+    return str(sched.get(key) or "off")
+
+
+def clock_in(agent_id: str) -> str:
+    """აბრუნებს 'ok' / 'already'."""
+    with _lock:
+        ws = _attendance_ws()
+        today = _today_str()
+        records = ws.get_all_records()
+        for idx, r in enumerate(records, start=2):
+            if str(r.get("agent_id")) == str(agent_id) and str(r.get("date")) == today:
+                if r.get("clock_in"):
+                    return "already"
+                ws.update_cell(idx, ATTENDANCE_HEADERS.index("clock_in") + 1, _now())
+                return "ok"
+        mode = get_today_mode(agent_id)
+        attendance_id = uuid.uuid4().hex[:8]
+        ws.append_row([attendance_id, agent_id, today, mode, _now(), ""])
+        return "ok"
+
+
+def clock_out(agent_id: str) -> str:
+    """აბრუნებს 'ok' / 'not_in' (ჯერ არ დაწყებულა)."""
+    with _lock:
+        ws = _attendance_ws()
+        today = _today_str()
+        records = ws.get_all_records()
+        for idx, r in enumerate(records, start=2):
+            if str(r.get("agent_id")) == str(agent_id) and str(r.get("date")) == today:
+                if not r.get("clock_in"):
+                    return "not_in"
+                ws.update_cell(idx, ATTENDANCE_HEADERS.index("clock_out") + 1, _now())
+                return "ok"
+        return "not_in"
+
+
+def get_today_attendance(agent_id: str) -> dict | None:
+    today = _today_str()
+    with _lock:
+        rows = _attendance_ws().get_all_records()
+    for r in rows:
+        if str(r.get("agent_id")) == str(agent_id) and str(r.get("date")) == today:
+            return r
+    return None
+
+
+def is_clocked_in_today(agent_id: str) -> bool:
+    r = get_today_attendance(agent_id)
+    return bool(r and r.get("clock_in") and not r.get("clock_out"))
+
+
+def agent_available_now(agent_id: str) -> bool:
+    """
+    გრაფიკის მიხედვით, ხელმისაწვდომია თუ არა აგენტი ახალი კლიენტის
+    მისაღებად ახლავე. თუ გრაფიკი საერთოდ არ არის დაყენებული ამ
+    აგენტისთვის — ძველებურად ხელმისაწვდომია (უკან-თავსებადობისთვის,
+    სანამ ადმინი /setschedule-ს არ გაუშვებს).
+    """
+    sched = get_agent_schedule(agent_id)
+    if not sched:
+        return True
+    mode = str(sched.get(WEEKDAY_KEYS[datetime.datetime.now().weekday()]) or "off")
+    if mode == "off":
+        return False
+    return is_clocked_in_today(agent_id)
+
+
+# ---------- გაფრთხილებები ----------
+
+def has_warning_today(agent_id: str, type_: str) -> bool:
+    today = _today_str()
+    with _lock:
+        rows = _warnings_ws().get_all_records()
+    return any(
+        str(r.get("agent_id")) == str(agent_id)
+        and r.get("type") == type_
+        and str(r.get("created_at", "")).startswith(today)
+        for r in rows
+    )
+
+
+def get_warnings(agent_id: str | None = None, days: int | None = None) -> list[dict]:
+    with _lock:
+        rows = _warnings_ws().get_all_records()
+    if agent_id:
+        rows = [r for r in rows if str(r.get("agent_id")) == str(agent_id)]
+    if days:
+        cutoff = datetime.datetime.now() - datetime.timedelta(days=days)
+        rows = [r for r in rows if (_parse_dt(r.get("created_at", "")) or cutoff) >= cutoff]
+    return rows
+
+
+def add_warning(agent_id: str, type_: str, detail: str = "") -> dict:
+    """
+    სვამს ახალ გაფრთხილებას და ამოწმებს ბოლო WARNING_WINDOW_DAYS დღეში
+    ჯამურ რაოდენობას — თუ WARNING_LIMIT-ს მიაღწია, აგენტი ავტომატურად
+    გამოირთვება (active=no).
+    აბრუნებს: {"warning_id", "count", "deactivated": bool}
+    """
+    with _lock:
+        warning_id = uuid.uuid4().hex[:8]
+        _warnings_ws().append_row([warning_id, agent_id, type_, detail, _now()])
+
+    count = len(get_warnings(agent_id=agent_id, days=config.WARNING_WINDOW_DAYS))
+    deactivated = False
+    if count >= config.WARNING_LIMIT:
+        set_agent_active(agent_id, "no")
+        deactivated = True
+    return {"warning_id": warning_id, "count": count, "deactivated": deactivated}

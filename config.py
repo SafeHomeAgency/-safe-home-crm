@@ -37,6 +37,17 @@ TASKS_SHEET_NAME = "Tasks"
 REPORTS_SHEET_NAME = "Reports"
 DAYOFF_SHEET_NAME = "DayOff"
 MEETINGS_SHEET_NAME = "Meetings"
+SCHEDULE_SHEET_NAME = "Schedule"
+ATTENDANCE_SHEET_NAME = "Attendance"
+WARNINGS_SHEET_NAME = "Warnings"
+
+# რამდენი გაფრთხილების მერე ითიშება აგენტი ავტომატურად (30-დღიან ფანჯარაში)
+WARNING_LIMIT = int(os.environ.get("WARNING_LIMIT", "4"))
+WARNING_WINDOW_DAYS = int(os.environ.get("WARNING_WINDOW_DAYS", "30"))
+# რომელ საათზე მოწმდება დღიური ანგარიშის/გამოცხადების შესრულება
+REPORT_DEADLINE_HOUR = int(os.environ.get("REPORT_DEADLINE_HOUR", "22"))
+# რამდენი წუთის დაგვიანება ითვლება ჯერ კიდევ დასაშვებად (ოფისის ცვლაზე)
+ATTENDANCE_GRACE_MINUTES = int(os.environ.get("ATTENDANCE_GRACE_MINUTES", "15"))
 
 
 def validate():

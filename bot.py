@@ -12,7 +12,9 @@ Safe Home Agency — აგენტების ტასკ-მენეჯმ
 
 from __future__ import annotations
 
+import datetime
 import logging
+from zoneinfo import ZoneInfo
 
 from telegram import (
     ReplyKeyboardMarkup, ReplyKeyboardRemove, KeyboardButton,
@@ -45,8 +47,22 @@ RP_PHONE, RP_ACTIONS, RP_NOTES = range(10, 13)
 DO_DATE, DO_REASON = range(13, 15)
 # ---- /meeting (ყოფილი "შეხვედრები" ფორმა) — ერთი state, სვეტების ჯაჭვით ----
 (MT_FIELD,) = range(15, 16)
+# ---- /setschedule (admin) საუბრის საფეხურები ----
+SC_AGENT, SC_DAY = range(16, 18)
 
 PRIORITY_LABELS = ("დაბალი", "საშუალო", "მაღალი")
+
+WEEKDAY_LABELS = [
+    ("mon", "ორშაბათი"), ("tue", "სამშაბათი"), ("wed", "ოთხშაბათი"),
+    ("thu", "ხუთშაბათი"), ("fri", "პარასკევი"), ("sat", "შაბათი"), ("sun", "კვირა"),
+]
+SCHEDULE_MODES = [
+    ("off", "დასვენება"),
+    ("office_morning", "ოფისი 10:00–16:00"),
+    ("office_evening", "ოფისი 16:00–22:00"),
+    ("online", "ონლაინ (სახლიდან)"),
+]
+SCHEDULE_MODE_LABELS = dict(SCHEDULE_MODES)
 
 # შეგიძლიათ თავისუფლად შეცვალოთ/დაამატოთ პუნქტები, რომ ზუსტად თქვენი
 # ძველი "AgentReports" ფორმის checkbox-ებს დაემთხვეს.
@@ -100,7 +116,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "/ranking — აგენტების რეიტინგი (ბოლო 30 დღე)\n"
             "/findclient <ტელეფონი> — კლიენტის სრული ისტორია\n"
             "/dayoffs — დასამტკიცებელი Day off მოთხოვნები\n"
-            "/meetings — ბოლო დარეგისტრირებული შეხვედრები"
+            "/meetings — ბოლო დარეგისტრირებული შეხვედრები\n"
+            "/setschedule — აგენტის კვირის გრაფიკის დაყენება\n"
+            "/schedule — დღევანდელი გამოცხადების სტატუსი ყველაზე\n"
+            "/warnings — გაფრთხილებები (ბოლო 30 დღე)\n"
+            "/reactivate <agent_id> — გამორთული აგენტის დაბრუნება"
         )
         return
 
@@ -111,7 +131,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "/mytasks — შენი დავალებები\n"
             "/clientreport — კლიენტთან შესრულებული სამუშაოს რეპორტი\n"
             "/meeting — შეხვედრის/ნახვის მონაცემების დარეგისტრირება\n"
-            "/dayoff — დასვენების დღის მოთხოვნა"
+            "/dayoff — დასვენების დღის მოთხოვნა\n"
+            "/myschedule — შენი კვირის გრაფიკი\n"
+            "/clockin — სამუშაო დღის დაწყება\n"
+            "/clockout — სამუშაო დღის დასრულება"
         )
         return
 
@@ -650,6 +673,197 @@ async def meetings_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("\n\n".join(lines))
 
 
+# ------------------------------------------------- /setschedule (admin) — ყოფილი "პირბადული ცხრილი"
+async def setschedule_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_chat.id):
+        return ConversationHandler.END
+    agents = sheets.get_agents()
+    if not agents:
+        await update.message.reply_text("აგენტები არ არსებობს. ჯერ დაამატეთ /addagent-ით.")
+        return ConversationHandler.END
+    buttons = [
+        [InlineKeyboardButton(a["name"], callback_data=f"sc_agent:{a['agent_id']}")]
+        for a in agents
+    ]
+    await update.message.reply_text(
+        "რომელი აგენტის გრაფიკს ვსვამთ?", reply_markup=InlineKeyboardMarkup(buttons)
+    )
+    return SC_AGENT
+
+
+def _schedule_mode_keyboard() -> InlineKeyboardMarkup:
+    rows = [[InlineKeyboardButton(label, callback_data=f"sc_mode:{key}")] for key, label in SCHEDULE_MODES]
+    return InlineKeyboardMarkup(rows)
+
+
+async def setschedule_agent(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    agent_id = query.data.split(":", 1)[1]
+    agent_name = next((a["name"] for a in sheets.get_agents() if a["agent_id"] == agent_id), agent_id)
+    context.user_data["sc_agent_id"] = agent_id
+    context.user_data["sc_agent_name"] = agent_name
+    context.user_data["sc_pattern"] = {}
+    context.user_data["sc_idx"] = 0
+    day_label = WEEKDAY_LABELS[0][1]
+    await query.edit_message_text(
+        f"{agent_name} — გრაფიკი.\n\n{day_label}?", reply_markup=_schedule_mode_keyboard()
+    )
+    return SC_DAY
+
+
+async def setschedule_day(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    mode = query.data.split(":", 1)[1]
+    idx = context.user_data.get("sc_idx", 0)
+    day_key, _ = WEEKDAY_LABELS[idx]
+    context.user_data["sc_pattern"][day_key] = mode
+    idx += 1
+    context.user_data["sc_idx"] = idx
+
+    if idx < len(WEEKDAY_LABELS):
+        day_label = WEEKDAY_LABELS[idx][1]
+        await query.edit_message_text(f"{day_label}?", reply_markup=_schedule_mode_keyboard())
+        return SC_DAY
+
+    agent_id = context.user_data["sc_agent_id"]
+    agent_name = context.user_data["sc_agent_name"]
+    pattern = context.user_data["sc_pattern"]
+    sheets.set_agent_schedule(agent_id, pattern)
+
+    summary = "\n".join(
+        f"• {label}: {SCHEDULE_MODE_LABELS.get(pattern.get(key, 'off'), 'დასვენება')}"
+        for key, label in WEEKDAY_LABELS
+    )
+    await query.edit_message_text(f"✅ გრაფიკი შენახულია — {agent_name}:\n{summary}")
+    context.user_data.clear()
+    return ConversationHandler.END
+
+
+async def myschedule(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    agent = sheets.find_agent_by_chat_id(update.effective_chat.id)
+    if not agent:
+        await update.message.reply_text("ჯერ დარეგისტრირდით — გამოიყენეთ /start.")
+        return
+    sched = sheets.get_agent_schedule(agent["agent_id"])
+    if not sched:
+        await update.message.reply_text("თქვენთვის გრაფიკი ჯერ არ დაყენებულა — სთხოვეთ ადმინს /setschedule.")
+        return
+    lines = ["📆 თქვენი კვირის გრაფიკი:", ""]
+    for key, label in WEEKDAY_LABELS:
+        lines.append(f"• {label}: {SCHEDULE_MODE_LABELS.get(sched.get(key, 'off'), 'დასვენება')}")
+    att = sheets.get_today_attendance(agent["agent_id"])
+    lines.append("")
+    if att and att.get("clock_in") and not att.get("clock_out"):
+        lines.append(f"✅ დღეს გამოცხადებული ხართ — დაწყება: {att['clock_in']}")
+    elif att and att.get("clock_out"):
+        lines.append(f"დღეს დასრულებულია — {att['clock_in']} → {att['clock_out']}")
+    else:
+        lines.append("⏳ დღეს ჯერ არ დაგირეგისტრირებიათ დაწყება — /clockin")
+    await update.message.reply_text("\n".join(lines))
+
+
+async def clockin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    agent = sheets.find_agent_by_chat_id(update.effective_chat.id)
+    if not agent:
+        await update.message.reply_text("ჯერ დარეგისტრირდით — გამოიყენეთ /start.")
+        return
+    mode = sheets.get_today_mode(agent["agent_id"])
+    if mode == "off":
+        await update.message.reply_text("დღეს თქვენთვის გრაფიკის მიხედვით დასვენების დღეა.")
+        return
+    result = sheets.clock_in(agent["agent_id"])
+    if result == "already":
+        await update.message.reply_text("დღეს უკვე დარეგისტრირებული გაქვთ დაწყება.")
+    else:
+        await update.message.reply_text(
+            f"✅ სამუშაო დღე დაწყებულია ({SCHEDULE_MODE_LABELS.get(mode, mode)}). "
+            "ახლა შეგიძლიათ მიიღოთ ახალი კლიენტები."
+        )
+
+
+async def clockout_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    agent = sheets.find_agent_by_chat_id(update.effective_chat.id)
+    if not agent:
+        await update.message.reply_text("ჯერ დარეგისტრირდით — გამოიყენეთ /start.")
+        return
+    result = sheets.clock_out(agent["agent_id"])
+    if result == "not_in":
+        await update.message.reply_text("დღეს ჯერ არ დაგირეგისტრირებიათ დაწყება (/clockin).")
+    else:
+        await update.message.reply_text("✅ სამუშაო დღე დასრულებულია. კარგად დაისვენეთ!")
+
+
+async def schedule_today(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_chat.id):
+        return
+    agents = sheets.get_agents()
+    if not agents:
+        await update.message.reply_text("აგენტები არ არსებობს.")
+        return
+    lines = ["📆 დღევანდელი მდგომარეობა:", ""]
+    for a in agents:
+        mode = sheets.get_today_mode(a["agent_id"])
+        if mode == "off":
+            lines.append(f"• {a['name']}: დასვენება")
+            continue
+        att = sheets.get_today_attendance(a["agent_id"])
+        if att and att.get("clock_in") and not att.get("clock_out"):
+            status = f"✅ გამოცხადებული ({att['clock_in']})"
+        elif att and att.get("clock_out"):
+            status = f"დასრულებული ({att['clock_in']} → {att['clock_out']})"
+        else:
+            status = "⏳ ჯერ არ გამოცხადებულა"
+        lines.append(f"• {a['name']}: {SCHEDULE_MODE_LABELS.get(mode, mode)} — {status}")
+    await update.message.reply_text("\n".join(lines))
+
+
+# ----------------------------------------------------------- გაფრთხილებები
+async def warnings_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_chat.id):
+        return
+    rows = sheets.get_warnings(days=config.WARNING_WINDOW_DAYS)
+    if not rows:
+        await update.message.reply_text(f"ბოლო {config.WARNING_WINDOW_DAYS} დღეში გაფრთხილება არ ყოფილა.")
+        return
+    agents_by_id = {a["agent_id"]: a["name"] for a in sheets.get_agents()}
+    by_agent: dict[str, list] = {}
+    for r in rows:
+        by_agent.setdefault(str(r.get("agent_id")), []).append(r)
+
+    lines = [f"⚠️ გაფრთხილებები (ბოლო {config.WARNING_WINDOW_DAYS} დღე):", ""]
+    for agent_id, warns in sorted(by_agent.items(), key=lambda kv: -len(kv[1])):
+        name = agents_by_id.get(agent_id, agent_id)
+        flag = " 🚫 (გამორთულია)" if len(warns) >= config.WARNING_LIMIT else ""
+        lines.append(f"• {name}: {len(warns)}/{config.WARNING_LIMIT}{flag}")
+        for w in warns[-3:]:
+            lines.append(f"   – {w.get('created_at')}: {w.get('type')} ({w.get('detail') or '-'})")
+    await update.message.reply_text("\n".join(lines))
+
+
+async def reactivate_agent(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_chat.id):
+        return
+    if not context.args:
+        inactive = [a for a in sheets.get_agents() if str(a.get("active", "")).lower() == "no"]
+        if not inactive:
+            await update.message.reply_text("გამორთული აგენტი არცერთი არ არის.")
+            return
+        lines = ["გამორთული აგენტები:", ""]
+        for a in inactive:
+            lines.append(f"• {a['name']} — agent_id: {a['agent_id']}")
+        lines.append("\nგამოყენება: /reactivate <agent_id>")
+        await update.message.reply_text("\n".join(lines))
+        return
+    agent_id = context.args[0]
+    ok = sheets.set_agent_active(agent_id, "yes")
+    if ok:
+        await update.message.reply_text(f"✅ აგენტი {agent_id} ისევ აქტიურია.")
+    else:
+        await update.message.reply_text("ასეთი agent_id ვერ ვიპოვე.")
+
+
 # --------------------------------------------------------- /findclient (admin)
 async def findclient(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_chat.id):
@@ -718,11 +932,14 @@ def _build_report_text() -> str:
     reports_today = [r for r in sheets.get_reports() if str(r.get("created_at", "")).startswith(today_str)]
     meetings_today = [m for m in sheets.get_meetings() if str(m.get("timestamp", "")).startswith(today_str)]
     pending_dayoffs = sheets.get_dayoff_requests(status="pending")
+    warnings_today = [w for w in sheets.get_warnings() if str(w.get("created_at", "")).startswith(today_str)]
     lines.append("")
     lines.append(f"დღეს შემოსული კლიენტის რეპორტები: {len(reports_today)}")
     lines.append(f"დღეს დარეგისტრირებული შეხვედრები: {len(meetings_today)}")
     if pending_dayoffs:
         lines.append(f"⏳ დასამტკიცებელი Day off მოთხოვნები: {len(pending_dayoffs)} (/dayoffs)")
+    if warnings_today:
+        lines.append(f"⚠️ დღეს გაცემული გაფრთხილებები: {len(warnings_today)} (/warnings)")
     return "\n".join(lines)
 
 
@@ -805,6 +1022,123 @@ async def send_daily_report(context: ContextTypes.DEFAULT_TYPE):
             log.exception("დღიური რეპორტის გაგზავნა ვერ მოხერხდა admin=%s", admin_id)
 
 
+WARNING_LABELS = {
+    "late_report": "დაგვიანებული/გამოტოვებული ანგარიში",
+    "late_arrival": "დაგვიანება სამუშაოზე",
+    "no_show": "არ გამოცხადება",
+}
+
+
+async def _notify_warning(context: ContextTypes.DEFAULT_TYPE, agent: dict, w_type: str, detail: str, result: dict):
+    label = WARNING_LABELS.get(w_type, w_type)
+    text_admin = (
+        f"⚠️ გაფრთხილება — {agent['name']}: {label}\n{detail}\n"
+        f"ბოლო {config.WARNING_WINDOW_DAYS} დღეში: {result['count']}/{config.WARNING_LIMIT}"
+    )
+    if result["deactivated"]:
+        text_admin += (
+            f"\n\n🚫 აგენტი ავტომატურად გამოირთო (მიაღწია {config.WARNING_LIMIT} "
+            f"გაფრთხილებას). დასაბრუნებლად: /reactivate {agent['agent_id']}"
+        )
+    for admin_id in config.ADMIN_CHAT_IDS:
+        try:
+            await context.bot.send_message(chat_id=admin_id, text=text_admin)
+        except Exception:
+            log.exception("გაფრთხილების შეტყობინება ვერ გაეგზავნა admin=%s", admin_id)
+
+    if agent.get("telegram_chat_id"):
+        try:
+            agent_text = f"⚠️ მიიღეთ გაფრთხილება: {label}."
+            if result["deactivated"]:
+                agent_text += (
+                    "\n\nსამწუხაროდ, გაფრთხილებების ლიმიტს მიაღწიეთ და თქვენი "
+                    "ანგარიში დროებით გამოირთო. დაუკავშირდით მენეჯერს."
+                )
+            await context.bot.send_message(chat_id=int(agent["telegram_chat_id"]), text=agent_text)
+        except Exception:
+            log.exception("გაფრთხილება ვერ გაეგზავნა აგენტს agent_id=%s", agent.get("agent_id"))
+
+
+async def check_late_arrivals(context: ContextTypes.DEFAULT_TYPE):
+    """15 წუთში ერთხელ — ვინც ოფისის ცვლაზეა და +grace წუთის მერეც არ
+    დაუწყია (/clockin), იღებს "დაგვიანება"-ს (დღეში ერთხელ, ერთი აგენტისთვის)."""
+    try:
+        now = datetime.datetime.now(ZoneInfo(config.TIMEZONE))
+        weekday_key = sheets.WEEKDAY_KEYS[now.weekday()]
+        agents = sheets.get_agents()
+    except Exception:
+        log.exception("დაგვიანების შემოწმება ვერ მოხერხდა")
+        return
+
+    for a in agents:
+        agent_id = a["agent_id"]
+        if str(a.get("active", "")).strip().lower() == "no":
+            continue
+        sched = sheets.get_agent_schedule(agent_id)
+        if not sched:
+            continue
+        mode = str(sched.get(weekday_key) or "off")
+        if mode not in ("office_morning", "office_evening"):
+            continue
+        start_hour = 10 if mode == "office_morning" else 16
+        deadline = now.replace(hour=start_hour, minute=config.ATTENDANCE_GRACE_MINUTES, second=0, microsecond=0)
+        if now < deadline:
+            continue
+        if sheets.has_warning_today(agent_id, "late_arrival"):
+            continue
+        att = sheets.get_today_attendance(agent_id)
+        if att and att.get("clock_in"):
+            continue
+        result = sheets.add_warning(agent_id, "late_arrival", f"ცვლა {start_hour}:00-ზე, ჯერ არ დაწყებია")
+        await _notify_warning(context, a, "late_arrival", f"ცვლის დაწყება: {start_hour}:00", result)
+
+
+async def check_daily_compliance(context: ContextTypes.DEFAULT_TYPE):
+    """ყოველდღე REPORT_DEADLINE_HOUR-ზე — ვინც დღეს საერთოდ არ გამოცხადდა
+    (no_show) ან გამოცხადდა, მაგრამ /clientreport არ გამოგზავნა
+    (late_report), იღებს გაფრთხილებას."""
+    try:
+        now = datetime.datetime.now(ZoneInfo(config.TIMEZONE))
+        weekday_key = sheets.WEEKDAY_KEYS[now.weekday()]
+        agents = sheets.get_agents()
+    except Exception:
+        log.exception("დღიური შემოწმება ვერ მოხერხდა")
+        return
+
+    today = now.strftime("%Y-%m-%d")
+    for a in agents:
+        agent_id = a["agent_id"]
+        if str(a.get("active", "")).strip().lower() == "no":
+            continue
+        sched = sheets.get_agent_schedule(agent_id)
+        if not sched:
+            continue
+        mode = str(sched.get(weekday_key) or "off")
+        if mode == "off":
+            continue
+
+        att = sheets.get_today_attendance(agent_id)
+        if not att or not att.get("clock_in"):
+            if sheets.has_warning_today(agent_id, "no_show"):
+                continue
+            result = sheets.add_warning(agent_id, "no_show", f"{today}: არ გამოცხადებულა")
+            await _notify_warning(context, a, "no_show", today, result)
+            continue
+
+        if sheets.has_warning_today(agent_id, "late_report"):
+            continue
+        reports_today = [
+            r for r in sheets.get_reports(agent_id=agent_id)
+            if str(r.get("created_at", "")).startswith(today)
+        ]
+        if not reports_today:
+            result = sheets.add_warning(
+                agent_id, "late_report",
+                f"{today}: ანგარიში ({config.REPORT_DEADLINE_HOUR}:00-მდე) არ გამოგზავნილა",
+            )
+            await _notify_warning(context, a, "late_report", today, result)
+
+
 def main():
     config.validate()
     sheets.ensure_sheets()
@@ -822,6 +1156,12 @@ def main():
     app.add_handler(CommandHandler("findclient", findclient))
     app.add_handler(CommandHandler("dayoffs", dayoffs_pending))
     app.add_handler(CommandHandler("meetings", meetings_list))
+    app.add_handler(CommandHandler("myschedule", myschedule))
+    app.add_handler(CommandHandler("clockin", clockin_cmd))
+    app.add_handler(CommandHandler("clockout", clockout_cmd))
+    app.add_handler(CommandHandler("schedule", schedule_today))
+    app.add_handler(CommandHandler("warnings", warnings_list))
+    app.add_handler(CommandHandler("reactivate", reactivate_agent))
     app.add_handler(CallbackQueryHandler(dayoff_decide, pattern=r"^do_(ok|no):"))
 
     app.add_handler(ConversationHandler(
@@ -882,11 +1222,25 @@ def main():
         fallbacks=[CommandHandler("cancel", cancel), MessageHandler(filters.COMMAND, busy_fallback)],
     ))
 
+    app.add_handler(ConversationHandler(
+        entry_points=[CommandHandler("setschedule", setschedule_start)],
+        states={
+            SC_AGENT: [CallbackQueryHandler(setschedule_agent, pattern=r"^sc_agent:")],
+            SC_DAY: [CallbackQueryHandler(setschedule_day, pattern=r"^sc_mode:")],
+        },
+        fallbacks=[CommandHandler("cancel", cancel), MessageHandler(filters.COMMAND, busy_fallback)],
+    ))
+
     if app.job_queue:
         app.job_queue.run_repeating(check_new_tasks, interval=config.POLL_INTERVAL_SECONDS, first=10)
+        app.job_queue.run_repeating(check_late_arrivals, interval=900, first=120)
         app.job_queue.run_daily(
             send_daily_report,
-            time=__import__("datetime").time(hour=config.DAILY_REPORT_HOUR, tzinfo=__import__("zoneinfo").ZoneInfo(config.TIMEZONE)),
+            time=datetime.time(hour=config.DAILY_REPORT_HOUR, tzinfo=ZoneInfo(config.TIMEZONE)),
+        )
+        app.job_queue.run_daily(
+            check_daily_compliance,
+            time=datetime.time(hour=config.REPORT_DEADLINE_HOUR, minute=5, tzinfo=ZoneInfo(config.TIMEZONE)),
         )
 
     log.info("ბოტი გაშვებულია...")
