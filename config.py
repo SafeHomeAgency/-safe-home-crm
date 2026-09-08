@@ -55,7 +55,11 @@ ONLINE_DAILY_QUOTA = int(os.environ.get("ONLINE_DAILY_QUOTA", "20"))
 # Settings → Networking → Generate Domain-ით მიღებული საჯარო https
 # მისამართი (მაგ. https://xxx.up.railway.app). ცარიელი — Mini App-ის
 # ღილაკები არ გამოჩნდება, ბოტი ტექსტურ რეჟიმში მაინც სრულად იმუშავებს.
-WEBAPP_URL = os.environ.get("WEBAPP_URL", "").rstrip("/")
+WEBAPP_URL = os.environ.get("WEBAPP_URL", "").strip().rstrip("/")
+# დაცვა: თუ Railway-ის დომენი "https://"-ის გარეშე ჩაწერეს (Telegram
+# მხოლოდ https ბმულებს იღებს Mini App-ისთვის) — თავად ვამატებთ.
+if WEBAPP_URL and not WEBAPP_URL.startswith("http"):
+    WEBAPP_URL = "https://" + WEBAPP_URL
 # პორტი, რომელზეც Mini App-ის ვებ-სერვერი ეშვება (Railway ავტომატურად
 # აწვდის PORT env ცვლადს)
 PORT = int(os.environ.get("PORT", "8080"))
