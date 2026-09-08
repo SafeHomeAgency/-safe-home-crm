@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="ka">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1" />
+<title>Safe Home Agency CRM</title>
+<link rel="stylesheet" href="/style.css" />
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+</head>
+<body>
+
+  <div class="appbar">
+    <h1>🏡 Safe Home Agency</h1>
+    <div class="sub" id="subtitle">იტვირთება…</div>
+    <div class="roleswitch" id="roleSwitch" hidden>
+      <button data-role="agent">ჩემი</button>
+      <button data-role="admin">გუნდი</button>
+    </div>
+  </div>
+
+  <div class="container" id="content">
+    <div class="loading-wrap">
+      <div class="skeleton" style="width:60%;margin:0 auto 10px"></div>
+      <div class="skeleton" style="width:40%;margin:0 auto"></div>
+    </div>
+  </div>
+
+  <div class="tabbar" id="tabbar" hidden></div>
+  <div class="toast" id="toast"></div>
+
+  <script src="/app.js"></script>
+</body>
+</html>

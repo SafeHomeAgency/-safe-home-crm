@@ -14,11 +14,13 @@ from __future__ import annotations
 
 import datetime
 import logging
+import threading
 from zoneinfo import ZoneInfo
 
 from telegram import (
     ReplyKeyboardMarkup, ReplyKeyboardRemove, KeyboardButton,
-    InlineKeyboardButton, InlineKeyboardMarkup, Update,
+    InlineKeyboardButton, InlineKeyboardMarkup, MenuButtonWebApp, Update,
+    WebAppInfo,
 )
 from telegram.ext import (
     Application, CommandHandler, ContextTypes, ConversationHandler,
@@ -27,6 +29,7 @@ from telegram.ext import (
 
 import config
 import sheets
+import webserver
 
 logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
@@ -104,13 +107,37 @@ def is_admin(chat_id: int) -> bool:
     return chat_id in config.ADMIN_CHAT_IDS
 
 
+def _webapp_markup(text: str = "📊 დაშბორდის გახსნა") -> InlineKeyboardMarkup | None:
+    """Mini App-ის გახსნის ღილაკი — მხოლოდ თუ WEBAPP_URL კონფიგურირებულია
+    (Railway-ზე Settings → Networking → Generate Domain)."""
+    if not config.WEBAPP_URL:
+        return None
+    return InlineKeyboardMarkup(
+        [[InlineKeyboardButton(text, web_app=WebAppInfo(url=config.WEBAPP_URL))]]
+    )
+
+
+# ---------------------------------------------------------------- /app
+async def app_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    markup = _webapp_markup()
+    if not markup:
+        await update.message.reply_text(
+            "ვიზუალური დაშბორდი ჯერ არ არის კონფიგურირებული "
+            "(WEBAPP_URL გარემოს ცვლადი ცარიელია)."
+        )
+        return
+    await update.message.reply_text("📊 დაშბორდი — დააჭირეთ ღილაკს:", reply_markup=markup)
+
+
 # ---------------------------------------------------------------- /start
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
+    webapp_markup = _webapp_markup()
 
     if is_admin(chat_id):
         await update.message.reply_text(
             "მოგესალმებით, ადმინო! ბრძანებები:\n"
+            "/app — ვიზუალური დაშბორდი 📊\n"
             "/newtask — ახალი კლიენტის დამატება\n"
             "/agents — აგენტების სია\n"
             "/addagent — ახალი აგენტის დამატება\n"
@@ -123,7 +150,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "/schedule — დღევანდელი გამოცხადების სტატუსი ყველაზე\n"
             "/warnings — გაფრთხილებები (ბოლო 30 დღე)\n"
             "/reactivate <agent_id> — გამორთული აგენტის დაბრუნება\n"
-            "/setteam <agent_id> <თიმლიდერი> — აგენტის თიმის დაყენება"
+            "/setteam <agent_id> <თიმლიდერი> — აგენტის თიმის დაყენება",
+            reply_markup=webapp_markup,
         )
         return
 
@@ -131,13 +159,15 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if agent:
         await update.message.reply_text(
             f"გამარჯობა, {agent['name']}! ბრძანებები:\n"
+            "/app — ვიზუალური დაშბორდი 📊\n"
             "/mytasks — შენი დავალებები\n"
             "/clientreport — კლიენტთან შესრულებული სამუშაოს რეპორტი\n"
             "/meeting — შეხვედრის/ნახვის მონაცემების დარეგისტრირება\n"
             "/dayoff — დასვენების დღის მოთხოვნა\n"
             "/myschedule — შენი კვირის გრაფიკი\n"
             "/clockin — სამუშაო დღის დაწყება\n"
-            "/clockout — სამუშაო დღის დასრულება"
+            "/clockout — სამუშაო დღის დასრულება",
+            reply_markup=webapp_markup,
         )
         return
 
@@ -1270,6 +1300,7 @@ def main():
     app.add_error_handler(on_error)
 
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("app", app_cmd))
     app.add_handler(MessageHandler(filters.CONTACT, on_contact))
     app.add_handler(CommandHandler("mytasks", mytasks))
     app.add_handler(CommandHandler("done", done_command))
@@ -1364,7 +1395,22 @@ def main():
         fallbacks=[CommandHandler("cancel", cancel), MessageHandler(filters.COMMAND, busy_fallback)],
     ))
 
+    threading.Thread(target=webserver.run, name="webapp", daemon=True).start()
+
     if app.job_queue:
+        if config.WEBAPP_URL:
+            async def _set_menu_button(context: ContextTypes.DEFAULT_TYPE):
+                try:
+                    await context.bot.set_chat_menu_button(
+                        menu_button=MenuButtonWebApp(
+                            text="📊 დაშბორდი",
+                            web_app=WebAppInfo(url=config.WEBAPP_URL),
+                        )
+                    )
+                except Exception:
+                    log.exception("Menu button-ის დაყენება ვერ მოხერხდა")
+            app.job_queue.run_once(_set_menu_button, when=1)
+
         app.job_queue.run_repeating(check_new_tasks, interval=config.POLL_INTERVAL_SECONDS, first=10)
         app.job_queue.run_repeating(check_late_arrivals, interval=900, first=120)
         app.job_queue.run_daily(

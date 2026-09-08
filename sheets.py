@@ -36,7 +36,12 @@ _SCOPES = [
     "https://www.googleapis.com/auth/drive.readonly",
 ]
 
-_lock = threading.Lock()
+
+# RLock (და არა უბრალო Lock) — რადგან ახლა ზოგიერთი ფუნქცია (მაგ.
+# create_task) `with _lock:`-ის შიგნით იძახებს agent_name_by_id()-ს,
+# რომელიც თავადაც `_lock`-ს ითხოვს (get_agents()-ის მეშვეობით) —
+# ჩვეულებრივი Lock-ით ეს იმავე thread-ს "დაეჯახებოდა" (deadlock).
+_lock = threading.RLock()
 _client = None
 _sheet = None
 
@@ -44,19 +49,22 @@ AGENTS_HEADERS = [
     "agent_id", "name", "phone", "telegram_username",
     "telegram_chat_id", "active", "registered_at", "team",
 ]
+# შენიშვნა: ყველა ახალი სვეტი (agent_name/assigned_to_name და ა.შ.)
+# განზრახ ემატება სიის **ბოლოში**, არა შუაში — რომ არსებული ცხრილის
+# ძველი (უკვე შევსებული) სტრიქონების სვეტები არ აირიოს/გადაინაცვლოს.
 TASKS_HEADERS = [
     "task_id", "title", "description", "assigned_to", "status",
     "priority", "due_date", "created_by", "created_at", "updated_at",
     "notified", "lead_type", "client_phone", "deal_type", "listing_id",
-    "viewing_time",
+    "viewing_time", "assigned_to_name",
 ]
 REPORTS_HEADERS = [
     "report_id", "agent_id", "client_phone", "actions", "notes",
-    "file_id", "created_at",
+    "file_id", "created_at", "agent_name",
 ]
 DAYOFF_HEADERS = [
     "request_id", "agent_id", "date", "reason", "status",
-    "created_at", "decided_at",
+    "created_at", "decided_at", "agent_name",
 ]
 # ყოფილი Slack "შეხვედრები" (meetings/viewings) ფორმის სვეტები
 MEETINGS_HEADERS = [
@@ -70,17 +78,17 @@ WEEKDAY_KEYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
 # ერთი სტრიქონი ერთ აგენტზე — კვირის განმეორებადი გრაფიკი (ყოფილი
 # "პირბადული ცხრილი"). მნიშვნელობები: off / office_morning /
 # office_evening / online.
-SCHEDULE_HEADERS = ["agent_id"] + WEEKDAY_KEYS + ["updated_at"]
+SCHEDULE_HEADERS = ["agent_id"] + WEEKDAY_KEYS + ["updated_at", "agent_name"]
 
 # დღიური გამოცხადება/დასრულება (clock-in / clock-out)
 ATTENDANCE_HEADERS = [
     "attendance_id", "agent_id", "date", "mode", "clock_in", "clock_out",
-    "count_submitted",
+    "count_submitted", "agent_name",
 ]
 
 # გაფრთხილებები (დაგვიანებული/გამოტოვებული ანგარიში, დაგვიანება,
 # არ-გამოცხადება). ტიპები: late_report / late_arrival / no_show
-WARNINGS_HEADERS = ["warning_id", "agent_id", "type", "detail", "created_at"]
+WARNINGS_HEADERS = ["warning_id", "agent_id", "type", "detail", "created_at", "agent_name"]
 
 
 def _get_client():
@@ -213,6 +221,18 @@ def find_agent_by_chat_id(chat_id: int) -> dict | None:
     return None
 
 
+def agent_name_by_id(agent_id: str) -> str:
+    """აგენტის სახელი agent_id-ით — რომ ცხრილებში (Tasks/Reports/DayOff/
+    Attendance/Warnings/Schedule) id-ის გვერდით ყოველთვის სახელიც ეწეროს
+    და ცხრილის ხელით დათვალიერებისას ცხადი იყოს ვისზეა საუბარი."""
+    if not agent_id:
+        return ""
+    for a in get_agents():
+        if str(a.get("agent_id")) == str(agent_id):
+            return a.get("name", "")
+    return ""
+
+
 def register_agent_chat_id(agent_id: str, chat_id: int, username: str):
     with _lock:
         ws = _agents_ws()
@@ -280,6 +300,7 @@ def create_task(title: str, description: str, assigned_to: str,
             task_id, title, description, assigned_to, "New",
             priority, due_date, created_by, now, now, "no",
             lead_type, client_phone, deal_type, listing_id, viewing_time,
+            agent_name_by_id(assigned_to),
         ])
         return task_id
 
@@ -409,7 +430,7 @@ def create_report(agent_id: str, client_phone: str, actions: str,
         report_id = uuid.uuid4().hex[:8]
         _reports_ws().append_row([
             report_id, agent_id, client_phone, actions, notes,
-            file_id, _now(),
+            file_id, _now(), agent_name_by_id(agent_id),
         ])
         return report_id
 
@@ -447,6 +468,7 @@ def create_dayoff_request(agent_id: str, date: str, reason: str) -> str:
         request_id = uuid.uuid4().hex[:8]
         _dayoff_ws().append_row([
             request_id, agent_id, date, reason, "pending", _now(), "",
+            agent_name_by_id(agent_id),
         ])
         return request_id
 
@@ -517,7 +539,8 @@ def set_agent_schedule(agent_id: str, pattern: dict) -> None:
     with _lock:
         ws = _schedule_ws()
         cell = ws.find(agent_id, in_column=1)
-        row = [agent_id] + [pattern.get(k, "off") for k in WEEKDAY_KEYS] + [_now()]
+        row = ([agent_id] + [pattern.get(k, "off") for k in WEEKDAY_KEYS]
+               + [_now(), agent_name_by_id(agent_id)])
         if cell:
             ws.update(f"A{cell.row}", [row])
         else:
@@ -556,7 +579,7 @@ def clock_in(agent_id: str) -> str:
                 return "ok"
         mode = get_today_mode(agent_id)
         attendance_id = uuid.uuid4().hex[:8]
-        ws.append_row([attendance_id, agent_id, today, mode, _now(), "", ""])
+        ws.append_row([attendance_id, agent_id, today, mode, _now(), "", "", agent_name_by_id(agent_id)])
         return "ok"
 
 
@@ -662,7 +685,7 @@ def add_warning(agent_id: str, type_: str, detail: str = "") -> dict:
     """
     with _lock:
         warning_id = uuid.uuid4().hex[:8]
-        _warnings_ws().append_row([warning_id, agent_id, type_, detail, _now()])
+        _warnings_ws().append_row([warning_id, agent_id, type_, detail, _now(), agent_name_by_id(agent_id)])
 
     count = len(get_warnings(agent_id=agent_id, days=config.WARNING_WINDOW_DAYS))
     deactivated = False
@@ -670,3 +693,114 @@ def add_warning(agent_id: str, type_: str, detail: str = "") -> dict:
         set_agent_active(agent_id, "no")
         deactivated = True
     return {"warning_id": warning_id, "count": count, "deactivated": deactivated}
+
+
+# ---------- Mini App დაშბორდის მონაცემები ----------
+
+def get_agent_dashboard(agent_id: str) -> dict | None:
+    """ერთი აგენტის სრული დღევანდელი სურათი — Mini App-ის "ჩემი დღე"
+    გვერდისთვის."""
+    agent = next((a for a in get_agents() if str(a.get("agent_id")) == str(agent_id)), None)
+    if not agent:
+        return None
+    att = get_today_attendance(agent_id) or {}
+    mode = get_today_mode(agent_id)
+    perf = get_agent_performance(30).get(str(agent_id), {"assigned": 0, "on_time": 0, "rate": None})
+    warns = get_warnings(agent_id=agent_id, days=config.WARNING_WINDOW_DAYS)
+    sched = get_agent_schedule(agent_id) or {}
+    tasks = get_tasks_for_agent(agent_id, only_open=True)
+    meetings = get_meetings(agent_id=agent_id)[-5:][::-1]
+    return {
+        "agent": {
+            "agent_id": agent.get("agent_id", ""),
+            "name": agent.get("name", ""),
+            "phone": agent.get("phone", ""),
+            "team": agent.get("team", ""),
+            "active": agent.get("active", "yes"),
+        },
+        "today": {
+            "mode": mode,
+            "clock_in": att.get("clock_in", ""),
+            "clock_out": att.get("clock_out", ""),
+            "count_submitted": att.get("count_submitted", ""),
+            "quota": config.ONLINE_DAILY_QUOTA if mode == "online" else None,
+        },
+        "schedule": {k: str(sched.get(k) or "off") for k in WEEKDAY_KEYS},
+        "performance": {
+            "assigned": perf.get("assigned", 0),
+            "on_time": perf.get("on_time", 0),
+            "rate": perf.get("rate"),
+        },
+        "warnings": {
+            "count": len(warns),
+            "limit": config.WARNING_LIMIT,
+            "recent": warns[-5:][::-1],
+        },
+        "tasks": tasks[:20],
+        "meetings": meetings,
+    }
+
+
+def get_admin_dashboard() -> dict:
+    """მთელი გუნდის დღევანდელი სურათი — Mini App-ის მენეჯერის
+    დაშბორდისთვის."""
+    agents = get_agents()
+    perf = get_agent_performance(30)
+    today_att = {str(r.get("agent_id")): r for r in get_today_attendance_all()}
+
+    team = []
+    total_submitted = 0
+    total_quota_target = 0
+    clocked_in_count = 0
+    for a in agents:
+        aid = a.get("agent_id")
+        mode = get_today_mode(aid)
+        att = today_att.get(str(aid), {})
+        clocked = bool(att.get("clock_in")) and not att.get("clock_out")
+        if clocked:
+            clocked_in_count += 1
+        try:
+            count_submitted = int(att.get("count_submitted") or 0)
+        except (TypeError, ValueError):
+            count_submitted = 0
+        if mode == "online":
+            total_quota_target += config.ONLINE_DAILY_QUOTA
+            total_submitted += count_submitted
+        w = len(get_warnings(agent_id=aid, days=config.WARNING_WINDOW_DAYS))
+        p = perf.get(str(aid), {})
+        team.append({
+            "agent_id": aid,
+            "name": a.get("name", ""),
+            "team": a.get("team", ""),
+            "active": a.get("active", "yes"),
+            "mode": mode,
+            "clocked_in": clocked,
+            "count_submitted": att.get("count_submitted", ""),
+            "warnings": w,
+            "assigned": p.get("assigned", 0),
+            "rate": p.get("rate"),
+        })
+
+    ranking = sorted(
+        [t for t in team if t["rate"] is not None and t["assigned"]],
+        key=lambda t: t["rate"], reverse=True,
+    )[:10]
+    pending_dayoffs = get_dayoff_requests(status="pending")
+    recent_warnings = sorted(
+        get_warnings(), key=lambda w: str(w.get("created_at", "")), reverse=True
+    )[:10]
+
+    return {
+        "team": team,
+        "ranking": ranking,
+        "pending_dayoffs": pending_dayoffs,
+        "recent_warnings": recent_warnings,
+        "summary": {
+            "agents_total": len(agents),
+            "active_total": sum(1 for a in agents if str(a.get("active", "yes")).lower() != "no"),
+            "clocked_in": clocked_in_count,
+            "total_submitted": total_submitted,
+            "total_quota_target": total_quota_target,
+            "pending_dayoffs": len(pending_dayoffs),
+        },
+    }

@@ -51,6 +51,15 @@ ATTENDANCE_GRACE_MINUTES = int(os.environ.get("ATTENDANCE_GRACE_MINUTES", "15"))
 # დღიური გეგმა (განცხადებების რაოდენობა) ონლაინ დღეზე მყოფი აგენტისთვის
 ONLINE_DAILY_QUOTA = int(os.environ.get("ONLINE_DAILY_QUOTA", "20"))
 
+# Mini App (ვიზუალური დაშბორდი ტელეგრამშივე). Railway-ზე
+# Settings → Networking → Generate Domain-ით მიღებული საჯარო https
+# მისამართი (მაგ. https://xxx.up.railway.app). ცარიელი — Mini App-ის
+# ღილაკები არ გამოჩნდება, ბოტი ტექსტურ რეჟიმში მაინც სრულად იმუშავებს.
+WEBAPP_URL = os.environ.get("WEBAPP_URL", "").rstrip("/")
+# პორტი, რომელზეც Mini App-ის ვებ-სერვერი ეშვება (Railway ავტომატურად
+# აწვდის PORT env ცვლადს)
+PORT = int(os.environ.get("PORT", "8080"))
+
 
 def validate():
     missing = []
