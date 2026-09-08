@@ -49,6 +49,14 @@ TASKS_HEADERS = [
     "notified", "lead_type", "client_phone", "deal_type", "listing_id",
     "viewing_time",
 ]
+REPORTS_HEADERS = [
+    "report_id", "agent_id", "client_phone", "actions", "notes",
+    "file_id", "created_at",
+]
+DAYOFF_HEADERS = [
+    "request_id", "agent_id", "date", "reason", "status",
+    "created_at", "decided_at",
+]
 
 
 def _get_client():
@@ -102,6 +110,26 @@ def ensure_sheets():
                 ws2.resize(cols=len(TASKS_HEADERS))
             ws2.update("A1", [TASKS_HEADERS])
 
+    if config.REPORTS_SHEET_NAME not in existing:
+        ws3 = ss.add_worksheet(config.REPORTS_SHEET_NAME, rows=1000, cols=len(REPORTS_HEADERS))
+        ws3.append_row(REPORTS_HEADERS)
+    else:
+        ws3 = existing[config.REPORTS_SHEET_NAME]
+        if ws3.row_values(1) != REPORTS_HEADERS:
+            if ws3.col_count < len(REPORTS_HEADERS):
+                ws3.resize(cols=len(REPORTS_HEADERS))
+            ws3.update("A1", [REPORTS_HEADERS])
+
+    if config.DAYOFF_SHEET_NAME not in existing:
+        ws4 = ss.add_worksheet(config.DAYOFF_SHEET_NAME, rows=300, cols=len(DAYOFF_HEADERS))
+        ws4.append_row(DAYOFF_HEADERS)
+    else:
+        ws4 = existing[config.DAYOFF_SHEET_NAME]
+        if ws4.row_values(1) != DAYOFF_HEADERS:
+            if ws4.col_count < len(DAYOFF_HEADERS):
+                ws4.resize(cols=len(DAYOFF_HEADERS))
+            ws4.update("A1", [DAYOFF_HEADERS])
+
 
 def _agents_ws():
     return _get_spreadsheet().worksheet(config.AGENTS_SHEET_NAME)
@@ -109,6 +137,14 @@ def _agents_ws():
 
 def _tasks_ws():
     return _get_spreadsheet().worksheet(config.TASKS_SHEET_NAME)
+
+
+def _reports_ws():
+    return _get_spreadsheet().worksheet(config.REPORTS_SHEET_NAME)
+
+
+def _dayoff_ws():
+    return _get_spreadsheet().worksheet(config.DAYOFF_SHEET_NAME)
 
 
 def _now():
@@ -300,3 +336,72 @@ def pick_agent_for_priority(priority: str, days: int = 30) -> str | None:
         random.shuffle(scored)
 
     return scored[0][0]
+
+
+# ---------- Client reports (ყოფილი "AgentReports" ფორმის შემცვლელი) ----------
+
+def create_report(agent_id: str, client_phone: str, actions: str,
+                   notes: str = "", file_id: str = "") -> str:
+    with _lock:
+        report_id = uuid.uuid4().hex[:8]
+        _reports_ws().append_row([
+            report_id, agent_id, client_phone, actions, notes,
+            file_id, _now(),
+        ])
+        return report_id
+
+
+def get_reports(agent_id: str | None = None, client_phone: str | None = None) -> list[dict]:
+    with _lock:
+        rows = _reports_ws().get_all_records()
+    if agent_id:
+        rows = [r for r in rows if str(r.get("agent_id")) == str(agent_id)]
+    if client_phone:
+        needle = client_phone.strip().lstrip("+")
+        rows = [
+            r for r in rows
+            if str(r.get("client_phone", "")).strip().lstrip("+") == needle
+        ]
+    return rows
+
+
+def get_client_history(client_phone: str) -> dict:
+    """ერთი კლიენტის მთელი ისტორია — დავალებები + აგენტის რეპორტები."""
+    needle = client_phone.strip().lstrip("+")
+    tasks = [
+        t for t in get_tasks()
+        if str(t.get("client_phone", "")).strip().lstrip("+") == needle
+    ]
+    reports = get_reports(client_phone=client_phone)
+    return {"tasks": tasks, "reports": reports}
+
+
+# ---------- Day off მოთხოვნები ----------
+
+def create_dayoff_request(agent_id: str, date: str, reason: str) -> str:
+    with _lock:
+        request_id = uuid.uuid4().hex[:8]
+        _dayoff_ws().append_row([
+            request_id, agent_id, date, reason, "pending", _now(), "",
+        ])
+        return request_id
+
+
+def get_dayoff_requests(status: str | None = None) -> list[dict]:
+    with _lock:
+        rows = _dayoff_ws().get_all_records()
+    if status:
+        rows = [r for r in rows if str(r.get("status")) == status]
+    return rows
+
+
+def decide_dayoff(request_id: str, status: str) -> dict | None:
+    with _lock:
+        ws = _dayoff_ws()
+        cell = ws.find(request_id, in_column=1)
+        if not cell:
+            return None
+        ws.update_cell(cell.row, DAYOFF_HEADERS.index("status") + 1, status)
+        ws.update_cell(cell.row, DAYOFF_HEADERS.index("decided_at") + 1, _now())
+        row = ws.row_values(cell.row)
+        return dict(zip(DAYOFF_HEADERS, row))

@@ -34,6 +34,8 @@ DAILY_REPORT_HOUR = int(os.environ.get("DAILY_REPORT_HOUR", "9"))
 
 AGENTS_SHEET_NAME = "Agents"
 TASKS_SHEET_NAME = "Tasks"
+REPORTS_SHEET_NAME = "Reports"
+DAYOFF_SHEET_NAME = "DayOff"
 
 
 def validate():
