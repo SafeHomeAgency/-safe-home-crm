@@ -32,10 +32,15 @@ logging.basicConfig(
 )
 log = logging.getLogger("safehome-crm-bot")
 
-# ---- /newtask საუბრის საფეხურები ----
-NT_TITLE, NT_DESC, NT_ASSIGNEE, NT_PRIORITY, NT_DUE = range(5)
+# ---- /newtask (ლიდის მიღების) საუბრის საფეხურები ----
+(
+    NL_TYPE, NL_GEN_PHONE, NL_GEN_DEAL, NL_GEN_PRIORITY,
+    NL_LISTING_AGENT, NL_LISTING_ID, NL_LISTING_PHONE, NL_LISTING_TIME,
+) = range(8)
 # ---- /addagent საუბრის საფეხურები ----
-AA_NAME, AA_PHONE = range(5, 7)
+AA_NAME, AA_PHONE = range(8, 10)
+
+PRIORITY_LABELS = ("დაბალი", "საშუალო", "მაღალი")
 
 
 def is_admin(chat_id: int) -> bool:
@@ -49,10 +54,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if is_admin(chat_id):
         await update.message.reply_text(
             "მოგესალმებით, ადმინო! ბრძანებები:\n"
-            "/newtask — ახალი ტასკის შექმნა\n"
+            "/newtask — ახალი კლიენტის დამატება\n"
             "/agents — აგენტების სია\n"
             "/addagent — ახალი აგენტის დამატება\n"
-            "/report — დღევანდელი რეპორტი"
+            "/report — დღევანდელი რეპორტი\n"
+            "/ranking — აგენტების რეიტინგი (ბოლო 30 დღე)"
         )
         return
 
@@ -110,9 +116,15 @@ async def mytasks(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     lines = ["თქვენი ღია დავალებები:\n"]
     for t in tasks:
+        extra = ""
+        if t.get("client_phone"):
+            extra += f"\n   კლიენტი: {t['client_phone']}"
+        if t.get("viewing_time"):
+            extra += f"\n   ნახვა: {t['viewing_time']}"
         lines.append(
             f"🔹 [{t['task_id']}] {t['title']}\n"
-            f"   სტატუსი: {t['status']} | პრიორიტეტი: {t.get('priority') or '-'} | ვადა: {t.get('due_date') or '-'}\n"
+            f"   სტატუსი: {t['status']} | პრიორიტეტი: {t.get('priority') or '-'} | ვადა: {t.get('due_date') or '-'}"
+            f"{extra}\n"
             f"   დახურვა: /done_{t['task_id']}"
         )
     await update.message.reply_text("\n\n".join(lines))
@@ -178,72 +190,145 @@ async def addagent_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ------------------------------------------------------------- /newtask (admin)
+# ორი ტიპის ლიდი:
+#   1) "ზოგადი" — ვიცით მხოლოდ ტელეფონი და ქირა/ყიდვა. აგენტი აირჩევა
+#      ავტომატურად, ბოლო 30 დღის შესრულების მაჩვენებლის მიხედვით:
+#      მაღალი პრიორიტეტი -> საუკეთესო აგენტთან, საშუალო -> ყველაზე სუსტთან.
+#   2) "ლისტინგი" — კონკრეტული აგენტის უკვე გამოქვეყნებულ ბინაზე მოსული
+#      კლიენტი (ნახვის მოთხოვნა) — პირდაპირ იმ აგენტს ერგება.
+
 async def newtask_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_chat.id):
         return ConversationHandler.END
-    await update.message.reply_text("ტასკის სათაური?")
-    return NT_TITLE
+    buttons = [
+        [InlineKeyboardButton("ზოგადი კლიენტი (ქირა/ყიდვა)", callback_data="nl_type:general")],
+        [InlineKeyboardButton("კონკრეტული ბინა (ნახვა)", callback_data="nl_type:listing")],
+    ]
+    await update.message.reply_text(
+        "რა ტიპის კლიენტია?", reply_markup=InlineKeyboardMarkup(buttons)
+    )
+    return NL_TYPE
 
 
-async def newtask_title(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data["nt_title"] = update.message.text.strip()
-    await update.message.reply_text("აღწერა? (ან გამოტოვეთ '-')")
-    return NT_DESC
+async def newtask_type(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    lead_type = query.data.split(":", 1)[1]
+    context.user_data["nl_type"] = lead_type
 
-
-async def newtask_desc(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data["nt_desc"] = update.message.text.strip()
+    if lead_type == "general":
+        await query.edit_message_text("კლიენტის ტელეფონის ნომერი?")
+        return NL_GEN_PHONE
 
     agents = [a for a in sheets.get_agents() if str(a.get("active", "")).lower() != "no"]
     if not agents:
-        await update.message.reply_text("აგენტები არ არსებობს. ჯერ დაამატეთ /addagent-ით.")
+        await query.edit_message_text("აგენტები არ არსებობს. ჯერ დაამატეთ /addagent-ით.")
         return ConversationHandler.END
-
     buttons = [
-        [InlineKeyboardButton(a["name"], callback_data=f"nt_assignee:{a['agent_id']}")]
+        [InlineKeyboardButton(a["name"], callback_data=f"nl_lagent:{a['agent_id']}")]
         for a in agents
     ]
-    await update.message.reply_text(
-        "ვის მიენიჭოს?", reply_markup=InlineKeyboardMarkup(buttons)
+    await query.edit_message_text(
+        "რომელი აგენტის ბინაზეა (ვისი ლისტინგია)?", reply_markup=InlineKeyboardMarkup(buttons)
     )
-    return NT_ASSIGNEE
+    return NL_LISTING_AGENT
 
 
-async def newtask_assignee(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# ---- ზოგადი კლიენტის შტო ----
+
+async def newtask_gen_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data["nl_phone"] = update.message.text.strip()
+    buttons = [[
+        InlineKeyboardButton("ქირა", callback_data="nl_deal:ქირა"),
+        InlineKeyboardButton("ყიდვა", callback_data="nl_deal:ყიდვა"),
+    ]]
+    await update.message.reply_text("გარიგების ტიპი?", reply_markup=InlineKeyboardMarkup(buttons))
+    return NL_GEN_DEAL
+
+
+async def newtask_gen_deal(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    agent_id = query.data.split(":", 1)[1]
-    context.user_data["nt_assignee"] = agent_id
-
-    buttons = [
-        [InlineKeyboardButton(p, callback_data=f"nt_priority:{p}")]
-        for p in ("დაბალი", "საშუალო", "მაღალი")
-    ]
+    context.user_data["nl_deal"] = query.data.split(":", 1)[1]
+    buttons = [[InlineKeyboardButton(p, callback_data=f"nl_priority:{p}")] for p in PRIORITY_LABELS]
     await query.edit_message_text("პრიორიტეტი?", reply_markup=InlineKeyboardMarkup(buttons))
-    return NT_PRIORITY
+    return NL_GEN_PRIORITY
 
 
-async def newtask_priority(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def newtask_gen_priority(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     priority = query.data.split(":", 1)[1]
-    context.user_data["nt_priority"] = priority
-    await query.edit_message_text("ვადა? (მაგ. 2026-09-15, ან '-' თუ არ არის)")
-    return NT_DUE
-
-
-async def newtask_due(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    due = update.message.text.strip()
     d = context.user_data
+
+    agent_id = sheets.pick_agent_for_priority(priority)
+    if not agent_id:
+        await query.edit_message_text(
+            "დარეგისტრირებული (Telegram-ში /start-გავლილი) აქტიური აგენტი არ მოიძებნა."
+        )
+        d.clear()
+        return ConversationHandler.END
+
+    title = f"კლიენტი {d['nl_phone']} ({d['nl_deal']})"
     task_id = sheets.create_task(
-        title=d["nt_title"],
-        description=d["nt_desc"],
-        assigned_to=d["nt_assignee"],
-        priority=d["nt_priority"],
-        due_date=due,
-        created_by=str(update.effective_user.id),
+        title=title, description="", assigned_to=agent_id, priority=priority,
+        due_date="", created_by=str(update.effective_user.id),
+        lead_type="general", client_phone=d["nl_phone"], deal_type=d["nl_deal"],
     )
-    await update.message.reply_text(f"ტასკი შექმნილია (id: {task_id}). აგენტს შეტყობინება მიუვა ~{config.POLL_INTERVAL_SECONDS}წმ-ში.")
+    agent_name = next(
+        (a["name"] for a in sheets.get_agents() if a["agent_id"] == agent_id), agent_id
+    )
+    await query.edit_message_text(
+        f"შექმნილია და მინიჭებულია {agent_name}-ზე (id: {task_id}, პრიორიტეტი: {priority}).\n"
+        f"შეტყობინება მიუვა ~{config.POLL_INTERVAL_SECONDS}წმ-ში."
+    )
+    d.clear()
+    return ConversationHandler.END
+
+
+# ---- ლისტინგის (ნახვის) შტო ----
+
+async def newtask_listing_agent(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    context.user_data["nl_listing_agent"] = query.data.split(":", 1)[1]
+    await query.edit_message_text("ლისტინგის/ბინის ID?")
+    return NL_LISTING_ID
+
+
+async def newtask_listing_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data["nl_listing_id"] = update.message.text.strip()
+    await update.message.reply_text("კლიენტის ტელეფონის ნომერი?")
+    return NL_LISTING_PHONE
+
+
+async def newtask_listing_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data["nl_listing_phone"] = update.message.text.strip()
+    await update.message.reply_text("ნახვის დრო? (მაგ. 'ხვალ 12:00')")
+    return NL_LISTING_TIME
+
+
+async def newtask_listing_time(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    viewing_time = update.message.text.strip()
+    d = context.user_data
+    agent_id = d["nl_listing_agent"]
+
+    title = f"ნახვა: {d['nl_listing_id']}"
+    description = f"ნახვის დრო: {viewing_time}"
+    task_id = sheets.create_task(
+        title=title, description=description, assigned_to=agent_id,
+        priority="მაღალი", due_date=viewing_time,
+        created_by=str(update.effective_user.id),
+        lead_type="listing", client_phone=d["nl_listing_phone"],
+        listing_id=d["nl_listing_id"], viewing_time=viewing_time,
+    )
+    agent_name = next(
+        (a["name"] for a in sheets.get_agents() if a["agent_id"] == agent_id), agent_id
+    )
+    await update.message.reply_text(
+        f"შექმნილია და მინიჭებულია {agent_name}-ზე (id: {task_id}).\n"
+        f"შეტყობინება მიუვა ~{config.POLL_INTERVAL_SECONDS}წმ-ში."
+    )
     d.clear()
     return ConversationHandler.END
 
@@ -252,6 +337,13 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.clear()
     await update.message.reply_text("გაუქმდა.", reply_markup=ReplyKeyboardRemove())
     return ConversationHandler.END
+
+
+async def busy_fallback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "ჯერ უპასუხეთ წინა შეკითხვას, ან დაწერეთ /cancel მიმდინარე ნაბიჯის გასაუქმებლად."
+    )
+    return None
 
 
 # -------------------------------------------------------------- /report (admin)
@@ -287,6 +379,31 @@ async def report(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(_build_report_text())
 
 
+# -------------------------------------------------------------- /ranking (admin)
+async def ranking(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_chat.id):
+        return
+    perf = sheets.get_agent_performance(30)
+    agents = {a["agent_id"]: a["name"] for a in sheets.get_agents()}
+
+    if not perf:
+        await update.message.reply_text("ბოლო 30 დღეში მინიჭებული დავალება არცერთ აგენტს არ ჰქონია.")
+        return
+
+    rows = []
+    for agent_id, s in perf.items():
+        name = agents.get(agent_id, agent_id)
+        rate = s["rate"]
+        rate_str = f"{rate * 100:.0f}%" if rate is not None else "-"
+        rows.append((rate if rate is not None else -1, name, s["assigned"], s["on_time"], rate_str))
+    rows.sort(key=lambda r: r[0], reverse=True)
+
+    lines = ["🏆 აგენტების რეიტინგი (ბოლო 30 დღე, 24სთ-ში დახურვის %):", ""]
+    for _, name, assigned, on_time, rate_str in rows:
+        lines.append(f"• {name}: {rate_str} ({on_time}/{assigned} დროულად)")
+    await update.message.reply_text("\n".join(lines))
+
+
 # ------------------------------------------------------------ background jobs
 async def check_new_tasks(context: ContextTypes.DEFAULT_TYPE):
     try:
@@ -303,11 +420,17 @@ async def check_new_tasks(context: ContextTypes.DEFAULT_TYPE):
         agent = agents_by_id.get(str(t.get("assigned_to")))
         if agent and agent.get("telegram_chat_id"):
             try:
+                extra = ""
+                if t.get("client_phone"):
+                    extra += f"\nკლიენტი: {t['client_phone']}"
+                if t.get("viewing_time"):
+                    extra += f"\nნახვის დრო: {t['viewing_time']}"
                 await context.bot.send_message(
                     chat_id=int(agent["telegram_chat_id"]),
                     text=(
                         f"🆕 ახალი დავალება: {t['title']}\n"
-                        f"{t.get('description') or ''}\n"
+                        f"{t.get('description') or ''}"
+                        f"{extra}\n"
                         f"პრიორიტეტი: {t.get('priority') or '-'} | ვადა: {t.get('due_date') or '-'}\n"
                         f"დახურვა: /done_{t['task_id']}"
                     ),
@@ -342,6 +465,7 @@ def main():
     app.add_handler(MessageHandler(filters.Regex(r"^/done_\S+"), done_command))
     app.add_handler(CommandHandler("agents", agents_list))
     app.add_handler(CommandHandler("report", report))
+    app.add_handler(CommandHandler("ranking", ranking))
 
     app.add_handler(ConversationHandler(
         entry_points=[CommandHandler("addagent", addagent_start)],
@@ -349,19 +473,22 @@ def main():
             AA_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, addagent_name)],
             AA_PHONE: [MessageHandler(filters.TEXT & ~filters.COMMAND, addagent_phone)],
         },
-        fallbacks=[CommandHandler("cancel", cancel)],
+        fallbacks=[CommandHandler("cancel", cancel), MessageHandler(filters.COMMAND, busy_fallback)],
     ))
 
     app.add_handler(ConversationHandler(
         entry_points=[CommandHandler("newtask", newtask_start)],
         states={
-            NT_TITLE: [MessageHandler(filters.TEXT & ~filters.COMMAND, newtask_title)],
-            NT_DESC: [MessageHandler(filters.TEXT & ~filters.COMMAND, newtask_desc)],
-            NT_ASSIGNEE: [CallbackQueryHandler(newtask_assignee, pattern=r"^nt_assignee:")],
-            NT_PRIORITY: [CallbackQueryHandler(newtask_priority, pattern=r"^nt_priority:")],
-            NT_DUE: [MessageHandler(filters.TEXT & ~filters.COMMAND, newtask_due)],
+            NL_TYPE: [CallbackQueryHandler(newtask_type, pattern=r"^nl_type:")],
+            NL_GEN_PHONE: [MessageHandler(filters.TEXT & ~filters.COMMAND, newtask_gen_phone)],
+            NL_GEN_DEAL: [CallbackQueryHandler(newtask_gen_deal, pattern=r"^nl_deal:")],
+            NL_GEN_PRIORITY: [CallbackQueryHandler(newtask_gen_priority, pattern=r"^nl_priority:")],
+            NL_LISTING_AGENT: [CallbackQueryHandler(newtask_listing_agent, pattern=r"^nl_lagent:")],
+            NL_LISTING_ID: [MessageHandler(filters.TEXT & ~filters.COMMAND, newtask_listing_id)],
+            NL_LISTING_PHONE: [MessageHandler(filters.TEXT & ~filters.COMMAND, newtask_listing_phone)],
+            NL_LISTING_TIME: [MessageHandler(filters.TEXT & ~filters.COMMAND, newtask_listing_time)],
         },
-        fallbacks=[CommandHandler("cancel", cancel)],
+        fallbacks=[CommandHandler("cancel", cancel), MessageHandler(filters.COMMAND, busy_fallback)],
     ))
 
     if app.job_queue:

@@ -8,16 +8,20 @@ Google Sheets-თან მუშაობის ფენა (gspread-ის �
 
   Tasks:
     task_id | title | description | assigned_to | status | priority |
-    due_date | created_by | created_at | updated_at | notified
+    due_date | created_by | created_at | updated_at | notified |
+    lead_type | client_phone | deal_type | listing_id | viewing_time
 
   status: New / InProgress / Done
   notified: yes / no  (bot ავსებს ავტომატურად, როცა აგენტს შეატყობინებს)
+  lead_type: general (ზოგადი კლიენტი) / listing (კონკრეტული ბინის ნახვა)
+  deal_type: ქირა / ყიდვა  (მხოლოდ lead_type=general-ისთვის)
 """
 
 from __future__ import annotations
 
 import datetime
 import json
+import random
 import threading
 import uuid
 
@@ -42,7 +46,8 @@ AGENTS_HEADERS = [
 TASKS_HEADERS = [
     "task_id", "title", "description", "assigned_to", "status",
     "priority", "due_date", "created_by", "created_at", "updated_at",
-    "notified",
+    "notified", "lead_type", "client_phone", "deal_type", "listing_id",
+    "viewing_time",
 ]
 
 
@@ -93,6 +98,8 @@ def ensure_sheets():
     else:
         ws2 = existing[config.TASKS_SHEET_NAME]
         if ws2.row_values(1) != TASKS_HEADERS:
+            if ws2.col_count < len(TASKS_HEADERS):
+                ws2.resize(cols=len(TASKS_HEADERS))
             ws2.update("A1", [TASKS_HEADERS])
 
 
@@ -166,13 +173,17 @@ def get_tasks_for_agent(agent_id: str, only_open: bool = True) -> list[dict]:
 
 
 def create_task(title: str, description: str, assigned_to: str,
-                 priority: str, due_date: str, created_by: str) -> str:
+                 priority: str, due_date: str, created_by: str,
+                 lead_type: str = "", client_phone: str = "",
+                 deal_type: str = "", listing_id: str = "",
+                 viewing_time: str = "") -> str:
     with _lock:
         task_id = uuid.uuid4().hex[:8]
         now = _now()
         _tasks_ws().append_row([
             task_id, title, description, assigned_to, "New",
             priority, due_date, created_by, now, now, "no",
+            lead_type, client_phone, deal_type, listing_id, viewing_time,
         ])
         return task_id
 
@@ -206,3 +217,86 @@ def get_unnotified_tasks() -> list[dict]:
         if str(t.get("notified", "")).strip().lower() != "yes"
         and t.get("assigned_to")
     ]
+
+
+# ---------- Performance / assignment ----------
+
+def _parse_dt(value: str):
+    try:
+        return datetime.datetime.strptime(value.strip(), "%Y-%m-%d %H:%M")
+    except (ValueError, AttributeError):
+        return None
+
+
+def get_agent_performance(days: int = 30) -> dict:
+    """
+    თითო აგენტისთვის ბოლო `days` დღეში დაწყებული დავალებების მიხედვით:
+      assigned   - სულ რამდენი დავალება მიენიჭა
+      on_time    - რამდენი დაასრულა (Done) 24 საათის განმავლობაში
+      rate       - on_time / assigned (0.0 - 1.0), None თუ assigned=0
+
+    "დროულობა" აქ იზომება არა due_date-თან შედარებით (რადგან ზოგად
+    კლიენტებს ხშირად ვადა საერთოდ არა აქვთ), არამედ შექმნიდან 24 საათში
+    დახურვით — ეს პირდაპირ ზომავს, რამდენად სწრაფად რეაგირებს აგენტი
+    ახალ ლიდზე.
+    """
+    cutoff = datetime.datetime.now() - datetime.timedelta(days=days)
+    stats: dict[str, dict] = {}
+
+    for t in get_tasks():
+        created = _parse_dt(t.get("created_at", ""))
+        if not created or created < cutoff:
+            continue
+        agent_id = str(t.get("assigned_to") or "").strip()
+        if not agent_id:
+            continue
+        s = stats.setdefault(agent_id, {"assigned": 0, "on_time": 0})
+        s["assigned"] += 1
+        if str(t.get("status")) == "Done":
+            updated = _parse_dt(t.get("updated_at", ""))
+            if updated and (updated - created) <= datetime.timedelta(hours=24):
+                s["on_time"] += 1
+
+    for s in stats.values():
+        s["rate"] = (s["on_time"] / s["assigned"]) if s["assigned"] else None
+
+    return stats
+
+
+def pick_agent_for_priority(priority: str, days: int = 30) -> str | None:
+    """
+    ირჩევს agent_id-ს პრიორიტეტის მიხედვით:
+      მაღალი   -> საუკეთესო შესრულების მაჩვენებლის მქონე აქტიური აგენტი
+      საშუალო  -> ყველაზე სუსტი მაჩვენებლის მქონე აქტიური აგენტი
+      სხვა     -> შემთხვევითი აქტიური აგენტი
+
+    გასათვალისწინებელია მხოლოდ აქტიური და უკვე Telegram-ში
+    დარეგისტრირებული აგენტები (წინააღმდეგ შემთხვევაში შეტყობინებას ვერ
+    მიიღებდნენ).
+    """
+    agents = [
+        a for a in get_agents()
+        if str(a.get("active", "")).strip().lower() != "no"
+        and str(a.get("telegram_chat_id", "")).strip()
+    ]
+    if not agents:
+        return None
+
+    perf = get_agent_performance(days)
+
+    def rate(agent_id: str) -> float:
+        s = perf.get(agent_id)
+        if not s or not s["assigned"] or s["rate"] is None:
+            return 0.0
+        return s["rate"]
+
+    scored = [(a["agent_id"], rate(a["agent_id"])) for a in agents]
+
+    if priority == "მაღალი":
+        scored.sort(key=lambda x: x[1], reverse=True)
+    elif priority == "საშუალო":
+        scored.sort(key=lambda x: x[1])
+    else:
+        random.shuffle(scored)
+
+    return scored[0][0]
