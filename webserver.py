@@ -2,9 +2,16 @@
 Mini App (ვიზუალური დაშბორდი) — მცირე Flask სერვერი, რომელიც ბოტის იმავე
 პროცესში, ფონურ thread-ში ეშვება (bot.py-ის main()-იდან).
 
-გვერდები (webapp/) იტვირთება პირდაპირ ტელეგრამშივე, როგორც Telegram Mini
-App — ავტორიზაცია ხდება Telegram-ის `initData`-ს ვალიდაციით (HMAC-SHA256
-ბოტის ტოკენით, დამატებით ტოკენი არასდროს ეგზავნება frontend-ს).
+გვერდი (index.html/style.css/app.js) იტვირთება პირდაპირ ტელეგრამშივე,
+როგორც Telegram Mini App — ავტორიზაცია ხდება Telegram-ის `initData`-ს
+ვალიდაციით (HMAC-SHA256 ბოტის ტოკენით, დამატებით ტოკენი არასდროს
+ეგზავნება frontend-ს).
+
+შენიშვნა: frontend-ის ფაილები (index.html/style.css/app.js) აქ
+იტვირთება **repo-ს იმავე ძირი საქაღალდიდან**, სადაც bot.py/webserver.py
+დევს — არა ცალკე "webapp/" ქვესაქაღალდედან — რომ GitHub-ის ვებ
+ატვირთვისას (Add file → Upload files, ქვესაქაღალდეების გარეშე)
+ავტომატურად, ხელით საქაღალდის შექმნის გარეშე იმუშაოს.
 
 დოკუმენტაცია: https://core.telegram.org/bots/webapps#validating-data-received-via-the-mini-app
 """
@@ -15,6 +22,7 @@ import hashlib
 import hmac
 import json
 import logging
+import os
 import urllib.parse
 import urllib.request
 
@@ -25,7 +33,9 @@ import sheets
 
 log = logging.getLogger("safehome-crm-webapp")
 
-app = Flask(__name__, static_folder="webapp", static_url_path="")
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+app = Flask(__name__)
 
 
 def _send_telegram_message(chat_id, text: str) -> None:
@@ -185,10 +195,21 @@ def api_dayoff_decide():
 
 
 # ---------------------------------------------------------- static app
+# (index.html/style.css/app.js — repo-ს ძირიდან, არა ცალკე ქვესაქაღალდიდან)
 
 @app.get("/")
 def index():
-    return send_from_directory(app.static_folder, "index.html")
+    return send_from_directory(BASE_DIR, "index.html")
+
+
+@app.get("/style.css")
+def style_css():
+    return send_from_directory(BASE_DIR, "style.css")
+
+
+@app.get("/app.js")
+def app_js():
+    return send_from_directory(BASE_DIR, "app.js")
 
 
 def run():
