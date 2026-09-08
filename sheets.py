@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import datetime
 import json
+import logging
 import random
 import threading
 import uuid
@@ -110,90 +111,48 @@ def _get_spreadsheet():
     return _sheet
 
 
+def _ensure_one_sheet(ss, existing: dict, name: str, headers: list[str], rows: int):
+    """
+    ერთი tab-ის შექმნა/სათაურების განახლება. განზრახ არაფერს არ
+    ისვამს try/except-ში აქ — მთლიანი ensure_sheets() თითო sheet-ს
+    ცალკე იცავს, რომ ერთი წყვეტადი sheet-ი (მაგ. დაცული სვეტი) მთელ
+    ბოტს არ აჩერებდეს გაშვებაზე.
+    """
+    if name not in existing:
+        ws = ss.add_worksheet(name, rows=rows, cols=len(headers))
+        ws.append_row(headers)
+        return
+    ws = existing[name]
+    if ws.row_values(1) != headers:
+        if ws.col_count < len(headers):
+            ws.resize(cols=len(headers))
+        ws.update("A1", [headers])
+
+
 def ensure_sheets():
-    """თუ Agents/Tasks tab-ები არ არსებობს, ქმნის სათაურებით."""
+    """ქმნის/ანახლებს ყველა საჭირო tab-ს. თითო tab ცალკეა დაცული
+    შეცდომისგან — ერთის გაფუჭება არ უშლის ხელს დანარჩენებს და ბოტის
+    გაშვებას."""
     ss = _get_spreadsheet()
     existing = {ws.title: ws for ws in ss.worksheets()}
 
-    if config.AGENTS_SHEET_NAME not in existing:
-        ws = ss.add_worksheet(config.AGENTS_SHEET_NAME, rows=200, cols=len(AGENTS_HEADERS))
-        ws.append_row(AGENTS_HEADERS)
-    else:
-        ws = existing[config.AGENTS_SHEET_NAME]
-        if ws.row_values(1) != AGENTS_HEADERS:
-            if ws.col_count < len(AGENTS_HEADERS):
-                ws.resize(cols=len(AGENTS_HEADERS))
-            ws.update("A1", [AGENTS_HEADERS])
-
-    if config.TASKS_SHEET_NAME not in existing:
-        ws2 = ss.add_worksheet(config.TASKS_SHEET_NAME, rows=500, cols=len(TASKS_HEADERS))
-        ws2.append_row(TASKS_HEADERS)
-    else:
-        ws2 = existing[config.TASKS_SHEET_NAME]
-        if ws2.row_values(1) != TASKS_HEADERS:
-            if ws2.col_count < len(TASKS_HEADERS):
-                ws2.resize(cols=len(TASKS_HEADERS))
-            ws2.update("A1", [TASKS_HEADERS])
-
-    if config.REPORTS_SHEET_NAME not in existing:
-        ws3 = ss.add_worksheet(config.REPORTS_SHEET_NAME, rows=1000, cols=len(REPORTS_HEADERS))
-        ws3.append_row(REPORTS_HEADERS)
-    else:
-        ws3 = existing[config.REPORTS_SHEET_NAME]
-        if ws3.row_values(1) != REPORTS_HEADERS:
-            if ws3.col_count < len(REPORTS_HEADERS):
-                ws3.resize(cols=len(REPORTS_HEADERS))
-            ws3.update("A1", [REPORTS_HEADERS])
-
-    if config.DAYOFF_SHEET_NAME not in existing:
-        ws4 = ss.add_worksheet(config.DAYOFF_SHEET_NAME, rows=300, cols=len(DAYOFF_HEADERS))
-        ws4.append_row(DAYOFF_HEADERS)
-    else:
-        ws4 = existing[config.DAYOFF_SHEET_NAME]
-        if ws4.row_values(1) != DAYOFF_HEADERS:
-            if ws4.col_count < len(DAYOFF_HEADERS):
-                ws4.resize(cols=len(DAYOFF_HEADERS))
-            ws4.update("A1", [DAYOFF_HEADERS])
-
-    if config.MEETINGS_SHEET_NAME not in existing:
-        ws5 = ss.add_worksheet(config.MEETINGS_SHEET_NAME, rows=1000, cols=len(MEETINGS_HEADERS))
-        ws5.append_row(MEETINGS_HEADERS)
-    else:
-        ws5 = existing[config.MEETINGS_SHEET_NAME]
-        if ws5.row_values(1) != MEETINGS_HEADERS:
-            if ws5.col_count < len(MEETINGS_HEADERS):
-                ws5.resize(cols=len(MEETINGS_HEADERS))
-            ws5.update("A1", [MEETINGS_HEADERS])
-
-    if config.SCHEDULE_SHEET_NAME not in existing:
-        ws6 = ss.add_worksheet(config.SCHEDULE_SHEET_NAME, rows=200, cols=len(SCHEDULE_HEADERS))
-        ws6.append_row(SCHEDULE_HEADERS)
-    else:
-        ws6 = existing[config.SCHEDULE_SHEET_NAME]
-        if ws6.row_values(1) != SCHEDULE_HEADERS:
-            if ws6.col_count < len(SCHEDULE_HEADERS):
-                ws6.resize(cols=len(SCHEDULE_HEADERS))
-            ws6.update("A1", [SCHEDULE_HEADERS])
-
-    if config.ATTENDANCE_SHEET_NAME not in existing:
-        ws7 = ss.add_worksheet(config.ATTENDANCE_SHEET_NAME, rows=2000, cols=len(ATTENDANCE_HEADERS))
-        ws7.append_row(ATTENDANCE_HEADERS)
-    else:
-        ws7 = existing[config.ATTENDANCE_SHEET_NAME]
-        if ws7.row_values(1) != ATTENDANCE_HEADERS:
-            if ws7.col_count < len(ATTENDANCE_HEADERS):
-                ws7.resize(cols=len(ATTENDANCE_HEADERS))
-            ws7.update("A1", [ATTENDANCE_HEADERS])
-
-    if config.WARNINGS_SHEET_NAME not in existing:
-        ws8 = ss.add_worksheet(config.WARNINGS_SHEET_NAME, rows=500, cols=len(WARNINGS_HEADERS))
-        ws8.append_row(WARNINGS_HEADERS)
-    else:
-        ws8 = existing[config.WARNINGS_SHEET_NAME]
-        if ws8.row_values(1) != WARNINGS_HEADERS:
-            if ws8.col_count < len(WARNINGS_HEADERS):
-                ws8.resize(cols=len(WARNINGS_HEADERS))
-            ws8.update("A1", [WARNINGS_HEADERS])
+    sheets_to_ensure = [
+        (config.AGENTS_SHEET_NAME, AGENTS_HEADERS, 200),
+        (config.TASKS_SHEET_NAME, TASKS_HEADERS, 500),
+        (config.REPORTS_SHEET_NAME, REPORTS_HEADERS, 1000),
+        (config.DAYOFF_SHEET_NAME, DAYOFF_HEADERS, 300),
+        (config.MEETINGS_SHEET_NAME, MEETINGS_HEADERS, 1000),
+        (config.SCHEDULE_SHEET_NAME, SCHEDULE_HEADERS, 200),
+        (config.ATTENDANCE_SHEET_NAME, ATTENDANCE_HEADERS, 2000),
+        (config.WARNINGS_SHEET_NAME, WARNINGS_HEADERS, 500),
+    ]
+    for name, headers, rows in sheets_to_ensure:
+        try:
+            _ensure_one_sheet(ss, existing, name, headers, rows)
+        except Exception:
+            logging.getLogger("safehome-crm-sheets").exception(
+                "'%s' tab-ის მომზადება ვერ მოხერხდა — ბოტი მაინც განაგრძობს გაშვებას", name
+            )
 
 
 def _agents_ws():

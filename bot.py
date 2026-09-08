@@ -1221,11 +1221,53 @@ async def check_daily_compliance(context: ContextTypes.DEFAULT_TYPE):
             await _notify_warning(context, a, "late_report", today, result)
 
 
+async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE):
+    """
+    გლობალური შეცდომების დამჭერი — თუ რომელიმე ბრძანების დამუშავებისას
+    გაუთვალისწინებელი შეცდომა მოხდება, ბოტი აქამდე "იჭედებოდა" (ის
+    კონკრეტული საუბარი ჩერდებოდა და მომხმარებელს აღარაფერს პასუხობდა,
+    Railway-ის ლოგებში კი უჩუმრად რჩებოდა). ახლა: 1) ეს ჩაიწერება
+    ლოგში, 2) ადმინებს მაშინვე მიუვათ შეტყობინება, 3) იმ საუბრის
+    user_data გასუფთავდება, რომ შემდეგმა ბრძანებამ ისევ იმუშაოს.
+    """
+    log.exception("დაუჭერავი შეცდომა update-ის დამუშავებისას", exc_info=context.error)
+
+    try:
+        if isinstance(update, Update) and update.effective_chat:
+            if context.user_data is not None:
+                context.user_data.clear()
+            if not is_admin(update.effective_chat.id):
+                await context.bot.send_message(
+                    chat_id=update.effective_chat.id,
+                    text="⚠️ მოხდა შეცდომა. სცადეთ ისევ, ან დაწერეთ /cancel და თავიდან.",
+                )
+    except Exception:
+        log.exception("on_error-ის თავად დამუშავებაც ჩავარდა")
+
+    for admin_id in config.ADMIN_CHAT_IDS:
+        try:
+            await context.bot.send_message(
+                chat_id=admin_id,
+                text=f"⚠️ ბოტში მოხდა შეცდომა: {context.error!r}\nRailway-ის ლოგებში მეტი დეტალია.",
+            )
+        except Exception:
+            log.exception("შეცდომის შეტყობინება ვერ გაეგზავნა admin=%s", admin_id)
+
+
 def main():
     config.validate()
-    sheets.ensure_sheets()
+    try:
+        sheets.ensure_sheets()
+    except Exception:
+        log.exception(
+            "ცხრილთან საწყისი დაკავშირება/მომზადება ჩავარდა — ამის გარეშე ბოტი "
+            "ვერ იმუშავებს. გადაამოწმეთ GOOGLE_SHEET_ID/GOOGLE_SERVICE_ACCOUNT_JSON "
+            "და რომ სერვის-აქაუნთს Editor წვდომა აქვს ცხრილზე."
+        )
+        raise
 
     app = Application.builder().token(config.TELEGRAM_BOT_TOKEN).build()
+    app.add_error_handler(on_error)
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.CONTACT, on_contact))
