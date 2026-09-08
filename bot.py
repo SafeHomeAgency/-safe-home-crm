@@ -1377,7 +1377,11 @@ def main():
         )
 
     log.info("ბოტი გაშვებულია...")
-    app.run_polling()
+    # drop_pending_updates=True: სტარტზე ასუფთავებს დაგროვილ ძველ/გაფუჭებულ
+    # update-ებს (getWebhookInfo-მ აჩვენა pending_update_count: 28) — წინააღმდეგ
+    # შემთხვევაში ბოტი მარადიულად ცდილობს იმავე ძველი, ჩამტვრეული update-ის
+    # დამუშავებას და ახალ შეტყობინებებამდე (მაგ. /start) საერთოდ ვერ აღწევს.
+    app.run_polling(drop_pending_updates=True)
 
 
 if __name__ == "__main__":
