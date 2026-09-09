@@ -553,22 +553,26 @@ async def clientreport_actions_done(update: Update, context: ContextTypes.DEFAUL
     await query.answer()
     labels = [REPORT_ACTIONS[i] for i in sorted(sel)]
     context.user_data["rp_actions_labels"] = labels
+    context.user_data["rp_files"] = []
     await query.edit_message_text(
         "მონიშნული: " + ", ".join(labels) +
-        "\n\nდაწერეთ შენიშვნა, გამოაგზავნეთ ფოტო/დოკუმენტი, ან /skip."
+        "\n\nშეგიძლიათ გამოაგზავნოთ ერთი ან რამდენიმე ფოტო/დოკუმენტი (მაგ. WhatsApp-ის "
+        "სქრინები, ან zip ფაილი) — თითოეულის მიღების შემდეგ დაგიდასტურებთ. "
+        "დასასრულებლად დაწერეთ შენიშვნა, ან გამოაგზავნეთ /skip."
     )
     return RP_NOTES
 
 
-async def _clientreport_save(update: Update, context: ContextTypes.DEFAULT_TYPE,
-                              notes: str = "", file_id: str = ""):
+async def _clientreport_save(update: Update, context: ContextTypes.DEFAULT_TYPE, notes: str = ""):
     d = context.user_data
+    files = d.get("rp_files", [])
     report_id = sheets.create_report(
         agent_id=d["rp_agent_id"], client_phone=d["rp_phone"],
         actions=", ".join(d.get("rp_actions_labels", [])),
-        notes=notes, file_id=file_id,
+        notes=notes, file_id=", ".join(files),
     )
-    await update.message.reply_text(f"✅ რეპორტი შენახულია (id: {report_id}).")
+    extra = f" ({len(files)} ფაილით)" if files else ""
+    await update.message.reply_text(f"✅ რეპორტი შენახულია{extra} (id: {report_id}).")
     d.clear()
     return ConversationHandler.END
 
@@ -583,7 +587,18 @@ async def clientreport_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
         file_id = update.message.photo[-1].file_id
     elif update.message.document:
         file_id = update.message.document.file_id
-    return await _clientreport_save(update, context, notes=update.message.caption or "", file_id=file_id)
+    if not file_id:
+        return RP_NOTES
+    files = context.user_data.setdefault("rp_files", [])
+    files.append(file_id)
+    caption = (update.message.caption or "").strip()
+    if caption:
+        # თუ ფოტოს კაპშენში მაშინვე დაწერა შენიშვნა, ეს ბოლო შეტყობინებად ჩაითვლება.
+        return await _clientreport_save(update, context, notes=caption)
+    await update.message.reply_text(
+        f"📎 მიღებულია ({len(files)}). კიდევ გამოაგზავნეთ, დაწერეთ შენიშვნა, ან /skip."
+    )
+    return RP_NOTES
 
 
 async def clientreport_skip(update: Update, context: ContextTypes.DEFAULT_TYPE):
