@@ -207,6 +207,14 @@ QUESTIONS_HEADERS = [
     "answer", "answered_by", "created_at", "answered_at",
 ]
 
+# ექსკლუზივის გაზიარება კოლეგასთან (v3.10) — თანამშრომლობის კვალი:
+# ვინ ვისთან იზიარებდა რომელ ბინას, და როდის. ამის მიხედვით ითვლება
+# ყოველი აგენტის "თანამშრომლობის" მაჩვენებელიც (collaboration_count).
+EXCLUSIVE_SHARES_HEADERS = [
+    "share_id", "exclusive_id", "from_agent_id", "from_agent_name",
+    "to_agent_id", "to_agent_name", "note", "created_at",
+]
+
 
 def _get_client():
     """
@@ -273,6 +281,7 @@ def ensure_sheets():
         (config.SHIFT_SWAPS_SHEET_NAME, SHIFT_SWAPS_HEADERS, 500),
         (config.EXCLUSIVES_SHEET_NAME, EXCLUSIVES_HEADERS, 1000),
         (config.QUESTIONS_SHEET_NAME, QUESTIONS_HEADERS, 1000),
+        (config.EXCLUSIVE_SHARES_SHEET_NAME, EXCLUSIVE_SHARES_HEADERS, 2000),
     ]
     for name, headers, rows in sheets_to_ensure:
         try:
@@ -325,6 +334,10 @@ def _exclusives_ws():
 
 def _questions_ws():
     return _worksheet(config.QUESTIONS_SHEET_NAME)
+
+
+def _exclusive_shares_ws():
+    return _worksheet(config.EXCLUSIVE_SHARES_SHEET_NAME)
 
 
 def _now():
@@ -1079,6 +1092,54 @@ def get_exclusives(agent_id: str | None = None, status: str | None = None) -> li
     return rows
 
 
+def find_exclusive(exclusive_id: str) -> dict | None:
+    return next(
+        (r for r in get_exclusives() if str(r.get("exclusive_id")) == str(exclusive_id)), None
+    )
+
+
+# ---------- ექსკლუზივის გაზიარება (თანამშრომლობა, v3.10) ----------
+
+def share_exclusive(exclusive_id: str, from_agent_id: str, to_agent_id: str, note: str = "") -> dict | None:
+    """ერთი აგენტი უზიარებს კოლეგას საკუთარ ან სხვის ექსკლუზივს (მაგ.
+    კლიენტი დაინტერესდა სხვის ბინით) — ინახება კვალი, ვინ ვისთან
+    თანამშრომლობს რომელ ლისტინგზე."""
+    exclusive = find_exclusive(exclusive_id)
+    if not exclusive:
+        return None
+    with _lock:
+        share_id = uuid.uuid4().hex[:8]
+        _exclusive_shares_ws().append_row([
+            share_id, exclusive_id, from_agent_id, agent_name_by_id(from_agent_id),
+            to_agent_id, agent_name_by_id(to_agent_id), note, _now(),
+        ])
+        _invalidate(config.EXCLUSIVE_SHARES_SHEET_NAME)
+    return {
+        "share_id": share_id, "exclusive_id": exclusive_id,
+        "from_agent_id": from_agent_id, "to_agent_id": to_agent_id,
+        "exclusive": exclusive,
+    }
+
+
+def get_exclusive_shares(exclusive_id: str | None = None, agent_id: str | None = None) -> list[dict]:
+    with _lock:
+        rows = _cached_records(config.EXCLUSIVE_SHARES_SHEET_NAME)
+    if exclusive_id:
+        rows = [r for r in rows if str(r.get("exclusive_id")) == str(exclusive_id)]
+    if agent_id:
+        rows = [
+            r for r in rows
+            if str(r.get("from_agent_id")) == str(agent_id) or str(r.get("to_agent_id")) == str(agent_id)
+        ]
+    return rows
+
+
+def collaboration_count(agent_id: str) -> int:
+    """რამდენჯერ გაუზიარებია ან მიუღია ეს აგენტი ექსკლუზივი კოლეგასთან
+    — მარტივი „თანამშრომლობის" მაჩვენებელი, გუნდის დეტალებში ჩანს."""
+    return len(get_exclusive_shares(agent_id=agent_id))
+
+
 # ---------- კითხვა მენეჯერს (v3.9, სრული დიალოგი Mini App-ში) ----------
 
 def create_question(agent_id: str, text: str) -> str:
@@ -1249,6 +1310,7 @@ def get_admin_dashboard(team: str | None = None) -> dict:
             "rate": p.get("rate"),
             "clients_today": c["today"],
             "clients_total": c["total"],
+            "collaboration": collaboration_count(aid),
         })
 
     ranking = sorted(

@@ -151,7 +151,76 @@ def api_exclusives():
     if err:
         return err
     rows = sheets.get_exclusives(status="active")
+    for r in rows:
+        try:
+            r["collaboration_count"] = len(sheets.get_exclusive_shares(exclusive_id=r.get("exclusive_id")))
+        except Exception:
+            r["collaboration_count"] = 0
     return jsonify(rows=rows[::-1])
+
+
+@app.get("/api/colleagues")
+def api_colleagues():
+    """კოლეგების სია (გაზიარების მისამართებისთვის) — საკუთარი თავის
+    გარეშე, მხოლოდ აქტიური აგენტები."""
+    agent, admin, err = _authed_agent()
+    if err:
+        return err
+    if not agent:
+        return jsonify(error="მხოლოდ დარეგისტრირებული აგენტისთვის"), 403
+    rows = [
+        {"agent_id": a.get("agent_id"), "name": a.get("name"), "team": a.get("team", "")}
+        for a in sheets.get_agents()
+        if str(a.get("agent_id")) != str(agent.get("agent_id"))
+        and str(a.get("active", "yes")).strip().lower() not in ("no", "false", "0")
+    ]
+    rows.sort(key=lambda r: r.get("name") or "")
+    return jsonify(rows=rows)
+
+
+@app.post("/api/exclusives/share")
+def api_exclusives_share():
+    """ექსკლუზივის გაზიარება კოლეგასთან — თანამშრომლობის კვალის
+    ჩაწერით (v3.10): თუ კლიენტი დაინტერესდა კოლეგის ბინით, აგენტს
+    შეუძლია პირდაპირ Mini App-იდან გაუზიაროს და ეს აისახოს ორივეს
+    დაშბორდზე და მენეჯერთანაც."""
+    agent, admin, err = _authed_agent()
+    if err:
+        return err
+    if not agent:
+        return jsonify(error="მხოლოდ დარეგისტრირებული აგენტისთვის"), 403
+    body = request.get_json(silent=True) or {}
+    exclusive_id = body.get("exclusive_id")
+    to_agent_id = body.get("to_agent_id")
+    note = (body.get("note") or "").strip()
+    if not exclusive_id or not to_agent_id:
+        return jsonify(error="არასწორი მოთხოვნა"), 400
+    if str(to_agent_id) == str(agent.get("agent_id")):
+        return jsonify(error="საკუთარ თავზე გაზიარება არ შეიძლება"), 400
+    result = sheets.share_exclusive(exclusive_id, agent["agent_id"], to_agent_id, note)
+    if not result:
+        return jsonify(error="ეს ექსკლუზივი ვერ მოიძებნა"), 404
+
+    to_agent = next(
+        (a for a in sheets.get_agents() if str(a.get("agent_id")) == str(to_agent_id)), None
+    )
+    exclusive = result.get("exclusive", {})
+    loc = exclusive.get("location") or exclusive.get("property_type") or ""
+    notify_text = (
+        f"🤝 {agent.get('name')}-მ გაგიზიარათ ექსკლუზივი ({loc}) — "
+        f"კლიენტი დაინტერესებულია."
+    )
+    if note:
+        notify_text += f"\nშენიშვნა: {note}"
+    if to_agent and to_agent.get("telegram_chat_id"):
+        _send_telegram_message(int(to_agent["telegram_chat_id"]), notify_text)
+    for admin_id in config.ADMIN_CHAT_IDS:
+        _send_telegram_message(
+            admin_id,
+            f"🤝 თანამშრომლობა: {agent.get('name')} ↔ {to_agent.get('name') if to_agent else to_agent_id} "
+            f"ბინაზე ({loc}).",
+        )
+    return jsonify(ok=True, share=result)
 
 
 @app.post("/api/reports/rate")

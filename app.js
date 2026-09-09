@@ -15,6 +15,10 @@ if (tg) {
   tg.ready();
   tg.expand();
   try { tg.setHeaderColor("secondary_bg_color"); } catch (e) {}
+  // მნიშვნელოვანი მობილურზე სქროლისთვის: ამის გარეშე ტელეგრამის
+  // კლიენტი გვერდზე ვერტიკალურ სვაიპს საკუთარ თავზე (მინი აპის
+  // დახურვა/მინიმიზება) იღებს და გვერდის შიგნით სქროლვას ბლოკავს.
+  try { tg.disableVerticalSwipes(); } catch (e) {}
 }
 
 const MODE_LABELS = {
@@ -360,7 +364,7 @@ const TEAM_FIELD_LABELS = [
   ["team", "გუნდი"], ["mode", "დღევანდელი რეჟიმი"], ["count_submitted", "შეყვანილი დღეს (ჯამი)"],
   ["site_count", "საიტი"], ["myhome_count", "myhome"], ["ssge_count", "ss.ge"], ["quota", "დღიური გეგმა"],
   ["clients_today", "კლიენტი დღეს"], ["clients_total", "კლიენტი ჯამურად"], ["assigned", "მიღებული (30დღე)"],
-  ["warnings", "გაფრთხილებები"],
+  ["warnings", "გაფრთხილებები"], ["collaboration", "თანამშრომლობა (ექსკლუზივის გაზიარება)"],
 ];
 
 function renderTeam(d) {
@@ -488,7 +492,7 @@ function renderExclusives(rows) {
         <div class="main">
           <div class="title">${esc(r.property_type || "-")} · ${esc(r.deal_type || "-")} — ${esc(r.agent_name)}</div>
           <div class="sub">${esc(r.location || "-")} · ${esc(r.area || "-")} მ² · ${esc(r.rooms || "-")} ოთახი</div>
-          <div class="sub">💰 ${esc(r.price || "-")} ${r.percent ? "· " + esc(r.percent) + "%" : ""}</div>
+          <div class="sub">💰 ${esc(r.price || "-")} ${r.percent ? "· " + esc(r.percent) + "%" : ""}${r.collaboration_count ? " · 🤝 " + esc(r.collaboration_count) : ""}</div>
         </div>
       </div>`).join("")}
   </div>`;
@@ -499,12 +503,69 @@ function bindExclusivesActions(rows) {
     el.onclick = () => {
       const r = rows[parseInt(el.dataset.exclusiveIdx, 10)];
       if (!r) return;
-      openDetail(
-        `${r.property_type || "ობიექტი"} — ${r.location || ""}`,
-        EXCLUSIVE_FIELD_LABELS.map(([k, label]) => ({ label, value: r[k] })),
-      );
+      openExclusiveDetail(r);
     };
   });
+}
+
+/* ექსკლუზივის დეტალი + გაზიარება კოლეგასთან (თანამშრომლობა, v3.10):
+   თუ სხვა აგენტს დასჭირდება კოლეგის ბინა (კლიენტი დაინტერესდა), აქედანვე
+   უზიარებს — სისტემა იმახსოვრებს ვინ ვისთან თანამშრომლობს ამ ბინაზე. */
+async function openExclusiveDetail(r) {
+  const backdrop = document.getElementById("modalBackdrop");
+  const box = document.getElementById("modalBox");
+  const fieldsHtml = EXCLUSIVE_FIELD_LABELS
+    .map(([k, label]) => ({ label, value: r[k] }))
+    .filter((f) => f.value !== undefined && f.value !== null && String(f.value).trim() !== "")
+    .map((f) => `<div class="field"><div class="k">${esc(f.label)}</div><div class="v">${esc(f.value)}</div></div>`)
+    .join("");
+
+  box.innerHTML = `
+    <h3>${esc(r.property_type || "ობიექტი")} — ${esc(r.location || "")}<button class="close" id="modalClose">✕</button></h3>
+    ${fieldsHtml}
+    <div class="field"><div class="k">თანამშრომლობა</div><div class="v">🤝 ${esc(r.collaboration_count || 0)} გაზიარება</div></div>
+    <div class="share-box">
+      <div class="lbl">🔗 გაზიარება კოლეგასთან — კლიენტი დაინტერესდა?</div>
+      <div class="qa-compose">
+        <select id="shareColleagueSelect"><option value="">კოლეგის არჩევა…</option></select>
+        <textarea id="shareNote" placeholder="შენიშვნა (არასავალდებულო)"></textarea>
+        <button class="btn" id="shareSubmitBtn">გაზიარება</button>
+      </div>
+    </div>
+  `;
+  backdrop.hidden = false;
+  document.getElementById("modalClose").onclick = closeDetail;
+  backdrop.onclick = (e) => { if (e.target === backdrop) closeDetail(); };
+
+  try {
+    const { rows: colleagues } = await api("/api/colleagues");
+    const sel = document.getElementById("shareColleagueSelect");
+    if (sel) {
+      sel.innerHTML = `<option value="">კოლეგის არჩევა…</option>` +
+        colleagues.map((c) => `<option value="${esc(c.agent_id)}">${esc(c.name)}${c.team ? " (" + esc(c.team) + ")" : ""}</option>`).join("");
+    }
+  } catch (e) { /* კოლეგების სია ჩავარდა — გაზიარების ველი ცარიელი დარჩება */ }
+
+  const shareBtn = document.getElementById("shareSubmitBtn");
+  if (shareBtn) {
+    shareBtn.onclick = async () => {
+      const toId = document.getElementById("shareColleagueSelect").value;
+      if (!toId) { toast("აირჩიეთ კოლეგა"); return; }
+      const note = document.getElementById("shareNote").value.trim();
+      shareBtn.disabled = true;
+      try {
+        await api("/api/exclusives/share", {
+          method: "POST",
+          body: JSON.stringify({ exclusive_id: r.exclusive_id, to_agent_id: toId, note }),
+        });
+        tg && tg.HapticFeedback && tg.HapticFeedback.notificationOccurred("success");
+        toast("გაზიარდა ✅");
+        closeDetail();
+        delete lazyCache.exclusives;
+        await renderContent();
+      } catch (e) { toast(e.message); shareBtn.disabled = false; }
+    };
+  }
 }
 
 const REPORT_FIELD_LABELS = [

@@ -43,6 +43,7 @@ WARNINGS_SHEET_NAME = "Warnings"
 SHIFT_SWAPS_SHEET_NAME = "ShiftSwaps"
 EXCLUSIVES_SHEET_NAME = "Exclusives"
 QUESTIONS_SHEET_NAME = "Questions"
+EXCLUSIVE_SHARES_SHEET_NAME = "ExclusiveShares"
 
 # თვეში მაქსიმუმ რამდენჯერ შეუძლია აგენტს სმენის გაცვლის მოთხოვნა
 SHIFT_SWAP_MONTHLY_LIMIT = int(os.environ.get("SHIFT_SWAP_MONTHLY_LIMIT", "2"))

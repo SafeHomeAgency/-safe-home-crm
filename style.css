@@ -36,6 +36,8 @@ html, body {
   color: var(--text);
   font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Roboto, sans-serif;
   -webkit-font-smoothing: antialiased;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
 }
 
 body {
@@ -389,3 +391,18 @@ body {
 .qa-item .qa-a .who { color: var(--gold-light); font-weight: 700; font-size: 11.5px; margin-bottom: 3px; }
 .qa-item textarea { width: 100%; margin-top: 8px; }
 .qa-item .btn { margin-top: 8px; padding: 9px 12px; font-size: 13px; }
+
+.qa-compose select {
+  resize: vertical;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--navy-3);
+  background: var(--bg);
+  color: var(--text);
+  padding: 10px 12px;
+  font-size: 14px;
+  font-family: inherit;
+}
+
+/* ---------- ექსკლუზივის გაზიარება კოლეგასთან (თანამშრომლობა) ---------- */
+.modal .share-box { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--navy-3); }
+.modal .share-box .lbl { font-weight: 700; margin-bottom: 8px; font-size: 13.5px; color: var(--gold-light); }
