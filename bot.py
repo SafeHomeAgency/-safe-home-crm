@@ -12,6 +12,7 @@ Safe Home Agency — აგენტების ტასკ-მენეჯმ
 
 from __future__ import annotations
 
+import asyncio
 import datetime
 import logging
 import threading
@@ -22,6 +23,7 @@ from telegram import (
     InlineKeyboardButton, InlineKeyboardMarkup, MenuButtonWebApp, Update,
     WebAppInfo,
 )
+from telegram.error import RetryAfter, Forbidden, TelegramError
 from telegram.ext import (
     Application, CommandHandler, ContextTypes, ConversationHandler,
     MessageHandler, CallbackQueryHandler, filters,
@@ -755,9 +757,33 @@ async def meeting_field(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 
+async def _send_with_retry(context: ContextTypes.DEFAULT_TYPE, chat_id: int, text: str,
+                            reply_markup: InlineKeyboardMarkup | None = None) -> None:
+    """ერთი შეტყობინების გაგზავნა — თუ Telegram-მა დროებით "flood control"
+    დააბრუნა (RetryAfter), ერთხელ ელოდება ზუსტად იმდენს, რამდენსაც
+    Telegram ითხოვს და თავიდან სცდის. ბლოკირებული/წაშლილი ბოტის
+    შემთხვევაში (Forbidden) უბრალოდ გამოტოვებს — მთელ გავრცელებას არ
+    აჩერებს."""
+    try:
+        await context.bot.send_message(chat_id=chat_id, text=text, reply_markup=reply_markup)
+    except RetryAfter as e:
+        await asyncio.sleep(e.retry_after + 0.5)
+        try:
+            await context.bot.send_message(chat_id=chat_id, text=text, reply_markup=reply_markup)
+        except Exception:
+            log.exception("განმეორებითი გაგზავნაც ვერ მოხერხდა chat_id=%s", chat_id)
+    except Forbidden:
+        pass
+    except TelegramError:
+        log.exception("შეტყობინების გაგზავნა ვერ მოხერხდა chat_id=%s", chat_id)
+
+
 async def _broadcast_to_agents(context: ContextTypes.DEFAULT_TYPE, text: str,
                                 exclude_agent_id: str | None = None,
                                 reply_markup: InlineKeyboardMarkup | None = None):
+    """მასობრივი გაგზავნა — მცირე დაყოვნებით თითოეულ შეტყობინებას შორის
+    (Telegram-ის "flood control" ლიმიტების დასაცავად, რომ ბევრი აგენტის
+    ერთდროულმა გავრცელებამ ბოტი არ "ჩამოაგდოს"/დაბლოკოს)."""
     for a in sheets.get_agents():
         if exclude_agent_id and a.get("agent_id") == exclude_agent_id:
             continue
@@ -766,10 +792,8 @@ async def _broadcast_to_agents(context: ContextTypes.DEFAULT_TYPE, text: str,
         chat_id = a.get("telegram_chat_id")
         if not chat_id:
             continue
-        try:
-            await context.bot.send_message(chat_id=int(chat_id), text=text, reply_markup=reply_markup)
-        except Exception:
-            log.exception("გავრცელების შეტყობინება ვერ გაეგზავნა agent_id=%s", a.get("agent_id"))
+        await _send_with_retry(context, int(chat_id), text, reply_markup=reply_markup)
+        await asyncio.sleep(0.05)
 
 
 # ------------------------------------------------------ /addexclusive (agent)

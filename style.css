@@ -1,20 +1,30 @@
+/* Safe Home Agency-ს ბრენდის ფერები (ლოგოდან): ღრმა ნავი + ოქრო.
+   შეგნებულად არ ვეყრდნობით tg-theme-*-ს — რომ Mini App ყოველთვის
+   კომპანიის ბრენდში გამოიყურებოდეს, მომხმარებლის ტელეგრამის თემისგან
+   დამოუკიდებლად. */
 :root {
-  --bg: var(--tg-theme-bg-color, #f4f5f7);
-  --secondary-bg: var(--tg-theme-secondary-bg-color, #ffffff);
-  --text: var(--tg-theme-text-color, #14171a);
-  --hint: var(--tg-theme-hint-color, #7c8a97);
-  --link: var(--tg-theme-link-color, #2b8aef);
-  --btn: var(--tg-theme-button-color, #2b8aef);
-  --btn-text: var(--tg-theme-button-text-color, #ffffff);
+  --navy: #0a1420;
+  --navy-2: #10263c;
+  --navy-3: #17324c;
+  --gold: #c9a227;
+  --gold-light: #e9c46a;
 
-  --accent: #2b8aef;
-  --accent-2: #7c5cff;
-  --green: #22c55e;
-  --amber: #f59e0b;
-  --red: #ef4444;
+  --bg: var(--navy);
+  --secondary-bg: var(--navy-2);
+  --text: #f3efe4;
+  --hint: #93a6bc;
+  --link: var(--gold-light);
+  --btn: var(--gold);
+  --btn-text: #16202c;
+
+  --accent: var(--gold);
+  --accent-2: var(--gold-light);
+  --green: #34d399;
+  --amber: #f5b942;
+  --red: #f26d6d;
   --radius: 18px;
   --radius-sm: 12px;
-  --shadow: 0 1px 2px rgba(20, 23, 26, .04), 0 8px 24px rgba(20, 23, 26, .06);
+  --shadow: 0 1px 2px rgba(0, 0, 0, .18), 0 8px 24px rgba(0, 0, 0, .28);
 }
 
 * { box-sizing: border-box; }
@@ -41,8 +51,35 @@ body {
   max-width: 560px;
   margin: 0 auto;
 }
-.appbar h1 { font-size: 20px; margin: 0 0 2px; font-weight: 700; letter-spacing: -.2px; }
+.appbar-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+.appbar .titlewrap { min-width: 0; }
+.appbar h1 {
+  font-size: 19px; margin: 0 0 2px; font-weight: 800; letter-spacing: .2px;
+  color: var(--gold-light);
+  text-transform: uppercase;
+}
 .appbar .sub { color: var(--hint); font-size: 13px; }
+.appbar .sitelink {
+  flex: none;
+  margin-top: 2px;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--navy);
+  background: var(--gold);
+  padding: 7px 11px;
+  border-radius: 999px;
+  border: none;
+  white-space: nowrap;
+}
+.appbar .sitelink:active { opacity: .85; }
 
 /* ---------- Role switch ---------- */
 .roleswitch {
@@ -267,3 +304,78 @@ body {
 @keyframes shimmer { 0% { background-position: 100% 50%; } 100% { background-position: 0 50%; } }
 
 .loading-wrap { padding: 40px 0; text-align: center; color: var(--hint); font-size: 13px; }
+
+/* ---------- დაკლიკებადი სტრიქონები (მეტი დეტალისთვის) ---------- */
+.list-row.clickable { cursor: pointer; transition: opacity .12s ease; }
+.list-row.clickable:active { opacity: .7; }
+
+/* ---------- დეტალის მოდალი ---------- */
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(3, 8, 14, .55);
+  display: flex;
+  align-items: flex-end;
+  z-index: 50;
+}
+.modal {
+  background: var(--secondary-bg);
+  width: 100%;
+  max-height: 82vh;
+  overflow-y: auto;
+  border-radius: 20px 20px 0 0;
+  padding: 18px 18px calc(18px + env(safe-area-inset-bottom));
+  box-shadow: 0 -8px 30px rgba(0,0,0,.35);
+}
+.modal h3 {
+  margin: 0 0 12px;
+  font-size: 16px;
+  font-weight: 800;
+  color: var(--gold-light);
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+}
+.modal .close {
+  border: none;
+  background: var(--bg);
+  color: var(--hint);
+  width: 28px; height: 28px;
+  border-radius: 50%;
+  font-size: 14px;
+  flex: none;
+}
+.modal .field { padding: 8px 0; border-bottom: 1px solid var(--bg); font-size: 13.5px; }
+.modal .field:last-child { border-bottom: none; }
+.modal .field .k { color: var(--hint); font-size: 11.5px; margin-bottom: 2px; }
+.modal .field .v { word-break: break-word; }
+
+/* ---------- კითხვა მენეჯერს ---------- */
+.qa-compose { display: flex; flex-direction: column; gap: 8px; margin-bottom: 4px; }
+.qa-compose textarea {
+  resize: vertical;
+  min-height: 64px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--navy-3);
+  background: var(--bg);
+  color: var(--text);
+  padding: 10px 12px;
+  font-size: 14px;
+  font-family: inherit;
+}
+.qa-thread { margin-top: 6px; }
+.qa-item { padding: 10px 0; border-bottom: 1px solid var(--bg); }
+.qa-item:last-child { border-bottom: none; }
+.qa-item .qa-q { font-size: 13.5px; }
+.qa-item .qa-meta { font-size: 11px; color: var(--hint); margin-top: 2px; }
+.qa-item .qa-a {
+  margin-top: 8px;
+  background: var(--bg);
+  border-radius: var(--radius-sm);
+  padding: 9px 11px;
+  font-size: 13px;
+}
+.qa-item .qa-a .who { color: var(--gold-light); font-weight: 700; font-size: 11.5px; margin-bottom: 3px; }
+.qa-item textarea { width: 100%; margin-top: 8px; }
+.qa-item .btn { margin-top: 8px; padding: 9px 12px; font-size: 13px; }

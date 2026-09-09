@@ -24,6 +24,7 @@ import json
 import logging
 import random
 import threading
+import time
 import uuid
 
 import gspread
@@ -44,6 +45,94 @@ _SCOPES = [
 _lock = threading.RLock()
 _client = None
 _sheet = None
+
+# ---------------------------------------------------------------------
+# დატვირთვის დაცვა (v3.9): ბევრი აგენტის ერთდროული მოთხოვნისას (მაგ.
+# Mini App-ს ბევრი ადამიანი ერთდროულად ხსნის) Google Sheets API-ს აქვს
+# საკუთარი ლიმიტი წუთში — ამის გარეშე ასეთ დროს ბოტი "ჩამოვარდნის"
+# რისკის ქვეშაა. ორი დამცავი მექანიზმი:
+#
+#   1. _RetryingWorksheet — ყველა Sheets-ის გამოძახებას (წაკითხვა თუ
+#      ჩაწერა) ავტომატურად იმეორებს, თუ API-მ დროებით "429/500/503"
+#      დააბრუნა — უბრალოდ ცოტა ხანს ითმენს და თავად სცდის თავიდან,
+#      მომხმარებელს შეცდომა საერთოდ არ უნახავს.
+#   2. მოკლევადიანი (რამდენიმე წამიანი) კეშირება ერთი "მთელი ცხრილის"
+#      წაკითხვაზე (get_all_records) — რომ ერთი დაშბორდის აწყობისას ან
+#      ბევრი პარალელური მოთხოვნისას იგივე ცხრილი ისევ და ისევ არ
+#      მოვთხოვოთ Google-ს. ნებისმიერი ჩაწერა მაშინვე შლის შესაბამის
+#      ცხრილის კეშს — ანუ საკუთარი ცვლილება ყოველთვის მაშინვე ახალია,
+#      მხოლოდ სხვისი პარალელური წაკითხვაა შესაძლოა რამდენიმე წამით
+#      "ძველი" დარჩეს, რაც პრაქტიკაში შეუმჩნეველია.
+_CACHE_TTL_SECONDS = 6.0
+_ws_cache: dict[str, "gspread.Worksheet"] = {}
+_ws_cache_lock = threading.Lock()
+_records_cache: dict[str, tuple[float, list[dict]]] = {}
+_records_cache_lock = threading.Lock()
+
+
+class _RetryingWorksheet:
+    """gspread Worksheet-ის თხელი გარსი — ნებისმიერ მეთოდის გამოძახებას
+    (get_all_records, append_row, update_cell, find და ა.შ.) ავტომატურად
+    იმეორებს, თუ Google API-მ დროებითი შეცდომა/ლიმიტი დააბრუნა."""
+
+    def __init__(self, ws):
+        self._ws = ws
+
+    def __getattr__(self, name):
+        attr = getattr(self._ws, name)
+        if not callable(attr):
+            return attr
+
+        def _wrapped(*args, **kwargs):
+            delay = 1.0
+            last_exc = None
+            for _attempt in range(5):
+                try:
+                    return attr(*args, **kwargs)
+                except gspread.exceptions.APIError as e:
+                    last_exc = e
+                    status = None
+                    try:
+                        status = e.response.status_code
+                    except Exception:
+                        status = None
+                    if status in (429, 500, 502, 503, 504) or status is None:
+                        time.sleep(delay + random.uniform(0, 0.4))
+                        delay = min(delay * 2, 15)
+                        continue
+                    raise
+            raise last_exc
+
+        return _wrapped
+
+
+def _worksheet(name: str) -> "_RetryingWorksheet":
+    with _ws_cache_lock:
+        ws = _ws_cache.get(name)
+    if ws is None:
+        ws = _get_spreadsheet().worksheet(name)
+        with _ws_cache_lock:
+            _ws_cache[name] = ws
+    return _RetryingWorksheet(ws)
+
+
+def _cached_records(name: str) -> list[dict]:
+    """`name` ცხრილის ყველა სტრიქონი — მოკლევადიანი კეშით (იხ. ზემოთ)."""
+    now = time.monotonic()
+    with _records_cache_lock:
+        hit = _records_cache.get(name)
+        if hit and (now - hit[0]) < _CACHE_TTL_SECONDS:
+            return hit[1]
+    data = _worksheet(name).get_all_records()
+    with _records_cache_lock:
+        _records_cache[name] = (now, data)
+    return data
+
+
+def _invalidate(name: str) -> None:
+    with _records_cache_lock:
+        _records_cache.pop(name, None)
+
 
 AGENTS_HEADERS = [
     "agent_id", "name", "phone", "telegram_username",
@@ -111,6 +200,13 @@ EXCLUSIVES_HEADERS = [
     "photos", "status", "created_at",
 ]
 
+# აგენტის კითხვა მენეჯერს/თიმლიდერს — სრული დიალოგი Mini App-ში
+# (v3.9). status: open -> answered.
+QUESTIONS_HEADERS = [
+    "question_id", "agent_id", "agent_name", "team", "text", "status",
+    "answer", "answered_by", "created_at", "answered_at",
+]
+
 
 def _get_client():
     """
@@ -176,6 +272,7 @@ def ensure_sheets():
         (config.WARNINGS_SHEET_NAME, WARNINGS_HEADERS, 500),
         (config.SHIFT_SWAPS_SHEET_NAME, SHIFT_SWAPS_HEADERS, 500),
         (config.EXCLUSIVES_SHEET_NAME, EXCLUSIVES_HEADERS, 1000),
+        (config.QUESTIONS_SHEET_NAME, QUESTIONS_HEADERS, 1000),
     ]
     for name, headers, rows in sheets_to_ensure:
         try:
@@ -187,43 +284,47 @@ def ensure_sheets():
 
 
 def _agents_ws():
-    return _get_spreadsheet().worksheet(config.AGENTS_SHEET_NAME)
+    return _worksheet(config.AGENTS_SHEET_NAME)
 
 
 def _tasks_ws():
-    return _get_spreadsheet().worksheet(config.TASKS_SHEET_NAME)
+    return _worksheet(config.TASKS_SHEET_NAME)
 
 
 def _reports_ws():
-    return _get_spreadsheet().worksheet(config.REPORTS_SHEET_NAME)
+    return _worksheet(config.REPORTS_SHEET_NAME)
 
 
 def _dayoff_ws():
-    return _get_spreadsheet().worksheet(config.DAYOFF_SHEET_NAME)
+    return _worksheet(config.DAYOFF_SHEET_NAME)
 
 
 def _meetings_ws():
-    return _get_spreadsheet().worksheet(config.MEETINGS_SHEET_NAME)
+    return _worksheet(config.MEETINGS_SHEET_NAME)
 
 
 def _schedule_ws():
-    return _get_spreadsheet().worksheet(config.SCHEDULE_SHEET_NAME)
+    return _worksheet(config.SCHEDULE_SHEET_NAME)
 
 
 def _attendance_ws():
-    return _get_spreadsheet().worksheet(config.ATTENDANCE_SHEET_NAME)
+    return _worksheet(config.ATTENDANCE_SHEET_NAME)
 
 
 def _warnings_ws():
-    return _get_spreadsheet().worksheet(config.WARNINGS_SHEET_NAME)
+    return _worksheet(config.WARNINGS_SHEET_NAME)
 
 
 def _shift_swaps_ws():
-    return _get_spreadsheet().worksheet(config.SHIFT_SWAPS_SHEET_NAME)
+    return _worksheet(config.SHIFT_SWAPS_SHEET_NAME)
 
 
 def _exclusives_ws():
-    return _get_spreadsheet().worksheet(config.EXCLUSIVES_SHEET_NAME)
+    return _worksheet(config.EXCLUSIVES_SHEET_NAME)
+
+
+def _questions_ws():
+    return _worksheet(config.QUESTIONS_SHEET_NAME)
 
 
 def _now():
@@ -234,7 +335,7 @@ def _now():
 
 def get_agents() -> list[dict]:
     with _lock:
-        return _agents_ws().get_all_records()
+        return _cached_records(config.AGENTS_SHEET_NAME)
 
 
 def find_agent_by_phone(phone: str) -> dict | None:
@@ -272,6 +373,7 @@ def register_agent_chat_id(agent_id: str, chat_id: int, username: str):
             return False
         ws.update_cell(cell.row, AGENTS_HEADERS.index("telegram_chat_id") + 1, str(chat_id))
         ws.update_cell(cell.row, AGENTS_HEADERS.index("telegram_username") + 1, username or "")
+        _invalidate(config.AGENTS_SHEET_NAME)
         return True
 
 
@@ -282,6 +384,7 @@ def add_agent(name: str, phone: str, team: str = "") -> str:
         _agents_ws().append_row([
             agent_id, name, phone, "", "", "yes", _now(), team, "agent", "",
         ])
+        _invalidate(config.AGENTS_SHEET_NAME)
         return agent_id
 
 
@@ -292,6 +395,7 @@ def set_agent_team(agent_id: str, team: str) -> bool:
         if not cell:
             return False
         ws.update_cell(cell.row, AGENTS_HEADERS.index("team") + 1, team)
+        _invalidate(config.AGENTS_SHEET_NAME)
         return True
 
 
@@ -302,6 +406,7 @@ def set_agent_active(agent_id: str, value: str) -> bool:
         if not cell:
             return False
         ws.update_cell(cell.row, AGENTS_HEADERS.index("active") + 1, value)
+        _invalidate(config.AGENTS_SHEET_NAME)
         return True
 
 
@@ -314,6 +419,7 @@ def set_agent_role(agent_id: str, role: str) -> bool:
         if not cell:
             return False
         ws.update_cell(cell.row, AGENTS_HEADERS.index("role") + 1, role)
+        _invalidate(config.AGENTS_SHEET_NAME)
         return True
 
 
@@ -324,6 +430,7 @@ def set_agent_internal_number(agent_id: str, number: str) -> bool:
         if not cell:
             return False
         ws.update_cell(cell.row, AGENTS_HEADERS.index("internal_number") + 1, number)
+        _invalidate(config.AGENTS_SHEET_NAME)
         return True
 
 
@@ -348,6 +455,7 @@ def swap_internal_numbers(agent_id_a: str, agent_id_b: str) -> bool:
         num_b = ws.cell(cell_b.row, col).value or ""
         ws.update_cell(cell_a.row, col, num_b)
         ws.update_cell(cell_b.row, col, num_a)
+        _invalidate(config.AGENTS_SHEET_NAME)
         return True
 
 
@@ -355,7 +463,7 @@ def swap_internal_numbers(agent_id_a: str, agent_id_b: str) -> bool:
 
 def get_tasks() -> list[dict]:
     with _lock:
-        return _tasks_ws().get_all_records()
+        return _cached_records(config.TASKS_SHEET_NAME)
 
 
 def get_tasks_for_agent(agent_id: str, only_open: bool = True) -> list[dict]:
@@ -379,6 +487,7 @@ def create_task(title: str, description: str, assigned_to: str,
             lead_type, client_phone, deal_type, listing_id, viewing_time,
             agent_name_by_id(assigned_to),
         ])
+        _invalidate(config.TASKS_SHEET_NAME)
         return task_id
 
 
@@ -395,6 +504,7 @@ def mark_task_done(task_id: str) -> bool:
             return False
         ws.update_cell(cell.row, TASKS_HEADERS.index("status") + 1, "Done")
         ws.update_cell(cell.row, TASKS_HEADERS.index("updated_at") + 1, _now())
+        _invalidate(config.TASKS_SHEET_NAME)
         return True
 
 
@@ -403,6 +513,7 @@ def mark_task_notified(task_id: str):
         ws, cell = _find_task_row(task_id)
         if cell:
             ws.update_cell(cell.row, TASKS_HEADERS.index("notified") + 1, "yes")
+            _invalidate(config.TASKS_SHEET_NAME)
 
 
 def get_unnotified_tasks() -> list[dict]:
@@ -526,6 +637,7 @@ def create_report(agent_id: str, client_phone: str, actions: str,
             report_id, agent_id, client_phone, actions, notes,
             file_id, _now(), agent_name_by_id(agent_id), auto_q, "", "",
         ])
+        _invalidate(config.REPORTS_SHEET_NAME)
         return report_id
 
 
@@ -538,12 +650,13 @@ def set_report_quality(report_id: str, score: int, rated_by: str) -> bool:
             return False
         ws.update_cell(cell.row, REPORTS_HEADERS.index("quality_manual") + 1, score)
         ws.update_cell(cell.row, REPORTS_HEADERS.index("rated_by") + 1, rated_by)
+        _invalidate(config.REPORTS_SHEET_NAME)
         return True
 
 
 def get_reports(agent_id: str | None = None, client_phone: str | None = None) -> list[dict]:
     with _lock:
-        rows = _reports_ws().get_all_records()
+        rows = _cached_records(config.REPORTS_SHEET_NAME)
     if agent_id:
         rows = [r for r in rows if str(r.get("agent_id")) == str(agent_id)]
     if client_phone:
@@ -576,12 +689,13 @@ def create_dayoff_request(agent_id: str, date: str, reason: str) -> str:
             request_id, agent_id, date, reason, "pending", _now(), "",
             agent_name_by_id(agent_id),
         ])
+        _invalidate(config.DAYOFF_SHEET_NAME)
         return request_id
 
 
 def get_dayoff_requests(status: str | None = None) -> list[dict]:
     with _lock:
-        rows = _dayoff_ws().get_all_records()
+        rows = _cached_records(config.DAYOFF_SHEET_NAME)
     if status:
         rows = [r for r in rows if str(r.get("status")) == status]
     return rows
@@ -596,6 +710,7 @@ def decide_dayoff(request_id: str, status: str) -> dict | None:
         ws.update_cell(cell.row, DAYOFF_HEADERS.index("status") + 1, status)
         ws.update_cell(cell.row, DAYOFF_HEADERS.index("decided_at") + 1, _now())
         row = ws.row_values(cell.row)
+        _invalidate(config.DAYOFF_SHEET_NAME)
         return dict(zip(DAYOFF_HEADERS, row))
 
 
@@ -617,12 +732,13 @@ def create_meeting(fields: dict) -> str:
             else:
                 row.append(fields.get(h, ""))
         _meetings_ws().append_row(row)
+        _invalidate(config.MEETINGS_SHEET_NAME)
         return meeting_id
 
 
 def get_meetings(agent_id: str | None = None, client_phone: str | None = None) -> list[dict]:
     with _lock:
-        rows = _meetings_ws().get_all_records()
+        rows = _cached_records(config.MEETINGS_SHEET_NAME)
     if agent_id:
         rows = [r for r in rows if str(r.get("agent_id")) == str(agent_id)]
     if client_phone:
@@ -651,11 +767,12 @@ def set_agent_schedule(agent_id: str, pattern: dict) -> None:
             ws.update(f"A{cell.row}", [row])
         else:
             ws.append_row(row)
+        _invalidate(config.SCHEDULE_SHEET_NAME)
 
 
 def get_agent_schedule(agent_id: str) -> dict | None:
     with _lock:
-        rows = _schedule_ws().get_all_records()
+        rows = _cached_records(config.SCHEDULE_SHEET_NAME)
     for r in rows:
         if str(r.get("agent_id")) == str(agent_id):
             return r
@@ -676,12 +793,13 @@ def clock_in(agent_id: str) -> str:
     with _lock:
         ws = _attendance_ws()
         today = _today_str()
-        records = ws.get_all_records()
+        records = _cached_records(config.ATTENDANCE_SHEET_NAME)
         for idx, r in enumerate(records, start=2):
             if str(r.get("agent_id")) == str(agent_id) and str(r.get("date")) == today:
                 if r.get("clock_in"):
                     return "already"
                 ws.update_cell(idx, ATTENDANCE_HEADERS.index("clock_in") + 1, _now())
+                _invalidate(config.ATTENDANCE_SHEET_NAME)
                 return "ok"
         mode = get_today_mode(agent_id)
         attendance_id = uuid.uuid4().hex[:8]
@@ -689,6 +807,7 @@ def clock_in(agent_id: str) -> str:
             attendance_id, agent_id, today, mode, _now(), "", "",
             agent_name_by_id(agent_id), "", "", "",
         ])
+        _invalidate(config.ATTENDANCE_SHEET_NAME)
         return "ok"
 
 
@@ -697,12 +816,13 @@ def clock_out(agent_id: str) -> str:
     with _lock:
         ws = _attendance_ws()
         today = _today_str()
-        records = ws.get_all_records()
+        records = _cached_records(config.ATTENDANCE_SHEET_NAME)
         for idx, r in enumerate(records, start=2):
             if str(r.get("agent_id")) == str(agent_id) and str(r.get("date")) == today:
                 if not r.get("clock_in"):
                     return "not_in"
                 ws.update_cell(idx, ATTENDANCE_HEADERS.index("clock_out") + 1, _now())
+                _invalidate(config.ATTENDANCE_SHEET_NAME)
                 return "ok"
         return "not_in"
 
@@ -710,7 +830,7 @@ def clock_out(agent_id: str) -> str:
 def get_today_attendance(agent_id: str) -> dict | None:
     today = _today_str()
     with _lock:
-        rows = _attendance_ws().get_all_records()
+        rows = _cached_records(config.ATTENDANCE_SHEET_NAME)
     for r in rows:
         if str(r.get("agent_id")) == str(agent_id) and str(r.get("date")) == today:
             return r
@@ -728,7 +848,7 @@ def set_daily_count(agent_id: str, count: int, site: int | None = None,
     today = _today_str()
     with _lock:
         ws = _attendance_ws()
-        records = ws.get_all_records()
+        records = _cached_records(config.ATTENDANCE_SHEET_NAME)
         for idx, r in enumerate(records, start=2):
             if str(r.get("agent_id")) == str(agent_id) and str(r.get("date")) == today:
                 ws.update_cell(idx, ATTENDANCE_HEADERS.index("count_submitted") + 1, count)
@@ -738,6 +858,7 @@ def set_daily_count(agent_id: str, count: int, site: int | None = None,
                     ws.update_cell(idx, ATTENDANCE_HEADERS.index("myhome_count") + 1, myhome)
                 if ssge is not None:
                     ws.update_cell(idx, ATTENDANCE_HEADERS.index("ssge_count") + 1, ssge)
+                _invalidate(config.ATTENDANCE_SHEET_NAME)
                 return True
         return False
 
@@ -745,7 +866,7 @@ def set_daily_count(agent_id: str, count: int, site: int | None = None,
 def get_today_attendance_all() -> list[dict]:
     today = _today_str()
     with _lock:
-        rows = _attendance_ws().get_all_records()
+        rows = _cached_records(config.ATTENDANCE_SHEET_NAME)
     return [r for r in rows if str(r.get("date")) == today]
 
 
@@ -775,7 +896,7 @@ def agent_available_now(agent_id: str) -> bool:
 def has_warning_today(agent_id: str, type_: str) -> bool:
     today = _today_str()
     with _lock:
-        rows = _warnings_ws().get_all_records()
+        rows = _cached_records(config.WARNINGS_SHEET_NAME)
     return any(
         str(r.get("agent_id")) == str(agent_id)
         and r.get("type") == type_
@@ -786,7 +907,7 @@ def has_warning_today(agent_id: str, type_: str) -> bool:
 
 def get_warnings(agent_id: str | None = None, days: int | None = None) -> list[dict]:
     with _lock:
-        rows = _warnings_ws().get_all_records()
+        rows = _cached_records(config.WARNINGS_SHEET_NAME)
     if agent_id:
         rows = [r for r in rows if str(r.get("agent_id")) == str(agent_id)]
     if days:
@@ -805,6 +926,7 @@ def add_warning(agent_id: str, type_: str, detail: str = "") -> dict:
     with _lock:
         warning_id = uuid.uuid4().hex[:8]
         _warnings_ws().append_row([warning_id, agent_id, type_, detail, _now(), agent_name_by_id(agent_id)])
+        _invalidate(config.WARNINGS_SHEET_NAME)
 
     count = len(get_warnings(agent_id=agent_id, days=config.WARNING_WINDOW_DAYS))
     deactivated = False
@@ -847,12 +969,13 @@ def create_shift_swap_request(agent_id: str, request_type: str, swap_date: str,
             target_agent_id, target_name, swap_date, note, status,
             "", "", _now(), "", "",
         ])
+        _invalidate(config.SHIFT_SWAPS_SHEET_NAME)
         return swap_id
 
 
 def get_shift_swaps(agent_id: str | None = None, status: str | None = None) -> list[dict]:
     with _lock:
-        rows = _shift_swaps_ws().get_all_records()
+        rows = _cached_records(config.SHIFT_SWAPS_SHEET_NAME)
     if agent_id:
         rows = [
             r for r in rows
@@ -881,6 +1004,7 @@ def accept_shift_swap(swap_id: str, accepting_agent_id: str) -> dict | None:
         ws.update_cell(cell.row, SHIFT_SWAPS_HEADERS.index("accepted_by") + 1, accepting_agent_id)
         ws.update_cell(cell.row, SHIFT_SWAPS_HEADERS.index("accepted_by_name") + 1, name)
         ws.update_cell(cell.row, SHIFT_SWAPS_HEADERS.index("status") + 1, "pending_manager")
+        _invalidate(config.SHIFT_SWAPS_SHEET_NAME)
         return dict(zip(SHIFT_SWAPS_HEADERS, ws.row_values(cell.row)))
 
 
@@ -897,6 +1021,7 @@ def decide_shift_swap(swap_id: str, status: str, decided_by: str) -> dict | None
         ws.update_cell(cell.row, SHIFT_SWAPS_HEADERS.index("decided_at") + 1, _now())
         ws.update_cell(cell.row, SHIFT_SWAPS_HEADERS.index("decided_by") + 1, decided_by)
         row = dict(zip(SHIFT_SWAPS_HEADERS, ws.row_values(cell.row)))
+        _invalidate(config.SHIFT_SWAPS_SHEET_NAME)
 
     if status == "approved":
         wk = _weekday_key_for_date(row.get("swap_date", ""))
@@ -940,17 +1065,61 @@ def create_exclusive(agent_id: str, fields: dict) -> str:
             else:
                 row.append(fields.get(h, ""))
         _exclusives_ws().append_row(row)
+        _invalidate(config.EXCLUSIVES_SHEET_NAME)
         return exclusive_id
 
 
 def get_exclusives(agent_id: str | None = None, status: str | None = None) -> list[dict]:
     with _lock:
-        rows = _exclusives_ws().get_all_records()
+        rows = _cached_records(config.EXCLUSIVES_SHEET_NAME)
     if agent_id:
         rows = [r for r in rows if str(r.get("agent_id")) == str(agent_id)]
     if status:
         rows = [r for r in rows if str(r.get("status")) == status]
     return rows
+
+
+# ---------- კითხვა მენეჯერს (v3.9, სრული დიალოგი Mini App-ში) ----------
+
+def create_question(agent_id: str, text: str) -> str:
+    with _lock:
+        question_id = uuid.uuid4().hex[:8]
+        agent = next((a for a in get_agents() if str(a.get("agent_id")) == str(agent_id)), None)
+        team = agent.get("team", "") if agent else ""
+        _questions_ws().append_row([
+            question_id, agent_id, agent_name_by_id(agent_id), team, text,
+            "open", "", "", _now(), "",
+        ])
+        _invalidate(config.QUESTIONS_SHEET_NAME)
+        return question_id
+
+
+def get_questions(agent_id: str | None = None, team: str | None = None,
+                   status: str | None = None) -> list[dict]:
+    with _lock:
+        rows = _cached_records(config.QUESTIONS_SHEET_NAME)
+    if agent_id:
+        rows = [r for r in rows if str(r.get("agent_id")) == str(agent_id)]
+    if team:
+        rows = [r for r in rows if str(r.get("team", "")).strip() == team.strip()]
+    if status:
+        rows = [r for r in rows if str(r.get("status")) == status]
+    return rows
+
+
+def answer_question(question_id: str, answer: str, answered_by: str) -> dict | None:
+    with _lock:
+        ws = _questions_ws()
+        cell = ws.find(question_id, in_column=1)
+        if not cell:
+            return None
+        ws.update_cell(cell.row, QUESTIONS_HEADERS.index("status") + 1, "answered")
+        ws.update_cell(cell.row, QUESTIONS_HEADERS.index("answer") + 1, answer)
+        ws.update_cell(cell.row, QUESTIONS_HEADERS.index("answered_by") + 1, answered_by)
+        ws.update_cell(cell.row, QUESTIONS_HEADERS.index("answered_at") + 1, _now())
+        row = dict(zip(QUESTIONS_HEADERS, ws.row_values(cell.row)))
+        _invalidate(config.QUESTIONS_SHEET_NAME)
+        return row
 
 
 # ---------- Mini App დაშბორდის მონაცემები ----------

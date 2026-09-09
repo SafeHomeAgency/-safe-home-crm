@@ -30,6 +30,7 @@ const AGENT_TABS = [
   { id: "tasks", label: "დავალებები", icon: "📋" },
   { id: "kpi", label: "KPI", icon: "📈" },
   { id: "exclusives", label: "ექსკლუზივები", icon: "🏘️", lazy: true },
+  { id: "questions", label: "კითხვები", icon: "💬", lazy: true },
 ];
 const ADMIN_TABS = [
   { id: "overview", label: "მიმოხილვა", icon: "📊" },
@@ -40,6 +41,7 @@ const ADMIN_TABS = [
   { id: "swaps", label: "სმენის გაცვლა", icon: "🔁", lazy: true },
   { id: "reports", label: "რეპორტები", icon: "📝", lazy: true },
   { id: "exclusives", label: "ექსკლუზივები", icon: "🏘️", lazy: true },
+  { id: "questions", label: "კითხვები", icon: "💬", lazy: true },
 ];
 
 const REQUEST_TYPE_LABELS = {
@@ -72,6 +74,28 @@ function toast(msg) {
   el.textContent = msg;
   el.classList.add("show");
   setTimeout(() => el.classList.remove("show"), 2200);
+}
+
+/* ---------------------------------------------------- დეტალის მოდალი */
+/* დააწექით ნებისმიერ სიის სტრიქონს და ნახავთ ჩანაწერის ყველა ველს —
+   ასე მოკლე ბარათებზეც ხელმისაწვდომია სრული ინფორმაცია. */
+function openDetail(title, fields) {
+  const backdrop = document.getElementById("modalBackdrop");
+  const box = document.getElementById("modalBox");
+  const rows = fields
+    .filter((f) => f.value !== undefined && f.value !== null && String(f.value).trim() !== "")
+    .map((f) => `<div class="field"><div class="k">${esc(f.label)}</div><div class="v">${esc(f.value)}</div></div>`)
+    .join("");
+  box.innerHTML = `
+    <h3>${esc(title)}<button class="close" id="modalClose">✕</button></h3>
+    ${rows || `<div class="empty">დამატებითი ინფორმაცია არ არის</div>`}
+  `;
+  backdrop.hidden = false;
+  document.getElementById("modalClose").onclick = closeDetail;
+  backdrop.onclick = (e) => { if (e.target === backdrop) closeDetail(); };
+}
+function closeDetail() {
+  document.getElementById("modalBackdrop").hidden = true;
 }
 
 async function api(path, opts) {
@@ -190,6 +214,13 @@ function renderToday(d) {
   </div>`;
 }
 
+const TASK_FIELD_LABELS = [
+  ["title", "სათაური"], ["description", "აღწერა"], ["priority", "პრიორიტეტი"],
+  ["status", "სტატუსი"], ["due_date", "ვადა"], ["client_phone", "კლიენტის ტელეფონი"],
+  ["deal_type", "გარიგება"], ["listing_id", "ლისტინგის ID"], ["viewing_time", "ნახვის დრო"],
+  ["created_at", "შექმნის თარიღი"],
+];
+
 function renderTasks(d) {
   if (!d.tasks.length) {
     return `<div class="card"><div class="empty">ღია დავალება არ გაქვთ ✅</div></div>`;
@@ -197,8 +228,8 @@ function renderTasks(d) {
   const priColor = { "მაღალი": "red", "საშუალო": "amber" };
   return `<div class="card">
     <h2>📋 ჩემი დავალებები <span class="cnt">${d.tasks.length}</span></h2>
-    ${d.tasks.map((t) => `
-      <div class="list-row">
+    ${d.tasks.map((t, i) => `
+      <div class="list-row clickable" data-task-idx="${i}">
         <div class="avatar">${t.lead_type === "listing" ? "🏠" : "👤"}</div>
         <div class="main">
           <div class="title">${esc(t.title || "")}</div>
@@ -207,6 +238,16 @@ function renderTasks(d) {
         <div class="side"><span class="badge ${priColor[t.priority] || "gray"}">${esc(t.priority || "-")}</span></div>
       </div>`).join("")}
   </div>`;
+}
+
+function bindTasksActions(d) {
+  document.querySelectorAll("[data-task-idx]").forEach((el) => {
+    el.onclick = () => {
+      const t = d.tasks[parseInt(el.dataset.taskIdx, 10)];
+      if (!t) return;
+      openDetail(t.title || "დავალება", TASK_FIELD_LABELS.map(([k, label]) => ({ label, value: t[k] })));
+    };
+  });
 }
 
 function renderKpi(d) {
@@ -305,12 +346,19 @@ function renderOverview(d) {
   </div>`;
 }
 
+const TEAM_FIELD_LABELS = [
+  ["team", "გუნდი"], ["mode", "დღევანდელი რეჟიმი"], ["count_submitted", "შეყვანილი დღეს (ჯამი)"],
+  ["site_count", "საიტი"], ["myhome_count", "myhome"], ["ssge_count", "ss.ge"], ["quota", "დღიური გეგმა"],
+  ["clients_today", "კლიენტი დღეს"], ["clients_total", "კლიენტი ჯამურად"], ["assigned", "მიღებული (30დღე)"],
+  ["warnings", "გაფრთხილებები"],
+];
+
 function renderTeam(d) {
   const team = d.team.slice().sort((a, b) => (a.name || "").localeCompare(b.name || ""));
   return `<div class="card">
     <h2>🧑‍🤝‍🧑 გუნდი <span class="cnt">${team.length}</span></h2>
-    ${team.map((t) => `
-      <div class="list-row">
+    ${team.map((t, i) => `
+      <div class="list-row clickable" data-team-idx="${i}">
         <div class="avatar">${initials(t.name)}</div>
         <div class="main">
           <div class="title">${esc(t.name)} ${t.active === "no" ? "🚫" : ""}</div>
@@ -323,6 +371,24 @@ function renderTeam(d) {
         </div>
       </div>`).join("")}
   </div>`;
+}
+
+function bindTeamActions(d) {
+  const team = d.team.slice().sort((a, b) => (a.name || "").localeCompare(b.name || ""));
+  document.querySelectorAll("[data-team-idx]").forEach((el) => {
+    el.onclick = () => {
+      const t = team[parseInt(el.dataset.teamIdx, 10)];
+      if (!t) return;
+      const rateStr = t.rate == null ? "-" : ratePct(t.rate) + "%";
+      openDetail(
+        t.name,
+        TEAM_FIELD_LABELS.map(([k, label]) => ({
+          label,
+          value: k === "mode" ? (MODE_LABELS[t.mode] || t.mode) : t[k],
+        })).concat([{ label: "შედეგი (30დღე)", value: rateStr }]),
+      );
+    };
+  });
 }
 
 function renderRanking(d) {
@@ -392,12 +458,22 @@ function bindAdminActions() {
   });
 }
 
+const EXCLUSIVE_FIELD_LABELS = [
+  ["property_type", "ტიპი"], ["deal_type", "გარიგება"], ["building_status", "სტატუსი"],
+  ["condition", "მდგომარეობა"], ["location", "მდებარეობა"], ["cadastral_code", "საკადასტრო კოდი"],
+  ["area", "ფართი (მ²)"], ["rooms", "ოთახები"], ["bedrooms", "საძინებლები"],
+  ["floors_total", "სართულები (სულ)"], ["floor_number", "სართული"], ["project_type", "პროექტის ტიპი"],
+  ["bathrooms", "სველი წერტილი"], ["balcony", "აივანი"], ["price", "ფასი"], ["percent", "საკომისიო %"],
+  ["contact_internal", "საკონტაქტო (შიდა)"], ["owner_phone", "მესაკუთრის ტელეფონი"],
+  ["notes", "შენიშვნა"], ["agent_name", "აგენტი"], ["created_at", "დამატების თარიღი"],
+];
+
 function renderExclusives(rows) {
   if (!rows.length) return `<div class="card"><div class="empty">აქტიური ექსკლუზივი არ არის. დაამატეთ ბოტში /addexclusive-ით.</div></div>`;
   return `<div class="card">
     <h2>🏘️ ექსკლუზივები <span class="cnt">${rows.length}</span></h2>
-    ${rows.map((r) => `
-      <div class="list-row">
+    ${rows.map((r, i) => `
+      <div class="list-row clickable" data-exclusive-idx="${i}">
         <div class="avatar">${r.deal_type === "ქირავდება" ? "🔑" : "🏠"}</div>
         <div class="main">
           <div class="title">${esc(r.property_type || "-")} · ${esc(r.deal_type || "-")} — ${esc(r.agent_name)}</div>
@@ -408,12 +484,32 @@ function renderExclusives(rows) {
   </div>`;
 }
 
+function bindExclusivesActions(rows) {
+  document.querySelectorAll("[data-exclusive-idx]").forEach((el) => {
+    el.onclick = () => {
+      const r = rows[parseInt(el.dataset.exclusiveIdx, 10)];
+      if (!r) return;
+      openDetail(
+        `${r.property_type || "ობიექტი"} — ${r.location || ""}`,
+        EXCLUSIVE_FIELD_LABELS.map(([k, label]) => ({ label, value: r[k] })),
+      );
+    };
+  });
+}
+
+const REPORT_FIELD_LABELS = [
+  ["agent_name", "აგენტი"], ["client_phone", "კლიენტის ტელეფონი"], ["actions", "მოქმედებები"],
+  ["notes", "შენიშვნა"], ["file_id", "დანართები (ფაილების რაოდენობა)"], ["created_at", "თარიღი"],
+  ["quality_auto", "ავტომატური ხარისხი (1-5)"], ["quality_manual", "ხელით შეფასება (1-5)"],
+  ["rated_by", "შეაფასა"],
+];
+
 function renderReports(rows) {
   if (!rows.length) return `<div class="card"><div class="empty">რეპორტი ჯერ არ არის</div></div>`;
   return `<div class="card">
     <h2>📝 ბოლო რეპორტები</h2>
-    ${rows.map((r) => `
-      <div class="list-row" data-report="${esc(r.report_id)}">
+    ${rows.map((r, i) => `
+      <div class="list-row clickable" data-report="${esc(r.report_id)}" data-report-idx="${i}">
         <div class="avatar">${initials(r.agent_name)}</div>
         <div class="main">
           <div class="title">${esc(r.agent_name)} — ${esc(r.client_phone || "-")}</div>
@@ -447,9 +543,10 @@ function renderSwaps(rows) {
   </div>`;
 }
 
-function bindReportsActions() {
+function bindReportsActions(rows) {
   document.querySelectorAll("[data-rate]").forEach((btn) => {
-    btn.onclick = async () => {
+    btn.onclick = async (e) => {
+      e.stopPropagation();
       const input = prompt("შეაფასეთ ხარისხი 1-დან 5-მდე:");
       const score = parseInt(input, 10);
       if (!input || isNaN(score) || score < 1 || score > 5) return;
@@ -460,6 +557,16 @@ function bindReportsActions() {
         delete lazyCache.reports;
         await renderContent();
       } catch (e) { toast(e.message); btn.disabled = false; }
+    };
+  });
+  document.querySelectorAll("[data-report-idx]").forEach((el) => {
+    el.onclick = () => {
+      const r = rows[parseInt(el.dataset.reportIdx, 10)];
+      if (!r) return;
+      openDetail(
+        `რეპორტი — ${r.agent_name || ""}`,
+        REPORT_FIELD_LABELS.map(([k, label]) => ({ label, value: r[k] })),
+      );
     };
   });
 }
@@ -482,12 +589,104 @@ function bindSwapsActions() {
   });
 }
 
+/* ---------------------------------------------------- კითხვა მენეჯერს */
+
+function renderQuestions(rows, role) {
+  const compose = `
+    <div class="card">
+      <h2>💬 კითხვა მენეჯერს</h2>
+      <div class="qa-compose">
+        <textarea id="qaText" placeholder="დაწერეთ კითხვა…"></textarea>
+        <button class="btn" id="qaSend">გაგზავნა</button>
+      </div>
+    </div>`;
+
+  if (role === "agent") {
+    const thread = !rows.length
+      ? `<div class="card"><div class="empty">ჯერ კითხვა არ დაგისვამთ</div></div>`
+      : `<div class="card">
+          <h2>🗂️ ჩემი კითხვები <span class="cnt">${rows.length}</span></h2>
+          <div class="qa-thread">
+            ${rows.map((q) => `
+              <div class="qa-item">
+                <div class="qa-q">${esc(q.text)}</div>
+                <div class="qa-meta">${esc((q.created_at || "").split(" ")[0] || "")} · ${q.status === "open" ? "⏳ ლოდინში" : "✅ პასუხგაცემული"}</div>
+                ${q.answer ? `<div class="qa-a"><div class="who">${esc(q.answered_by || "მენეჯერი")}</div>${esc(q.answer)}</div>` : ""}
+              </div>`).join("")}
+          </div>
+        </div>`;
+    return compose + thread;
+  }
+
+  const open = rows.filter((q) => q.status === "open");
+  const answered = rows.filter((q) => q.status !== "open");
+  const openHtml = !open.length
+    ? `<div class="card"><div class="empty">ღია კითხვა არ არის 🎉</div></div>`
+    : `<div class="card">
+        <h2>⏳ ღია კითხვები <span class="cnt">${open.length}</span></h2>
+        <div class="qa-thread">
+          ${open.map((q) => `
+            <div class="qa-item">
+              <div class="qa-q"><b>${esc(q.agent_name)}</b>: ${esc(q.text)}</div>
+              <div class="qa-meta">${esc((q.created_at || "").split(" ")[0] || "")}</div>
+              <textarea placeholder="პასუხი…" data-answer-text="${esc(q.question_id)}"></textarea>
+              <button class="btn" data-answer-send="${esc(q.question_id)}">პასუხის გაგზავნა</button>
+            </div>`).join("")}
+        </div>
+      </div>`;
+  const answeredHtml = !answered.length ? "" : `<div class="card">
+      <h2>🗂️ ბოლო პასუხგაცემული</h2>
+      <div class="qa-thread">
+        ${answered.map((q) => `
+          <div class="qa-item">
+            <div class="qa-q"><b>${esc(q.agent_name)}</b>: ${esc(q.text)}</div>
+            <div class="qa-a"><div class="who">${esc(q.answered_by || "მენეჯერი")}</div>${esc(q.answer || "")}</div>
+          </div>`).join("")}
+      </div>
+    </div>`;
+  return openHtml + answeredHtml;
+}
+
+function bindQuestionsActions(role) {
+  const sendBtn = document.getElementById("qaSend");
+  if (sendBtn) {
+    sendBtn.onclick = async () => {
+      const ta = document.getElementById("qaText");
+      const text = (ta.value || "").trim();
+      if (!text) return;
+      sendBtn.disabled = true;
+      try {
+        await api("/api/questions", { method: "POST", body: JSON.stringify({ text }) });
+        toast("გაიგზავნა ✅");
+        delete lazyCache.questions;
+        await renderContent();
+      } catch (e) { toast(e.message); sendBtn.disabled = false; }
+    };
+  }
+  document.querySelectorAll("[data-answer-send]").forEach((btn) => {
+    btn.onclick = async () => {
+      const qid = btn.dataset.answerSend;
+      const ta = document.querySelector(`[data-answer-text="${CSS.escape(qid)}"]`);
+      const answer = (ta && ta.value || "").trim();
+      if (!answer) return;
+      btn.disabled = true;
+      try {
+        await api("/api/questions/answer", { method: "POST", body: JSON.stringify({ question_id: qid, answer }) });
+        toast("გაიგზავნა ✅");
+        delete lazyCache.questions;
+        await renderContent();
+      } catch (e) { toast(e.message); btn.disabled = false; }
+    };
+  });
+}
+
 /* ---------------------------------------------------------- shell */
 
 const LAZY_ENDPOINTS = {
   exclusives: "/api/exclusives",
   swaps: "/api/swaps",
   reports: "/api/reports",
+  questions: "/api/questions",
 };
 
 function tabsFor(role) {
@@ -525,9 +724,10 @@ async function renderContent() {
       }
     }
     const rows = lazyCache[tab];
-    if (tab === "exclusives") content.innerHTML = renderExclusives(rows);
-    else if (tab === "reports") { content.innerHTML = renderReports(rows); bindReportsActions(); }
+    if (tab === "exclusives") { content.innerHTML = renderExclusives(rows); bindExclusivesActions(rows); }
+    else if (tab === "reports") { content.innerHTML = renderReports(rows); bindReportsActions(rows); }
     else if (tab === "swaps") { content.innerHTML = renderSwaps(rows); bindSwapsActions(); }
+    else if (tab === "questions") { content.innerHTML = renderQuestions(rows, state.role); bindQuestionsActions(state.role); }
     return;
   }
 
@@ -547,7 +747,9 @@ async function renderContent() {
   }
   content.innerHTML = html;
   if (state.role === "agent" && tab === "today") bindAgentActions(d.agent);
+  if (state.role === "agent" && tab === "tasks") bindTasksActions(d.agent);
   if (state.role === "admin" && tab === "dayoffs") bindAdminActions();
+  if (state.role === "admin" && tab === "team") bindTeamActions(d.admin);
 }
 
 function renderRoleSwitch(hasAgent, hasAdmin) {
@@ -578,6 +780,15 @@ async function load() {
       `<div class="card"><div class="empty">⚠️ ${esc(e.message)}</div></div>`;
     document.getElementById("subtitle").textContent = "შეცდომა";
   }
+}
+
+const siteLinkBtn = document.getElementById("siteLink");
+if (siteLinkBtn) {
+  siteLinkBtn.onclick = () => {
+    const url = "https://safehome.ge/";
+    if (tg && tg.openLink) tg.openLink(url);
+    else window.open(url, "_blank");
+  };
 }
 
 load();

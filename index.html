@@ -10,8 +10,13 @@
 <body>
 
   <div class="appbar">
-    <h1>🏡 Safe Home Agency</h1>
-    <div class="sub" id="subtitle">იტვირთება…</div>
+    <div class="appbar-row">
+      <div class="titlewrap">
+        <h1>Safe Home Agency</h1>
+        <div class="sub" id="subtitle">იტვირთება…</div>
+      </div>
+      <button class="sitelink" id="siteLink" type="button">🌐 safehome.ge</button>
+    </div>
     <div class="roleswitch" id="roleSwitch" hidden>
       <button data-role="agent">ჩემი</button>
       <button data-role="admin">გუნდი</button>
@@ -27,6 +32,9 @@
 
   <div class="tabbar" id="tabbar" hidden></div>
   <div class="toast" id="toast"></div>
+  <div class="modal-backdrop" id="modalBackdrop" hidden>
+    <div class="modal" id="modalBox"></div>
+  </div>
 
   <script src="/app.js"></script>
 </body>

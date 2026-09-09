@@ -315,6 +315,94 @@ def api_clockout():
     return jsonify(result=result)
 
 
+@app.get("/api/questions")
+def api_questions():
+    """აგენტს — მხოლოდ საკუთარი კითხვები (სრული დიალოგი); ადმინს/
+    თიმლიდერს — ღია კითხვები პირველ რიგში + ბოლო პასუხგაცემულებიც
+    (თიმლიდერს — მხოლოდ საკუთარი გუნდისა)."""
+    agent, admin, err = _authed_agent()
+    if err:
+        return err
+    if admin or _is_team_lead(agent):
+        team = None if admin else agent.get("team", "")
+        rows = sheets.get_questions(team=team)
+        rows = sorted(
+            rows,
+            key=lambda r: (r.get("status") != "open", str(r.get("created_at", ""))),
+            reverse=False,
+        )
+        open_rows = [r for r in rows if r.get("status") == "open"]
+        answered_rows = [r for r in rows if r.get("status") != "open"]
+        answered_rows.sort(key=lambda r: str(r.get("created_at", "")), reverse=True)
+        rows = open_rows + answered_rows[:20]
+        return jsonify(rows=rows)
+    if not agent:
+        return jsonify(error="მხოლოდ დარეგისტრირებული აგენტისთვის"), 403
+    rows = sheets.get_questions(agent_id=agent["agent_id"])
+    rows.sort(key=lambda r: str(r.get("created_at", "")), reverse=True)
+    return jsonify(rows=rows)
+
+
+@app.post("/api/questions")
+def api_questions_ask():
+    agent, admin, err = _authed_agent()
+    if err:
+        return err
+    if not agent:
+        return jsonify(error="მხოლოდ დარეგისტრირებული აგენტისთვის"), 403
+    body = request.get_json(silent=True) or {}
+    text = (body.get("text") or "").strip()
+    if not text:
+        return jsonify(error="დაწერეთ კითხვის ტექსტი"), 400
+    question_id = sheets.create_question(agent["agent_id"], text)
+
+    notify_text = f"❓ ახალი კითხვა — {agent.get('name')}:\n{text}"
+    team = str(agent.get("team", "")).strip()
+    notified_ids = set()
+    for admin_id in config.ADMIN_CHAT_IDS:
+        _send_telegram_message(admin_id, notify_text)
+        notified_ids.add(admin_id)
+    if team:
+        for a in sheets.get_agents():
+            if str(a.get("role", "")).strip() != "team_lead":
+                continue
+            if str(a.get("team", "")).strip() != team:
+                continue
+            chat_id = a.get("telegram_chat_id")
+            if chat_id and int(chat_id) not in notified_ids:
+                _send_telegram_message(int(chat_id), notify_text)
+                notified_ids.add(int(chat_id))
+    return jsonify(ok=True, question_id=question_id)
+
+
+@app.post("/api/questions/answer")
+def api_questions_answer():
+    agent, admin, err = _authed_agent()
+    if err:
+        return err
+    if not (admin or _is_team_lead(agent)):
+        return jsonify(error="მხოლოდ მენეჯერისთვის/თიმლიდერისთვის"), 403
+    body = request.get_json(silent=True) or {}
+    question_id = body.get("question_id")
+    answer = (body.get("answer") or "").strip()
+    if not question_id or not answer:
+        return jsonify(error="არასწორი მოთხოვნა"), 400
+    answered_by = "მენეჯერი" if admin else (agent.get("name") if agent else "თიმლიდერი")
+    row = sheets.answer_question(question_id, answer, answered_by)
+    if not row:
+        return jsonify(error="ვერ მოიძებნა"), 404
+
+    asking_agent = next(
+        (a for a in sheets.get_agents() if str(a.get("agent_id")) == str(row.get("agent_id"))), None
+    )
+    if asking_agent and asking_agent.get("telegram_chat_id"):
+        _send_telegram_message(
+            int(asking_agent["telegram_chat_id"]),
+            f"💬 პასუხი თქვენს კითხვაზე „{row.get('text')}“:\n{answer}",
+        )
+    return jsonify(ok=True, row=row)
+
+
 @app.post("/api/dayoff/decide")
 def api_dayoff_decide():
     _, admin, err = _authed_agent()
