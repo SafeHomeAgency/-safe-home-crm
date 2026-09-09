@@ -48,6 +48,7 @@ _sheet = None
 AGENTS_HEADERS = [
     "agent_id", "name", "phone", "telegram_username",
     "telegram_chat_id", "active", "registered_at", "team",
+    "role", "internal_number",
 ]
 # შენიშვნა: ყველა ახალი სვეტი (agent_name/assigned_to_name და ა.შ.)
 # განზრახ ემატება სიის **ბოლოში**, არა შუაში — რომ არსებული ცხრილის
@@ -60,7 +61,7 @@ TASKS_HEADERS = [
 ]
 REPORTS_HEADERS = [
     "report_id", "agent_id", "client_phone", "actions", "notes",
-    "file_id", "created_at", "agent_name",
+    "file_id", "created_at", "agent_name", "quality_auto", "quality_manual", "rated_by",
 ]
 DAYOFF_HEADERS = [
     "request_id", "agent_id", "date", "reason", "status",
@@ -83,12 +84,32 @@ SCHEDULE_HEADERS = ["agent_id"] + WEEKDAY_KEYS + ["updated_at", "agent_name"]
 # დღიური გამოცხადება/დასრულება (clock-in / clock-out)
 ATTENDANCE_HEADERS = [
     "attendance_id", "agent_id", "date", "mode", "clock_in", "clock_out",
-    "count_submitted", "agent_name",
+    "count_submitted", "agent_name", "site_count", "myhome_count", "ssge_count",
 ]
 
 # გაფრთხილებები (დაგვიანებული/გამოტოვებული ანგარიში, დაგვიანება,
-# არ-გამოცხადება). ტიპები: late_report / late_arrival / no_show
+# არ-გამოცხადება). ტიპები: late_report / late_arrival / no_show / quota_missed
 WARNINGS_HEADERS = ["warning_id", "agent_id", "type", "detail", "created_at", "agent_name"]
+
+# სმენების/ცვლის გაცვლის მოთხოვნები. request_type: swap_agent (კონკრეტულ
+# კოლეგასთან გაცვლა) / change_mode (საკუთარი ცვლის ტიპის შეცვლა, მაგ.
+# ოფისი→ონლაინ) / open_swap (ვინმეს გაცვლის შეთავაზება, ყველასთვის).
+# status: pending_peer -> pending_manager -> approved/rejected/cancelled
+SHIFT_SWAPS_HEADERS = [
+    "swap_id", "agent_id", "agent_name", "request_type", "from_mode", "to_mode",
+    "target_agent_id", "target_agent_name", "swap_date", "note", "status",
+    "accepted_by", "accepted_by_name", "created_at", "decided_at", "decided_by",
+]
+
+# ექსკლუზივი ლისტინგები ("ბინების ბაზა") — ყოფილი "ექსკლუზივების ბაზა"
+# Google Form-ის ველების ზუსტი ასლი.
+EXCLUSIVES_HEADERS = [
+    "exclusive_id", "agent_id", "agent_name", "contact_internal", "owner_phone",
+    "property_type", "deal_type", "building_status", "condition", "location",
+    "cadastral_code", "area", "rooms", "bedrooms", "floors_total", "floor_number",
+    "project_type", "bathrooms", "balcony", "price", "percent", "notes",
+    "photos", "status", "created_at",
+]
 
 
 def _get_client():
@@ -153,6 +174,8 @@ def ensure_sheets():
         (config.SCHEDULE_SHEET_NAME, SCHEDULE_HEADERS, 200),
         (config.ATTENDANCE_SHEET_NAME, ATTENDANCE_HEADERS, 2000),
         (config.WARNINGS_SHEET_NAME, WARNINGS_HEADERS, 500),
+        (config.SHIFT_SWAPS_SHEET_NAME, SHIFT_SWAPS_HEADERS, 500),
+        (config.EXCLUSIVES_SHEET_NAME, EXCLUSIVES_HEADERS, 1000),
     ]
     for name, headers, rows in sheets_to_ensure:
         try:
@@ -193,6 +216,14 @@ def _attendance_ws():
 
 def _warnings_ws():
     return _get_spreadsheet().worksheet(config.WARNINGS_SHEET_NAME)
+
+
+def _shift_swaps_ws():
+    return _get_spreadsheet().worksheet(config.SHIFT_SWAPS_SHEET_NAME)
+
+
+def _exclusives_ws():
+    return _get_spreadsheet().worksheet(config.EXCLUSIVES_SHEET_NAME)
 
 
 def _now():
@@ -249,7 +280,7 @@ def add_agent(name: str, phone: str, team: str = "") -> str:
     with _lock:
         agent_id = uuid.uuid4().hex[:8]
         _agents_ws().append_row([
-            agent_id, name, phone, "", "", "yes", _now(), team,
+            agent_id, name, phone, "", "", "yes", _now(), team, "agent", "",
         ])
         return agent_id
 
@@ -271,6 +302,52 @@ def set_agent_active(agent_id: str, value: str) -> bool:
         if not cell:
             return False
         ws.update_cell(cell.row, AGENTS_HEADERS.index("active") + 1, value)
+        return True
+
+
+def set_agent_role(agent_id: str, role: str) -> bool:
+    """role: 'agent' / 'team_lead' — თიმლიდერს Mini App-ში ემატება
+    საკუთარი გუნდის ფილტრირებული მენეჯერული ხედვაც."""
+    with _lock:
+        ws = _agents_ws()
+        cell = ws.find(agent_id, in_column=1)
+        if not cell:
+            return False
+        ws.update_cell(cell.row, AGENTS_HEADERS.index("role") + 1, role)
+        return True
+
+
+def set_agent_internal_number(agent_id: str, number: str) -> bool:
+    with _lock:
+        ws = _agents_ws()
+        cell = ws.find(agent_id, in_column=1)
+        if not cell:
+            return False
+        ws.update_cell(cell.row, AGENTS_HEADERS.index("internal_number") + 1, number)
+        return True
+
+
+def find_agent_by_internal_number(number: str) -> dict | None:
+    number = str(number).strip()
+    for a in get_agents():
+        if str(a.get("internal_number", "")).strip() == number and number:
+            return a
+    return None
+
+
+def swap_internal_numbers(agent_id_a: str, agent_id_b: str) -> bool:
+    """ორი აგენტის შიდა ნომრების ერთმანეთში გაცვლა."""
+    with _lock:
+        ws = _agents_ws()
+        cell_a = ws.find(agent_id_a, in_column=1)
+        cell_b = ws.find(agent_id_b, in_column=1)
+        if not cell_a or not cell_b:
+            return False
+        col = AGENTS_HEADERS.index("internal_number") + 1
+        num_a = ws.cell(cell_a.row, col).value or ""
+        num_b = ws.cell(cell_b.row, col).value or ""
+        ws.update_cell(cell_a.row, col, num_b)
+        ws.update_cell(cell_b.row, col, num_a)
         return True
 
 
@@ -424,15 +501,44 @@ def pick_agent_for_priority(priority: str, days: int = 30) -> str | None:
 
 # ---------- Client reports (ყოფილი "AgentReports" ფორმის შემცვლელი) ----------
 
+def _auto_quality(client_phone: str, actions: str, notes: str, file_id: str) -> int:
+    """მარტივი ავტომატური „სისრულის" შეფასება 1-5 — რამდენად სრულადაა
+    შევსებული რეპორტი (ტელეფონი/მოქმედება/შენიშვნა/მტკიცებულება).
+    ეს არ ცვლის/ანაცვლებს მენეჯერის ხელით შეფასებას (quality_manual)."""
+    score = 1
+    if client_phone.strip():
+        score += 1
+    if actions.strip():
+        score += 1
+    if notes.strip() and len(notes.strip()) >= 5:
+        score += 1
+    if file_id.strip():
+        score += 1
+    return min(score, 5)
+
+
 def create_report(agent_id: str, client_phone: str, actions: str,
                    notes: str = "", file_id: str = "") -> str:
     with _lock:
         report_id = uuid.uuid4().hex[:8]
+        auto_q = _auto_quality(client_phone, actions, notes, file_id)
         _reports_ws().append_row([
             report_id, agent_id, client_phone, actions, notes,
-            file_id, _now(), agent_name_by_id(agent_id),
+            file_id, _now(), agent_name_by_id(agent_id), auto_q, "", "",
         ])
         return report_id
+
+
+def set_report_quality(report_id: str, score: int, rated_by: str) -> bool:
+    """მენეჯერის/თიმლიდერის ხელით შეფასება (1-5) — Mini App-იდან."""
+    with _lock:
+        ws = _reports_ws()
+        cell = ws.find(report_id, in_column=1)
+        if not cell:
+            return False
+        ws.update_cell(cell.row, REPORTS_HEADERS.index("quality_manual") + 1, score)
+        ws.update_cell(cell.row, REPORTS_HEADERS.index("rated_by") + 1, rated_by)
+        return True
 
 
 def get_reports(agent_id: str | None = None, client_phone: str | None = None) -> list[dict]:
@@ -579,7 +685,10 @@ def clock_in(agent_id: str) -> str:
                 return "ok"
         mode = get_today_mode(agent_id)
         attendance_id = uuid.uuid4().hex[:8]
-        ws.append_row([attendance_id, agent_id, today, mode, _now(), "", "", agent_name_by_id(agent_id)])
+        ws.append_row([
+            attendance_id, agent_id, today, mode, _now(), "", "",
+            agent_name_by_id(agent_id), "", "", "",
+        ])
         return "ok"
 
 
@@ -608,10 +717,14 @@ def get_today_attendance(agent_id: str) -> dict | None:
     return None
 
 
-def set_daily_count(agent_id: str, count: int) -> bool:
+def set_daily_count(agent_id: str, count: int, site: int | None = None,
+                     myhome: int | None = None, ssge: int | None = None) -> bool:
     """ინახავს დღეს შეყვანილი განცხადებების რაოდენობას (ყოფილი
-    "ანგარიშფაქტურა" ფორმის "შეყვანილი რაოდენობა"). აგენტს უნდა ჰქონდეს
-    დღეს უკვე დაწყებული (/clockin) — მისი სტრიქონი Attendance-ში."""
+    "ანგარიშფაქტურა" ფორმის "შეყვანილი რაოდენობა"). `count` ყოველთვის
+    ჯამია; ოფისის ცვლაზე დამატებით ინახება პლატფორმების მიხედვითაც
+    (site/myhome/ssge) — ონლაინ დღეზე ეს სამივე ცარიელი რჩება.
+    აგენტს უნდა ჰქონდეს დღეს უკვე დაწყებული (/clockin) — მისი სტრიქონი
+    Attendance-ში."""
     today = _today_str()
     with _lock:
         ws = _attendance_ws()
@@ -619,6 +732,12 @@ def set_daily_count(agent_id: str, count: int) -> bool:
         for idx, r in enumerate(records, start=2):
             if str(r.get("agent_id")) == str(agent_id) and str(r.get("date")) == today:
                 ws.update_cell(idx, ATTENDANCE_HEADERS.index("count_submitted") + 1, count)
+                if site is not None:
+                    ws.update_cell(idx, ATTENDANCE_HEADERS.index("site_count") + 1, site)
+                if myhome is not None:
+                    ws.update_cell(idx, ATTENDANCE_HEADERS.index("myhome_count") + 1, myhome)
+                if ssge is not None:
+                    ws.update_cell(idx, ATTENDANCE_HEADERS.index("ssge_count") + 1, ssge)
                 return True
         return False
 
@@ -695,7 +814,166 @@ def add_warning(agent_id: str, type_: str, detail: str = "") -> dict:
     return {"warning_id": warning_id, "count": count, "deactivated": deactivated}
 
 
+# ---------- სმენების/ნომრის გაცვლა ----------
+
+def _weekday_key_for_date(date_str: str) -> str | None:
+    try:
+        d = datetime.datetime.strptime(date_str.strip(), "%Y-%m-%d")
+        return WEEKDAY_KEYS[d.weekday()]
+    except (ValueError, AttributeError):
+        return None
+
+
+def count_swap_requests_this_month(agent_id: str) -> int:
+    month_str = datetime.datetime.now().strftime("%Y-%m")
+    return sum(
+        1 for r in get_shift_swaps(agent_id=agent_id)
+        if str(r.get("created_at", "")).startswith(month_str) and str(r.get("agent_id")) == str(agent_id)
+    )
+
+
+def create_shift_swap_request(agent_id: str, request_type: str, swap_date: str,
+                               from_mode: str = "", to_mode: str = "",
+                               target_agent_id: str = "", note: str = "") -> str:
+    """request_type: 'swap_agent' (კონკრეტულ კოლეგასთან) / 'open_swap'
+    (ყველასთვის გაგზავნა, ვინც დათანხმდება) / 'change_mode' (საკუთარი
+    ცვლის ტიპის შეცვლა — პირს არ სჭირდება)."""
+    with _lock:
+        swap_id = uuid.uuid4().hex[:8]
+        status = "pending_manager" if request_type == "change_mode" else "pending_peer"
+        target_name = agent_name_by_id(target_agent_id) if target_agent_id else ""
+        _shift_swaps_ws().append_row([
+            swap_id, agent_id, agent_name_by_id(agent_id), request_type, from_mode, to_mode,
+            target_agent_id, target_name, swap_date, note, status,
+            "", "", _now(), "", "",
+        ])
+        return swap_id
+
+
+def get_shift_swaps(agent_id: str | None = None, status: str | None = None) -> list[dict]:
+    with _lock:
+        rows = _shift_swaps_ws().get_all_records()
+    if agent_id:
+        rows = [
+            r for r in rows
+            if str(r.get("agent_id")) == str(agent_id) or str(r.get("target_agent_id")) == str(agent_id)
+        ]
+    if status:
+        rows = [r for r in rows if str(r.get("status")) == status]
+    return rows
+
+
+def accept_shift_swap(swap_id: str, accepting_agent_id: str) -> dict | None:
+    """კოლეგა ეთანხმება ღია/მიმართულ მოთხოვნას — შემდეგ სტატუსი
+    გადადის 'pending_manager'-ზე და მენეჯერის დადასტურებას ელოდება."""
+    with _lock:
+        ws = _shift_swaps_ws()
+        cell = ws.find(swap_id, in_column=1)
+        if not cell:
+            return None
+        row = dict(zip(SHIFT_SWAPS_HEADERS, ws.row_values(cell.row)))
+        if row.get("status") != "pending_peer":
+            return None
+        name = agent_name_by_id(accepting_agent_id)
+        if row.get("request_type") == "open_swap" and not row.get("target_agent_id"):
+            ws.update_cell(cell.row, SHIFT_SWAPS_HEADERS.index("target_agent_id") + 1, accepting_agent_id)
+            ws.update_cell(cell.row, SHIFT_SWAPS_HEADERS.index("target_agent_name") + 1, name)
+        ws.update_cell(cell.row, SHIFT_SWAPS_HEADERS.index("accepted_by") + 1, accepting_agent_id)
+        ws.update_cell(cell.row, SHIFT_SWAPS_HEADERS.index("accepted_by_name") + 1, name)
+        ws.update_cell(cell.row, SHIFT_SWAPS_HEADERS.index("status") + 1, "pending_manager")
+        return dict(zip(SHIFT_SWAPS_HEADERS, ws.row_values(cell.row)))
+
+
+def decide_shift_swap(swap_id: str, status: str, decided_by: str) -> dict | None:
+    """მენეჯერის საბოლოო გადაწყვეტილება. დამტკიცებისას რეალურად
+    იცვლება Schedule-ში შესაბამისი კვირის დღის რეჟიმი(ები) —
+    წინააღმდეგ შემთხვევაში (უარყოფა) არაფერი იცვლება."""
+    with _lock:
+        ws = _shift_swaps_ws()
+        cell = ws.find(swap_id, in_column=1)
+        if not cell:
+            return None
+        ws.update_cell(cell.row, SHIFT_SWAPS_HEADERS.index("status") + 1, status)
+        ws.update_cell(cell.row, SHIFT_SWAPS_HEADERS.index("decided_at") + 1, _now())
+        ws.update_cell(cell.row, SHIFT_SWAPS_HEADERS.index("decided_by") + 1, decided_by)
+        row = dict(zip(SHIFT_SWAPS_HEADERS, ws.row_values(cell.row)))
+
+    if status == "approved":
+        wk = _weekday_key_for_date(row.get("swap_date", ""))
+        if wk:
+            if row.get("request_type") == "change_mode":
+                sched = get_agent_schedule(row["agent_id"]) or {}
+                pattern = {k: str(sched.get(k) or "off") for k in WEEKDAY_KEYS}
+                pattern[wk] = row.get("to_mode") or "off"
+                set_agent_schedule(row["agent_id"], pattern)
+            elif row.get("target_agent_id"):
+                sched_a = get_agent_schedule(row["agent_id"]) or {}
+                sched_b = get_agent_schedule(row["target_agent_id"]) or {}
+                mode_a = str(sched_a.get(wk) or "off")
+                mode_b = str(sched_b.get(wk) or "off")
+                pat_a = {k: str(sched_a.get(k) or "off") for k in WEEKDAY_KEYS}
+                pat_b = {k: str(sched_b.get(k) or "off") for k in WEEKDAY_KEYS}
+                pat_a[wk] = mode_b
+                pat_b[wk] = mode_a
+                set_agent_schedule(row["agent_id"], pat_a)
+                set_agent_schedule(row["target_agent_id"], pat_b)
+    return row
+
+
+# ---------- ექსკლუზივები ("ბინების ბაზა") ----------
+
+def create_exclusive(agent_id: str, fields: dict) -> str:
+    with _lock:
+        exclusive_id = uuid.uuid4().hex[:8]
+        row = []
+        for h in EXCLUSIVES_HEADERS:
+            if h == "exclusive_id":
+                row.append(exclusive_id)
+            elif h == "agent_id":
+                row.append(agent_id)
+            elif h == "agent_name":
+                row.append(agent_name_by_id(agent_id))
+            elif h == "created_at":
+                row.append(_now())
+            elif h == "status":
+                row.append(fields.get("status") or "active")
+            else:
+                row.append(fields.get(h, ""))
+        _exclusives_ws().append_row(row)
+        return exclusive_id
+
+
+def get_exclusives(agent_id: str | None = None, status: str | None = None) -> list[dict]:
+    with _lock:
+        rows = _exclusives_ws().get_all_records()
+    if agent_id:
+        rows = [r for r in rows if str(r.get("agent_id")) == str(agent_id)]
+    if status:
+        rows = [r for r in rows if str(r.get("status")) == status]
+    return rows
+
+
 # ---------- Mini App დაშბორდის მონაცემები ----------
+
+def quota_for_mode(mode: str) -> int | None:
+    """დღიური გეგმა (რაოდენობა) რეჟიმის მიხედვით — ონლაინ და ოფისის
+    ცვლას ცალ-ცალკე ლიმიტი აქვს; დასვენების დღეს (off) ლიმიტი არ არის."""
+    if mode == "online":
+        return config.ONLINE_DAILY_QUOTA
+    if mode in ("office_morning", "office_evening"):
+        return config.OFFICE_DAILY_QUOTA
+    return None
+
+
+def client_counts(agent_id: str) -> dict:
+    """კლიენტების რაოდენობა (დღეს/ჯამურად) — "კლიენტი" აქ ნიშნავს
+    აგენტზე მინიჭებულ დავალებას/ლიდს (Tasks), მომხმარებლის
+    განმარტებით (და არა /clientreport-ის რეპორტს)."""
+    today_str = _today_str()
+    agent_tasks = [t for t in get_tasks() if str(t.get("assigned_to")) == str(agent_id)]
+    today_count = sum(1 for t in agent_tasks if str(t.get("created_at", "")).startswith(today_str))
+    return {"today": today_count, "total": len(agent_tasks)}
+
 
 def get_agent_dashboard(agent_id: str) -> dict | None:
     """ერთი აგენტის სრული დღევანდელი სურათი — Mini App-ის "ჩემი დღე"
@@ -710,6 +988,7 @@ def get_agent_dashboard(agent_id: str) -> dict | None:
     sched = get_agent_schedule(agent_id) or {}
     tasks = get_tasks_for_agent(agent_id, only_open=True)
     meetings = get_meetings(agent_id=agent_id)[-5:][::-1]
+    clients = client_counts(agent_id)
     return {
         "agent": {
             "agent_id": agent.get("agent_id", ""),
@@ -723,8 +1002,12 @@ def get_agent_dashboard(agent_id: str) -> dict | None:
             "clock_in": att.get("clock_in", ""),
             "clock_out": att.get("clock_out", ""),
             "count_submitted": att.get("count_submitted", ""),
-            "quota": config.ONLINE_DAILY_QUOTA if mode == "online" else None,
+            "site_count": att.get("site_count", ""),
+            "myhome_count": att.get("myhome_count", ""),
+            "ssge_count": att.get("ssge_count", ""),
+            "quota": quota_for_mode(mode),
         },
+        "clients": clients,
         "schedule": {k: str(sched.get(k) or "off") for k in WEEKDAY_KEYS},
         "performance": {
             "assigned": perf.get("assigned", 0),
@@ -741,20 +1024,27 @@ def get_agent_dashboard(agent_id: str) -> dict | None:
     }
 
 
-def get_admin_dashboard() -> dict:
-    """მთელი გუნდის დღევანდელი სურათი — Mini App-ის მენეჯერის
-    დაშბორდისთვის."""
+def get_admin_dashboard(team: str | None = None) -> dict:
+    """მთელი გუნდის (ან, თუ `team` მითითებულია — მხოლოდ ერთი გუნდის,
+    თიმლიდერის ფილტრირებული ხედვისთვის) დღევანდელი სურათი — Mini
+    App-ის მენეჯერის დაშბორდისთვის."""
     agents = get_agents()
+    if team:
+        agents = [a for a in agents if str(a.get("team", "")).strip() == team.strip()]
     perf = get_agent_performance(30)
     today_att = {str(r.get("agent_id")): r for r in get_today_attendance_all()}
 
-    team = []
+    team_rows = []
     total_submitted = 0
     total_quota_target = 0
     clocked_in_count = 0
+    quota_missed_count = 0
+    clients_today_total = 0
+    clients_all_total = 0
     for a in agents:
         aid = a.get("agent_id")
         mode = get_today_mode(aid)
+        quota = quota_for_mode(mode)
         att = today_att.get(str(aid), {})
         clocked = bool(att.get("clock_in")) and not att.get("clock_out")
         if clocked:
@@ -763,12 +1053,17 @@ def get_admin_dashboard() -> dict:
             count_submitted = int(att.get("count_submitted") or 0)
         except (TypeError, ValueError):
             count_submitted = 0
-        if mode == "online":
-            total_quota_target += config.ONLINE_DAILY_QUOTA
+        if quota:
+            total_quota_target += quota
             total_submitted += count_submitted
+            if att.get("clock_out") and count_submitted < quota:
+                quota_missed_count += 1
         w = len(get_warnings(agent_id=aid, days=config.WARNING_WINDOW_DAYS))
         p = perf.get(str(aid), {})
-        team.append({
+        c = client_counts(aid)
+        clients_today_total += c["today"]
+        clients_all_total += c["total"]
+        team_rows.append({
             "agent_id": aid,
             "name": a.get("name", ""),
             "team": a.get("team", ""),
@@ -776,22 +1071,33 @@ def get_admin_dashboard() -> dict:
             "mode": mode,
             "clocked_in": clocked,
             "count_submitted": att.get("count_submitted", ""),
+            "site_count": att.get("site_count", ""),
+            "myhome_count": att.get("myhome_count", ""),
+            "ssge_count": att.get("ssge_count", ""),
+            "quota": quota,
             "warnings": w,
             "assigned": p.get("assigned", 0),
             "rate": p.get("rate"),
+            "clients_today": c["today"],
+            "clients_total": c["total"],
         })
 
     ranking = sorted(
-        [t for t in team if t["rate"] is not None and t["assigned"]],
+        [t for t in team_rows if t["rate"] is not None and t["assigned"]],
         key=lambda t: t["rate"], reverse=True,
     )[:10]
-    pending_dayoffs = get_dayoff_requests(status="pending")
-    recent_warnings = sorted(
-        get_warnings(), key=lambda w: str(w.get("created_at", "")), reverse=True
-    )[:10]
+    team_agent_ids = {str(a.get("agent_id")) for a in agents}
+    pending_dayoffs = [
+        r for r in get_dayoff_requests(status="pending")
+        if not team or str(r.get("agent_id")) in team_agent_ids
+    ]
+    recent_warnings = [
+        w for w in sorted(get_warnings(), key=lambda w: str(w.get("created_at", "")), reverse=True)
+        if not team or str(w.get("agent_id")) in team_agent_ids
+    ][:10]
 
     return {
-        "team": team,
+        "team": team_rows,
         "ranking": ranking,
         "pending_dayoffs": pending_dayoffs,
         "recent_warnings": recent_warnings,
@@ -801,6 +1107,9 @@ def get_admin_dashboard() -> dict:
             "clocked_in": clocked_in_count,
             "total_submitted": total_submitted,
             "total_quota_target": total_quota_target,
+            "quota_missed": quota_missed_count,
             "pending_dayoffs": len(pending_dayoffs),
+            "clients_today": clients_today_total,
+            "clients_total": clients_all_total,
         },
     }

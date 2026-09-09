@@ -40,6 +40,11 @@ MEETINGS_SHEET_NAME = "Meetings"
 SCHEDULE_SHEET_NAME = "Schedule"
 ATTENDANCE_SHEET_NAME = "Attendance"
 WARNINGS_SHEET_NAME = "Warnings"
+SHIFT_SWAPS_SHEET_NAME = "ShiftSwaps"
+EXCLUSIVES_SHEET_NAME = "Exclusives"
+
+# თვეში მაქსიმუმ რამდენჯერ შეუძლია აგენტს სმენის გაცვლის მოთხოვნა
+SHIFT_SWAP_MONTHLY_LIMIT = int(os.environ.get("SHIFT_SWAP_MONTHLY_LIMIT", "2"))
 
 # რამდენი გაფრთხილების მერე ითიშება აგენტი ავტომატურად (30-დღიან ფანჯარაში)
 WARNING_LIMIT = int(os.environ.get("WARNING_LIMIT", "4"))
@@ -48,8 +53,11 @@ WARNING_WINDOW_DAYS = int(os.environ.get("WARNING_WINDOW_DAYS", "30"))
 REPORT_DEADLINE_HOUR = int(os.environ.get("REPORT_DEADLINE_HOUR", "22"))
 # რამდენი წუთის დაგვიანება ითვლება ჯერ კიდევ დასაშვებად (ოფისის ცვლაზე)
 ATTENDANCE_GRACE_MINUTES = int(os.environ.get("ATTENDANCE_GRACE_MINUTES", "15"))
-# დღიური გეგმა (განცხადებების რაოდენობა) ონლაინ დღეზე მყოფი აგენტისთვის
-ONLINE_DAILY_QUOTA = int(os.environ.get("ONLINE_DAILY_QUOTA", "20"))
+# დღიური გეგმა (განცხადებების რაოდენობა) — ცალ-ცალკე ონლაინ დღეზე და
+# ოფისის ცვლაზე მყოფი აგენტისთვის (ოფისზე იზომება ჯამურად: საიტი +
+# myhome + ss.ge)
+ONLINE_DAILY_QUOTA = int(os.environ.get("ONLINE_DAILY_QUOTA", "10"))
+OFFICE_DAILY_QUOTA = int(os.environ.get("OFFICE_DAILY_QUOTA", "20"))
 
 # Mini App (ვიზუალური დაშბორდი ტელეგრამშივე). Railway-ზე
 # Settings → Networking → Generate Domain-ით მიღებული საჯარო https

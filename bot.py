@@ -54,6 +54,12 @@ DO_DATE, DO_REASON = range(14, 16)
 SC_AGENT, SC_DAY = range(17, 19)
 # ---- /clockout (agent) — დღიური რაოდენობის კითხვა ----
 (CO_COUNT,) = range(19, 20)
+# ---- /addexclusive (agent) — ველების ჯაჭვი (ყოფილი ფორმის ანალოგიურად) ----
+(EX_FIELD,) = range(20, 21)
+# ---- /swapnumber (agent) — შიდა ნომრის გაცვლის მოთხოვნა ----
+(SN_TARGET,) = range(21, 22)
+# ---- /swapshift (agent) — სმენის/ცვლის გაცვლის მოთხოვნა ----
+SW_TYPE, SW_TARGET, SW_DATE, SW_MODE, SW_NOTE = range(22, 27)
 
 PRIORITY_LABELS = ("დაბალი", "საშუალო", "მაღალი")
 
@@ -101,6 +107,36 @@ MEETING_FIELDS = [
     ("internal_number", "შიდა ნომერი? (თუ არ არის — „-“)"),
     ("team_leader", "თიმლიდერი?"),
 ]
+
+# ყოფილი "ექსკლუზივების ბაზა" Google Form-ის ველების ზუსტი ანალოგი —
+# /addexclusive-ში ერთი-ერთზე ეკითხება აგენტს.
+EXCLUSIVE_FIELDS = [
+    ("contact_internal", "თქვენი საკონტაქტო ნომერი + შიდა ნომერი?"),
+    ("owner_phone", "მეპატრონის ნომერი? (თუ არ იცით — „-“)"),
+    ("property_type", "ბინის ტიპი? (ბინა / კერძო სახლი / აგარაკი / მიწის ნაკვეთი / კომერციული ფართი / სასტუმრო)"),
+    ("deal_type", "გარიგების ტიპი? (იყიდვა / ქირავდება)"),
+    ("building_status", "სტატუსი? (ძველი აშენებული / ახალი აშენებული / მშენებარე)"),
+    ("condition", "მდგომარეობა? (ახალი გარემონტებული / ძველი გარემონტებული / მიმდინარე რემონტი / სარემონტო / თეთრი კარკასი / შავი კარკასი / მწვანე კარკასი / თეთრი პლიუსი)"),
+    ("location", "მდებარეობა (რაიონი) + ზუსტი მისამართი?"),
+    ("cadastral_code", "საკადასტრო კოდი? (თუ არ იცით — „-“)"),
+    ("area", "ფართი? (მ²)"),
+    ("rooms", "ოთახების რაოდენობა? (1-დან 10+-მდე)"),
+    ("bedrooms", "საძინებლების რაოდენობა? (1-5)"),
+    ("floors_total", "რამდენსართულიანია კორპუსი/სახლი?"),
+    ("floor_number", "რომელ სართულზეა?"),
+    ("project_type", "პროექტის ტიპი? (არასტანდარტული / თუხარელის / იტალიური ეზო / ლენინგრადის / ჩეხური / ხრუშოვის / საერთო საცხოვრებელი / დუპლექსი / ტრიპლექსი / m2-ის კომპლექსი)"),
+    ("bathrooms", "სველი წერტილების რაოდენობა? (1 / 2 / 3+ / საერთო)"),
+    ("balcony", "აივანი (ფართობი)? (თუ არ არის — „-“)"),
+    ("price", "ფასი?"),
+    ("percent", "პროცენტი?"),
+    ("notes", "შეზღუდვები ან დამატებითი ინფორმაცია, რაც უნდა ვიცოდეთ? (თუ არ არის — „-“)"),
+]
+
+REQUEST_TYPE_LABELS = {
+    "open_swap": "სმენის გაცვლა (ვინმეს ვთხოვ)",
+    "swap_agent": "სმენის გაცვლა კონკრეტულ კოლეგასთან",
+    "change_mode": "ცვლის ტიპის შეცვლა (მაგ. ოფისი→ონლაინ)",
+}
 
 
 def is_admin(chat_id: int) -> bool:
@@ -150,7 +186,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "/schedule — დღევანდელი გამოცხადების სტატუსი ყველაზე\n"
             "/warnings — გაფრთხილებები (ბოლო 30 დღე)\n"
             "/reactivate <agent_id> — გამორთული აგენტის დაბრუნება\n"
-            "/setteam <agent_id> <თიმლიდერი> — აგენტის თიმის დაყენება",
+            "/setteam <agent_id> <თიმი> — აგენტის თიმის დაყენება\n"
+            "/setrole <agent_id> <team_lead|agent> — თიმლიდერის დანიშვნა\n"
+            "/setnumber <agent_id> <ნომერი> — შიდა ნომრის მინიჭება\n"
+            "/exclusives — აქტიური ექსკლუზივები\n"
+            "/swaps — დასადასტურებელი სმენის გაცვლები",
             reply_markup=webapp_markup,
         )
         return
@@ -166,7 +206,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "/dayoff — დასვენების დღის მოთხოვნა\n"
             "/myschedule — შენი კვირის გრაფიკი\n"
             "/clockin — სამუშაო დღის დაწყება\n"
-            "/clockout — სამუშაო დღის დასრულება",
+            "/clockout — სამუშაო დღის დასრულება\n"
+            "/swapshift — სმენის/ცვლის გაცვლის მოთხოვნა\n"
+            "/swapnumber — შიდა ნომრის გაცვლა კოლეგასთან\n"
+            "/addexclusive — ექსკლუზივის დამატება ბაზაში\n"
+            "/exclusives — აქტიური ექსკლუზივების სია",
             reply_markup=webapp_markup,
         )
         return
@@ -696,6 +740,408 @@ async def meeting_field(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 
+async def _broadcast_to_agents(context: ContextTypes.DEFAULT_TYPE, text: str,
+                                exclude_agent_id: str | None = None,
+                                reply_markup: InlineKeyboardMarkup | None = None):
+    for a in sheets.get_agents():
+        if exclude_agent_id and a.get("agent_id") == exclude_agent_id:
+            continue
+        if str(a.get("active", "")).strip().lower() == "no":
+            continue
+        chat_id = a.get("telegram_chat_id")
+        if not chat_id:
+            continue
+        try:
+            await context.bot.send_message(chat_id=int(chat_id), text=text, reply_markup=reply_markup)
+        except Exception:
+            log.exception("გავრცელების შეტყობინება ვერ გაეგზავნა agent_id=%s", a.get("agent_id"))
+
+
+# ------------------------------------------------------ /addexclusive (agent)
+# ყოფილი "ექსკლუზივების ბაზა" Google Form-ის შემცვლელი.
+
+async def exclusive_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    agent = sheets.find_agent_by_chat_id(update.effective_chat.id)
+    if not agent:
+        await update.message.reply_text("ჯერ დარეგისტრირდით — გამოიყენეთ /start.")
+        return ConversationHandler.END
+    context.user_data["ex_agent"] = agent
+    context.user_data["ex_data"] = {}
+    context.user_data["ex_idx"] = 0
+    await update.message.reply_text(
+        "ვამატებთ ექსკლუზივს ბაზაში. სადაც აქტუალური არაა, დაწერეთ „-“.\n\n"
+        + EXCLUSIVE_FIELDS[0][1]
+    )
+    return EX_FIELD
+
+
+async def exclusive_field(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    idx = context.user_data.get("ex_idx", 0)
+    key, _ = EXCLUSIVE_FIELDS[idx]
+    value = update.message.text.strip()
+    context.user_data["ex_data"][key] = "" if value == "-" else value
+    idx += 1
+    context.user_data["ex_idx"] = idx
+
+    if idx < len(EXCLUSIVE_FIELDS):
+        await update.message.reply_text(EXCLUSIVE_FIELDS[idx][1])
+        return EX_FIELD
+
+    agent = context.user_data["ex_agent"]
+    d = context.user_data["ex_data"]
+    exclusive_id = sheets.create_exclusive(agent["agent_id"], d)
+    await update.message.reply_text(f"✅ ექსკლუზივი დამატებულია ბაზაში (id: {exclusive_id}).")
+
+    summary = (
+        f"🏠 ახალი ექსკლუზივი — მფლობელი აგენტი: {agent['name']}\n"
+        f"ტიპი: {d.get('property_type') or '-'} | გარიგება: {d.get('deal_type') or '-'}\n"
+        f"მდებარეობა: {d.get('location') or '-'}\n"
+        f"ფართი: {d.get('area') or '-'} | ოთახები: {d.get('rooms') or '-'}\n"
+        f"ფასი: {d.get('price') or '-'} | %: {d.get('percent') or '-'}\n\n"
+        f"‼️ ამ ლისტინგზე ვერბალური მესაკუთრეობა ეკუთვნის {agent['name']}-ს — "
+        "სხვა კლიენტთან შეთავაზებამდე შეთანხმდით მასთან."
+    )
+    await _broadcast_to_agents(context, summary, exclude_agent_id=agent["agent_id"])
+    for admin_id in config.ADMIN_CHAT_IDS:
+        try:
+            await context.bot.send_message(chat_id=admin_id, text=summary)
+        except Exception:
+            log.exception("ექსკლუზივის შეტყობინება ვერ გაეგზავნა admin=%s", admin_id)
+
+    context.user_data.clear()
+    return ConversationHandler.END
+
+
+async def exclusives_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    rows = sheets.get_exclusives(status="active")
+    if not rows:
+        await update.message.reply_text("ამ დროისთვის აქტიური ექსკლუზივი არ არის. დასამატებლად: /addexclusive")
+        return
+    rows = rows[-15:][::-1]
+    lines = ["🏠 აქტიური ექსკლუზივები:", ""]
+    for r in rows:
+        lines.append(
+            f"• {r.get('property_type') or '-'} | {r.get('deal_type') or '-'} — {r.get('agent_name')}\n"
+            f"   {r.get('location') or '-'} | ფართი: {r.get('area') or '-'} | ფასი: {r.get('price') or '-'}"
+        )
+    await update.message.reply_text("\n".join(lines))
+
+
+# -------------------------------------------------------- /swapnumber (agent)
+# შიდა ნომრების (107/108/109…) აგენტებს შორის გაცვლა — თანხმობით.
+
+async def swapnumber_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    agent = sheets.find_agent_by_chat_id(update.effective_chat.id)
+    if not agent:
+        await update.message.reply_text("ჯერ დარეგისტრირდით — გამოიყენეთ /start.")
+        return ConversationHandler.END
+    others = [
+        a for a in sheets.get_agents()
+        if a.get("agent_id") != agent["agent_id"] and a.get("telegram_chat_id")
+        and str(a.get("active", "")).lower() != "no"
+    ]
+    if not others:
+        await update.message.reply_text("გასაცვლელად სხვა დარეგისტრირებული აგენტი არ არის.")
+        return ConversationHandler.END
+    context.user_data["sn_agent"] = agent
+    rows = [
+        [InlineKeyboardButton(
+            f"{a['name']} ({a.get('internal_number') or '—'})",
+            callback_data=f"swapnum_pick:{a['agent_id']}",
+        )]
+        for a in others
+    ]
+    await update.message.reply_text(
+        f"თქვენი შიდა ნომერი: {agent.get('internal_number') or '—'}\n"
+        "ვისთან გსურთ ნომრის გაცვლა?",
+        reply_markup=InlineKeyboardMarkup(rows),
+    )
+    return SN_TARGET
+
+
+async def swapnumber_pick(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    target_id = query.data.split(":", 1)[1]
+    requester = context.user_data.pop("sn_agent", None)
+    if not requester:
+        await query.edit_message_text("მოთხოვნა ვადაგასულია, სცადეთ თავიდან /swapnumber.")
+        return ConversationHandler.END
+    target = next((a for a in sheets.get_agents() if a.get("agent_id") == target_id), None)
+    if not target or not target.get("telegram_chat_id"):
+        await query.edit_message_text("ეს აგენტი ვეღარ მოიძებნა.")
+        return ConversationHandler.END
+
+    await query.edit_message_text(f"✅ მოთხოვნა გაეგზავნა {target['name']}-ს, ველოდებით პასუხს.")
+    kb = InlineKeyboardMarkup([[
+        InlineKeyboardButton("✅ ვეთანხმები", callback_data=f"swapnum_resp:{requester['agent_id']}:{target_id}:yes"),
+        InlineKeyboardButton("❌ არა", callback_data=f"swapnum_resp:{requester['agent_id']}:{target_id}:no"),
+    ]])
+    try:
+        await context.bot.send_message(
+            chat_id=int(target["telegram_chat_id"]),
+            text=(
+                f"🔁 {requester['name']} გთხოვთ შიდა ნომრის გაცვლას.\n"
+                f"თქვენი ნომერი: {target.get('internal_number') or '—'} ⇄ "
+                f"მისი ნომერი: {requester.get('internal_number') or '—'}"
+            ),
+            reply_markup=kb,
+        )
+    except Exception:
+        log.exception("ნომრის გაცვლის მოთხოვნა ვერ გაეგზავნა agent_id=%s", target_id)
+    return ConversationHandler.END
+
+
+async def swapnumber_response(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    _, requester_id, target_id, answer = query.data.split(":")
+    requester = next((a for a in sheets.get_agents() if a.get("agent_id") == requester_id), None)
+    target = next((a for a in sheets.get_agents() if a.get("agent_id") == target_id), None)
+    if not requester or not target:
+        await query.edit_message_text("ვეღარ მოიძებნა — შესაძლოა უკვე შეცვლილია.")
+        return
+    if answer != "yes":
+        await query.edit_message_text("❌ უარყოფილია.")
+        try:
+            await context.bot.send_message(
+                chat_id=int(requester["telegram_chat_id"]),
+                text=f"{target['name']}-მა არ დაეთანხმა ნომრის გაცვლას.",
+            )
+        except Exception:
+            pass
+        return
+    sheets.swap_internal_numbers(requester_id, target_id)
+    await query.edit_message_text("✅ ნომრები გაიცვალა.")
+    try:
+        await context.bot.send_message(
+            chat_id=int(requester["telegram_chat_id"]),
+            text=f"✅ {target['name']} დათანხმდა — ნომრები გაიცვალა.",
+        )
+    except Exception:
+        pass
+
+
+# --------------------------------------------------------- /swapshift (agent)
+# სმენის/ცვლის გაცვლა: თვეში მაქს. SHIFT_SWAP_MONTHLY_LIMIT მოთხოვნა.
+
+def _swapshift_type_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(REQUEST_TYPE_LABELS["swap_agent"], callback_data="swtype:swap_agent")],
+        [InlineKeyboardButton(REQUEST_TYPE_LABELS["open_swap"], callback_data="swtype:open_swap")],
+        [InlineKeyboardButton(REQUEST_TYPE_LABELS["change_mode"], callback_data="swtype:change_mode")],
+    ])
+
+
+async def swapshift_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    agent = sheets.find_agent_by_chat_id(update.effective_chat.id)
+    if not agent:
+        await update.message.reply_text("ჯერ დარეგისტრირდით — გამოიყენეთ /start.")
+        return ConversationHandler.END
+    used = sheets.count_swap_requests_this_month(agent["agent_id"])
+    if used >= config.SHIFT_SWAP_MONTHLY_LIMIT:
+        await update.message.reply_text(
+            f"ამ თვეში უკვე გამოყენებული გაქვთ სმენის გაცვლის მოთხოვნის ლიმიტი "
+            f"({config.SHIFT_SWAP_MONTHLY_LIMIT}). დაელოდეთ მომდევნო თვეს."
+        )
+        return ConversationHandler.END
+    context.user_data["sw_agent"] = agent
+    await update.message.reply_text("რა გინდათ?", reply_markup=_swapshift_type_keyboard())
+    return SW_TYPE
+
+
+async def swapshift_type(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    req_type = query.data.split(":", 1)[1]
+    context.user_data["sw_type"] = req_type
+    if req_type == "swap_agent":
+        agent = context.user_data["sw_agent"]
+        others = [
+            a for a in sheets.get_agents()
+            if a.get("agent_id") != agent["agent_id"] and a.get("telegram_chat_id")
+            and str(a.get("active", "")).lower() != "no"
+        ]
+        if not others:
+            await query.edit_message_text("გასაცვლელად სხვა დარეგისტრირებული აგენტი არ არის.")
+            return ConversationHandler.END
+        rows = [
+            [InlineKeyboardButton(a["name"], callback_data=f"swtarget:{a['agent_id']}")]
+            for a in others
+        ]
+        await query.edit_message_text("რომელ კოლეგასთან გსურთ გაცვლა?", reply_markup=InlineKeyboardMarkup(rows))
+        return SW_TARGET
+    if req_type == "change_mode":
+        rows = [[InlineKeyboardButton(label, callback_data=f"swmode:{key}")] for key, label in SCHEDULE_MODES]
+        await query.edit_message_text("რა ტიპზე გინდათ შეცვლა?", reply_markup=InlineKeyboardMarkup(rows))
+        return SW_MODE
+    # open_swap
+    context.user_data["sw_target"] = ""
+    await query.edit_message_text("რომელი თარიღისთვის? (მაგ. 2026-09-15)")
+    return SW_DATE
+
+
+async def swapshift_target(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    context.user_data["sw_target"] = query.data.split(":", 1)[1]
+    await query.edit_message_text("რომელი თარიღისთვის? (მაგ. 2026-09-15)")
+    return SW_DATE
+
+
+async def swapshift_mode(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    context.user_data["sw_to_mode"] = query.data.split(":", 1)[1]
+    await query.edit_message_text("რომელი თარიღისთვის? (მაგ. 2026-09-15)")
+    return SW_DATE
+
+
+async def swapshift_date(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data["sw_date"] = update.message.text.strip()
+    await update.message.reply_text("შენიშვნა? (თუ არ გინდათ — /skip)")
+    return SW_NOTE
+
+
+async def _swapshift_finalize(update: Update, context: ContextTypes.DEFAULT_TYPE, note: str):
+    d = context.user_data
+    agent = d["sw_agent"]
+    req_type = d["sw_type"]
+    swap_id = sheets.create_shift_swap_request(
+        agent_id=agent["agent_id"], request_type=req_type, swap_date=d.get("sw_date", ""),
+        to_mode=d.get("sw_to_mode", ""), target_agent_id=d.get("sw_target", ""), note=note,
+    )
+    if req_type == "change_mode":
+        await update.message.reply_text("✅ მოთხოვნა გაეგზავნა მენეჯერს დასადასტურებლად.")
+        label = SCHEDULE_MODE_LABELS.get(d.get("sw_to_mode", ""), d.get("sw_to_mode", ""))
+        text_admin = (
+            f"🔁 {agent['name']}-ს სურს ცვლის ტიპის შეცვლა {d.get('sw_date')}-ზე → {label}\n"
+            f"შენიშვნა: {note or '-'}"
+        )
+        kb = InlineKeyboardMarkup([[
+            InlineKeyboardButton("✅ დადასტურება", callback_data=f"swshift_decide:{swap_id}:approved"),
+            InlineKeyboardButton("❌ უარყოფა", callback_data=f"swshift_decide:{swap_id}:rejected"),
+        ]])
+        for admin_id in config.ADMIN_CHAT_IDS:
+            try:
+                await context.bot.send_message(chat_id=admin_id, text=text_admin, reply_markup=kb)
+            except Exception:
+                log.exception("სმენის მოთხოვნა ვერ გაეგზავნა admin=%s", admin_id)
+    else:
+        accept_kb = InlineKeyboardMarkup([[
+            InlineKeyboardButton("✅ ვეთანხმები", callback_data=f"swshift_accept:{swap_id}"),
+        ]])
+        text = (
+            f"🔁 {agent['name']}-ს სურს სმენის გაცვლა {d.get('sw_date')}-ზე.\n"
+            f"შენიშვნა: {note or '-'}"
+        )
+        if req_type == "swap_agent" and d.get("sw_target"):
+            target = next((a for a in sheets.get_agents() if a.get("agent_id") == d["sw_target"]), None)
+            if target and target.get("telegram_chat_id"):
+                try:
+                    await context.bot.send_message(
+                        chat_id=int(target["telegram_chat_id"]), text=text, reply_markup=accept_kb,
+                    )
+                except Exception:
+                    log.exception("სმენის მოთხოვნა ვერ გაეგზავნა agent_id=%s", d["sw_target"])
+            await update.message.reply_text(f"✅ მოთხოვნა გაეგზავნა {target['name'] if target else 'კოლეგას'}-ს.")
+        else:
+            await _broadcast_to_agents(context, text, exclude_agent_id=agent["agent_id"], reply_markup=accept_kb)
+            await update.message.reply_text("✅ მოთხოვნა გაეგზავნა ყველა აგენტს — ვინც დათანხმდება, გამოგიცხადდებათ.")
+    context.user_data.clear()
+    return ConversationHandler.END
+
+
+async def swapshift_note_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    return await _swapshift_finalize(update, context, note=update.message.text.strip())
+
+
+async def swapshift_note_skip(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    return await _swapshift_finalize(update, context, note="")
+
+
+async def swapshift_accept(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    swap_id = query.data.split(":", 1)[1]
+    accepting = sheets.find_agent_by_chat_id(update.effective_chat.id)
+    if not accepting:
+        await query.edit_message_text("ჯერ დარეგისტრირდით — /start.")
+        return
+    row = sheets.accept_shift_swap(swap_id, accepting["agent_id"])
+    if not row:
+        await query.edit_message_text("ეს მოთხოვნა უკვე დახურულია ან ვეღარ მოიძებნა.")
+        return
+    await query.edit_message_text("✅ დაეთანხმეთ — ველოდებით მენეჯერის დადასტურებას.")
+    requester = next((a for a in sheets.get_agents() if a.get("agent_id") == row.get("agent_id")), None)
+    if requester and requester.get("telegram_chat_id"):
+        try:
+            await context.bot.send_message(
+                chat_id=int(requester["telegram_chat_id"]),
+                text=f"✅ {accepting['name']} დათანხმდა თქვენს სმენის გაცვლის მოთხოვნას — ველოდებით მენეჯერის დადასტურებას.",
+            )
+        except Exception:
+            pass
+    kb = InlineKeyboardMarkup([[
+        InlineKeyboardButton("✅ დადასტურება", callback_data=f"swshift_decide:{swap_id}:approved"),
+        InlineKeyboardButton("❌ უარყოფა", callback_data=f"swshift_decide:{swap_id}:rejected"),
+    ]])
+    text_admin = (
+        f"🔁 სმენის გაცვლა საჭიროებს დადასტურებას:\n"
+        f"{row.get('agent_name')} ⇄ {accepting['name']}, თარიღი: {row.get('swap_date')}\n"
+        f"შენიშვნა: {row.get('note') or '-'}"
+    )
+    for admin_id in config.ADMIN_CHAT_IDS:
+        try:
+            await context.bot.send_message(chat_id=admin_id, text=text_admin, reply_markup=kb)
+        except Exception:
+            log.exception("სმენის დადასტურების მოთხოვნა ვერ გაეგზავნა admin=%s", admin_id)
+
+
+async def swapshift_decide(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    if not is_admin(update.effective_chat.id):
+        await query.answer("მხოლოდ ადმინისთვის.", show_alert=True)
+        return
+    _, swap_id, status = query.data.split(":")
+    row = sheets.decide_shift_swap(swap_id, status, decided_by=str(update.effective_chat.id))
+    if not row:
+        await query.edit_message_text("ვეღარ მოიძებნა.")
+        return
+    label = "✅ დამტკიცებულია" if status == "approved" else "❌ უარყოფილია"
+    await query.edit_message_text(f"{label} — {row.get('agent_name')} ⇄ {row.get('target_agent_name') or '-'}")
+    for aid_key in ("agent_id", "target_agent_id"):
+        aid = row.get(aid_key)
+        if not aid:
+            continue
+        a = next((x for x in sheets.get_agents() if x.get("agent_id") == aid), None)
+        if a and a.get("telegram_chat_id"):
+            try:
+                await context.bot.send_message(
+                    chat_id=int(a["telegram_chat_id"]),
+                    text=f"სმენის გაცვლის მოთხოვნა ({row.get('swap_date')}) — {label}",
+                )
+            except Exception:
+                pass
+
+
+async def swaps_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_chat.id):
+        return
+    rows = sheets.get_shift_swaps(status="pending_manager")
+    if not rows:
+        await update.message.reply_text("მენეჯერის დადასტურების მოლოდინში მოთხოვნა არ არის.")
+        return
+    lines = ["🔁 დასადასტურებელი სმენის მოთხოვნები:", ""]
+    for r in rows:
+        lines.append(
+            f"• {r.get('agent_name')} ⇄ {r.get('target_agent_name') or '-'}, {r.get('swap_date')} "
+            f"(id: {r.get('swap_id')})"
+        )
+    await update.message.reply_text("\n".join(lines))
+
+
 async def meetings_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_chat.id):
         return
@@ -826,11 +1272,26 @@ async def clockin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 
+# ოფისის ცვლაზე (office_morning/office_evening) დღის დასასრულს 3
+# ცალკეული რიცხვი ეკითხება (საიტი/myhome/ss.ge) — ჯამი დგინდება
+# ავტომატურად და ჯამზე მოწმდება OFFICE_DAILY_QUOTA. ონლაინ დღეზე
+# ერთადერთი საერთო რიცხვი ეკითხება და მოწმდება ONLINE_DAILY_QUOTA-სთან.
+CO_OFFICE_FIELDS = [
+    ("site", "რამდენი განცხადება ატვირთეთ დღეს ჩვენს საიტზე? (მხოლოდ რიცხვი)"),
+    ("myhome", "რამდენი — myhome-ზე? (მხოლოდ რიცხვი)"),
+    ("ssge", "რამდენი — ss.ge-ზე? (მხოლოდ რიცხვი)"),
+]
+CO_ONLINE_FIELDS = [
+    ("total", "რამდენი განცხადება შეიყვანეთ/დაამუშავეთ დღეს? (მხოლოდ რიცხვი, მაგ. 10)"),
+]
+
+
 async def clockout_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """ყოფილი "ანგარიშფაქტურა" ფორმის ჩამნაცვლებელი: სამუშაო დღის
     დასრულებისას (მოსვლის/წასვლის დრო უკვე /clockin-/clockout-ითაა
-    ცნობილი) ერთადერთი დამატებითი კითხვა — რამდენი განცხადება
-    შეიყვანა დღეს."""
+    ცნობილი) ეკითხება დღეს შეყვანილი განცხადებების რაოდენობა — ოფისის
+    ცვლაზე 3 პლატფორმის მიხედვით ცალ-ცალკე, ონლაინზე ერთი საერთო
+    რიცხვით."""
     agent = sheets.find_agent_by_chat_id(update.effective_chat.id)
     if not agent:
         await update.message.reply_text("ჯერ დარეგისტრირდით — გამოიყენეთ /start.")
@@ -842,41 +1303,66 @@ async def clockout_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if att.get("clock_out"):
         await update.message.reply_text("დღეს უკვე დასრულებული გაქვთ.")
         return ConversationHandler.END
+
+    mode = sheets.get_today_mode(agent["agent_id"])
+    fields = CO_OFFICE_FIELDS if mode in ("office_morning", "office_evening") else CO_ONLINE_FIELDS
+
     context.user_data["co_agent"] = agent
-    await update.message.reply_text("რამდენი განცხადება შეიყვანეთ/დაამუშავეთ დღეს? (მხოლოდ რიცხვი, მაგ. 20)")
+    context.user_data["co_mode"] = mode
+    context.user_data["co_fields"] = fields
+    context.user_data["co_idx"] = 0
+    context.user_data["co_data"] = {}
+    await update.message.reply_text(fields[0][1])
     return CO_COUNT
 
 
 async def clockout_count(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
     try:
-        count = int(text)
+        value = int(text)
     except ValueError:
-        await update.message.reply_text("გთხოვთ, დაწერეთ მხოლოდ რიცხვი (მაგ. 20 ან 0).")
+        await update.message.reply_text("გთხოვთ, დაწერეთ მხოლოდ რიცხვი (მაგ. 5 ან 0).")
+        return CO_COUNT
+
+    fields = context.user_data["co_fields"]
+    idx = context.user_data["co_idx"]
+    key, _ = fields[idx]
+    context.user_data["co_data"][key] = value
+    idx += 1
+    context.user_data["co_idx"] = idx
+
+    if idx < len(fields):
+        await update.message.reply_text(fields[idx][1])
         return CO_COUNT
 
     agent = context.user_data.pop("co_agent")
+    mode = context.user_data.pop("co_mode")
+    context.user_data.pop("co_fields")
+    data = context.user_data.pop("co_data")
+    context.user_data.pop("co_idx")
     agent_id = agent["agent_id"]
+
     sheets.clock_out(agent_id)
-    sheets.set_daily_count(agent_id, count)
+    if mode in ("office_morning", "office_evening"):
+        site, myhome, ssge = data.get("site", 0), data.get("myhome", 0), data.get("ssge", 0)
+        total = site + myhome + ssge
+        sheets.set_daily_count(agent_id, total, site=site, myhome=myhome, ssge=ssge)
+        count_display = f"საიტი {site} + myhome {myhome} + ss.ge {ssge} = სულ {total}"
+    else:
+        total = data.get("total", 0)
+        sheets.set_daily_count(agent_id, total)
+        count_display = str(total)
 
-    mode = sheets.get_today_mode(agent_id)
     note = ""
-    if mode == "online" and count < config.ONLINE_DAILY_QUOTA:
-        note = f"\n\n⚠️ დღევანდელი გეგმა ({config.ONLINE_DAILY_QUOTA}) ვერ შესრულდა — ეცნობებათ მენეჯერს."
-        for admin_id in config.ADMIN_CHAT_IDS:
-            try:
-                await context.bot.send_message(
-                    chat_id=admin_id,
-                    text=(
-                        f"📉 {agent['name']}-მა დღეს ონლაინ გეგმა ვერ შეასრულა: "
-                        f"{count}/{config.ONLINE_DAILY_QUOTA}"
-                    ),
-                )
-            except Exception:
-                log.exception("გეგმის შეტყობინება ვერ გაეგზავნა admin=%s", admin_id)
+    quota = sheets.quota_for_mode(mode)
+    if quota and total < quota:
+        today = datetime.datetime.now().strftime("%Y-%m-%d")
+        detail = f"{today}: {total}/{quota} ({SCHEDULE_MODE_LABELS.get(mode, mode)})"
+        result = sheets.add_warning(agent_id, "quota_missed", detail)
+        note = f"\n\n⚠️ დღევანდელი გეგმა ({quota}) ვერ შესრულდა — ჩაეწერა გაფრთხილება."
+        await _notify_warning(context, agent, "quota_missed", detail, result)
 
-    await update.message.reply_text(f"✅ სამუშაო დღე დასრულებულია. შეყვანილია: {count}.{note}")
+    await update.message.reply_text(f"✅ სამუშაო დღე დასრულებულია. შეყვანილია: {count_display}.{note}")
     return ConversationHandler.END
 
 
@@ -962,6 +1448,39 @@ async def setteam_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ok = sheets.set_agent_team(agent_id, team)
     if ok:
         await update.message.reply_text(f"✅ თიმი განახლდა: {team}")
+    else:
+        await update.message.reply_text("ასეთი agent_id ვერ ვიპოვე. სია: /agents")
+
+
+async def setrole_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """ადმინი: /setrole <agent_id> <team_lead|agent> — თიმლიდერს
+    Mini App-ში ემატება საკუთარი გუნდის ფილტრირებული მენეჯერული ხედვა."""
+    if not is_admin(update.effective_chat.id):
+        return
+    if len(context.args) < 2 or context.args[1] not in ("team_lead", "agent"):
+        await update.message.reply_text("გამოყენება: /setrole <agent_id> <team_lead|agent>")
+        return
+    agent_id, role = context.args[0], context.args[1]
+    ok = sheets.set_agent_role(agent_id, role)
+    if ok:
+        label = "თიმლიდერი" if role == "team_lead" else "ჩვეულებრივი აგენტი"
+        await update.message.reply_text(f"✅ როლი განახლდა: {label}")
+    else:
+        await update.message.reply_text("ასეთი agent_id ვერ ვიპოვე. სია: /agents")
+
+
+async def setnumber_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """ადმინი: /setnumber <agent_id> <შიდა ნომერი> — საწყისი შიდა ნომრის
+    მინიჭება (შემდეგ აგენტებს შეუძლიათ ერთმანეთში გაცვლა /swapnumber-ით)."""
+    if not is_admin(update.effective_chat.id):
+        return
+    if len(context.args) < 2:
+        await update.message.reply_text("გამოყენება: /setnumber <agent_id> <შიდა ნომერი>")
+        return
+    agent_id, number = context.args[0], context.args[1]
+    ok = sheets.set_agent_internal_number(agent_id, number)
+    if ok:
+        await update.message.reply_text(f"✅ შიდა ნომერი განახლდა: {number}")
     else:
         await update.message.reply_text("ასეთი agent_id ვერ ვიპოვე. სია: /agents")
 
@@ -1138,6 +1657,7 @@ WARNING_LABELS = {
     "late_report": "დაგვიანებული/გამოტოვებული ანგარიში",
     "late_arrival": "დაგვიანება სამუშაოზე",
     "no_show": "არ გამოცხადება",
+    "quota_missed": "დღიური გეგმა (განცხადებები) ვერ შესრულდა",
 }
 
 
@@ -1250,6 +1770,24 @@ async def check_daily_compliance(context: ContextTypes.DEFAULT_TYPE):
             )
             await _notify_warning(context, a, "late_report", today, result)
 
+        # ონლაინ დღეზე: თუ 22:00-მდე ჯერ არ დაუსრულებია (/clockout) და
+        # უკვე შეყვანილი რაოდენობა გეგმაზე ნაკლებია — გაფრთხილება
+        # ავტომატურად, /clockout-ის დალოდების გარეშე.
+        if mode == "online" and not att.get("clock_out"):
+            if sheets.has_warning_today(agent_id, "quota_missed"):
+                continue
+            try:
+                count_submitted = int(att.get("count_submitted") or 0)
+            except (TypeError, ValueError):
+                count_submitted = 0
+            if count_submitted < config.ONLINE_DAILY_QUOTA:
+                detail = (
+                    f"{today}: {count_submitted}/{config.ONLINE_DAILY_QUOTA} "
+                    f"(ონლაინ, {config.REPORT_DEADLINE_HOUR}:00-ის მდგომარეობით)"
+                )
+                result = sheets.add_warning(agent_id, "quota_missed", detail)
+                await _notify_warning(context, a, "quota_missed", detail, result)
+
 
 async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE):
     """
@@ -1317,6 +1855,10 @@ def main():
     app.add_handler(CommandHandler("warnings", warnings_list))
     app.add_handler(CommandHandler("reactivate", reactivate_agent))
     app.add_handler(CommandHandler("setteam", setteam_cmd))
+    app.add_handler(CommandHandler("setrole", setrole_cmd))
+    app.add_handler(CommandHandler("setnumber", setnumber_cmd))
+    app.add_handler(CommandHandler("exclusives", exclusives_list))
+    app.add_handler(CommandHandler("swaps", swaps_list))
     app.add_handler(CallbackQueryHandler(dayoff_decide, pattern=r"^do_(ok|no):"))
 
     app.add_handler(ConversationHandler(
@@ -1394,6 +1936,44 @@ def main():
         },
         fallbacks=[CommandHandler("cancel", cancel), MessageHandler(filters.COMMAND, busy_fallback)],
     ))
+
+    app.add_handler(ConversationHandler(
+        entry_points=[CommandHandler("addexclusive", exclusive_start)],
+        states={
+            EX_FIELD: [MessageHandler(filters.TEXT & ~filters.COMMAND, exclusive_field)],
+        },
+        fallbacks=[CommandHandler("cancel", cancel), MessageHandler(filters.COMMAND, busy_fallback)],
+    ))
+
+    app.add_handler(ConversationHandler(
+        entry_points=[CommandHandler("swapnumber", swapnumber_start)],
+        states={
+            SN_TARGET: [CallbackQueryHandler(swapnumber_pick, pattern=r"^swapnum_pick:")],
+        },
+        fallbacks=[CommandHandler("cancel", cancel), MessageHandler(filters.COMMAND, busy_fallback)],
+    ))
+    # ნომრის გაცვლაზე პასუხი — მიმღები აგენტის ცალკე chat-შია, ამიტომ
+    # conversation-ის მიღმა, გლობალური handler-ია საჭირო.
+    app.add_handler(CallbackQueryHandler(swapnumber_response, pattern=r"^swapnum_resp:"))
+
+    app.add_handler(ConversationHandler(
+        entry_points=[CommandHandler("swapshift", swapshift_start)],
+        states={
+            SW_TYPE: [CallbackQueryHandler(swapshift_type, pattern=r"^swtype:")],
+            SW_TARGET: [CallbackQueryHandler(swapshift_target, pattern=r"^swtarget:")],
+            SW_MODE: [CallbackQueryHandler(swapshift_mode, pattern=r"^swmode:")],
+            SW_DATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, swapshift_date)],
+            SW_NOTE: [
+                CommandHandler("skip", swapshift_note_skip),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, swapshift_note_text),
+            ],
+        },
+        fallbacks=[CommandHandler("cancel", cancel), MessageHandler(filters.COMMAND, busy_fallback)],
+    ))
+    # კოლეგის თანხმობა და მენეჯერის დადასტურება — ორივე სხვა chat-შია,
+    # conversation-ის მიღმა გლობალური handler-ებია საჭირო.
+    app.add_handler(CallbackQueryHandler(swapshift_accept, pattern=r"^swshift_accept:"))
+    app.add_handler(CallbackQueryHandler(swapshift_decide, pattern=r"^swshift_decide:"))
 
     threading.Thread(target=webserver.run, name="webapp", daemon=True).start()
 

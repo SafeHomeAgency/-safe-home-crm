@@ -20,6 +20,7 @@ const WARNING_LABELS = {
   late_report: "დაგვიანებული/გამოტოვებული ანგარიში",
   late_arrival: "დაგვიანება სამუშაოზე",
   no_show: "არ გამოცხადება",
+  quota_missed: "დღიური გეგმა ვერ შესრულდა",
 };
 
 const state = { role: null, data: null, tab: {} };
@@ -28,6 +29,7 @@ const AGENT_TABS = [
   { id: "today", label: "დღეს", icon: "🏠" },
   { id: "tasks", label: "დავალებები", icon: "📋" },
   { id: "kpi", label: "KPI", icon: "📈" },
+  { id: "exclusives", label: "ექსკლუზივები", icon: "🏘️", lazy: true },
 ];
 const ADMIN_TABS = [
   { id: "overview", label: "მიმოხილვა", icon: "📊" },
@@ -35,7 +37,18 @@ const ADMIN_TABS = [
   { id: "ranking", label: "რეიტინგი", icon: "🏆" },
   { id: "dayoffs", label: "შვებულებები", icon: "🗓️" },
   { id: "warnings", label: "გაფრთხილებები", icon: "⚠️" },
+  { id: "swaps", label: "სმენის გაცვლა", icon: "🔁", lazy: true },
+  { id: "reports", label: "რეპორტები", icon: "📝", lazy: true },
+  { id: "exclusives", label: "ექსკლუზივები", icon: "🏘️", lazy: true },
 ];
+
+const REQUEST_TYPE_LABELS = {
+  open_swap: "ღია გაცვლა",
+  swap_agent: "გაცვლა კოლეგასთან",
+  change_mode: "ცვლის ტიპის შეცვლა",
+};
+
+const lazyCache = {};
 
 function esc(s) {
   return String(s == null ? "" : s).replace(/[&<>"']/g, (c) => ({
@@ -101,16 +114,26 @@ function statusBadge(mode, clockedIn, clockOut) {
 
 function renderToday(d) {
   const t = d.today;
-  const isOnline = t.mode === "online";
+  const isOffice = t.mode === "office_morning" || t.mode === "office_evening";
+  const hasQuota = !!t.quota;
   const quota = t.quota || 0;
   const submitted = parseInt(t.count_submitted || 0, 10) || 0;
   const clockedIn = !!t.clock_in && !t.clock_out;
   const canClockIn = t.mode !== "off" && !t.clock_in;
   const canClockOut = clockedIn;
+  const c = d.clients || { today: 0, total: 0 };
 
-  const ringHtml = isOnline
+  const ringHtml = hasQuota
     ? ring(pct(submitted, quota))
     : `<div class="ring" style="display:flex;align-items:center;justify-content:center;font-size:30px">${MODE_ICON[t.mode] || "🏠"}</div>`;
+
+  const breakdown = isOffice
+    ? `<div class="grid3" style="margin-top:10px">
+        <div class="stat"><div class="num">${esc(t.site_count || 0)}</div><div class="lbl">საიტი</div></div>
+        <div class="stat"><div class="num">${esc(t.myhome_count || 0)}</div><div class="lbl">myhome</div></div>
+        <div class="stat"><div class="num">${esc(t.ssge_count || 0)}</div><div class="lbl">ss.ge</div></div>
+      </div>`
+    : "";
 
   return `
   <div class="card">
@@ -118,13 +141,22 @@ function renderToday(d) {
       ${ringHtml}
       <div class="today-info">
         <div class="mode">${MODE_LABELS[t.mode] || t.mode}</div>
-        <div class="meta">${isOnline ? `${submitted} / ${quota} განცხადება` : (t.clock_in ? `დაწყებულია ${esc(t.clock_in).split(" ")[1] || ""}` : "დღევანდელი გეგმა")}</div>
+        <div class="meta">${hasQuota ? `${submitted} / ${quota} განცხადება` : (t.clock_in ? `დაწყებულია ${esc(t.clock_in).split(" ")[1] || ""}` : "დღევანდელი გეგმა")}</div>
         <div style="margin-top:6px">${statusBadge(t.mode, clockedIn, t.clock_out)}</div>
       </div>
     </div>
+    ${breakdown}
     <div class="actions">
       <button class="btn" id="btnClockIn" ${canClockIn ? "" : "disabled"}>▶️ დაწყება</button>
       <button class="btn secondary" id="btnClockOut" ${canClockOut ? "" : "disabled"}>⏹️ დასრულება</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>👥 კლიენტები</h2>
+    <div class="grid2">
+      <div class="stat"><div class="num">${c.today}</div><div class="lbl">დღეს</div></div>
+      <div class="stat"><div class="num">${c.total}</div><div class="lbl">ჯამურად</div></div>
     </div>
   </div>
 
@@ -218,15 +250,25 @@ function bindAgentActions(d) {
     } catch (e) { toast(e.message); btnIn.disabled = false; }
   };
   if (btnOut) btnOut.onclick = async () => {
-    const quota = d.today.quota;
-    let count;
-    if (quota) {
-      count = prompt("რამდენი განცხადება შეიყვანეთ დღეს?", d.today.count_submitted || "0");
+    const isOffice = d.today.mode === "office_morning" || d.today.mode === "office_evening";
+    const hasQuota = !!d.today.quota;
+    let body = {};
+    if (isOffice) {
+      const site = prompt("რამდენი განცხადება ატვირთეთ დღეს ჩვენს საიტზე?", d.today.site_count || "0");
+      if (site === null) return;
+      const myhome = prompt("რამდენი — myhome-ზე?", d.today.myhome_count || "0");
+      if (myhome === null) return;
+      const ssge = prompt("რამდენი — ss.ge-ზე?", d.today.ssge_count || "0");
+      if (ssge === null) return;
+      body = { site, myhome, ssge };
+    } else if (hasQuota) {
+      const count = prompt("რამდენი განცხადება შეიყვანეთ დღეს?", d.today.count_submitted || "0");
       if (count === null) return;
+      body = { count };
     }
     btnOut.disabled = true;
     try {
-      const res = await api("/api/clockout", { method: "POST", body: JSON.stringify({ count }) });
+      const res = await api("/api/clockout", { method: "POST", body: JSON.stringify(body) });
       if (res.result === "not_in") { toast("ჯერ არ დაგიწყიათ დღე"); btnOut.disabled = false; return; }
       tg && tg.HapticFeedback && tg.HapticFeedback.notificationOccurred("success");
       toast("დღე დასრულდა ✅");
@@ -244,7 +286,10 @@ function renderOverview(d) {
     <h2>📊 დღევანდელი სურათი</h2>
     <div class="grid2">
       <div class="stat"><div class="num">${s.clocked_in}/${s.active_total}</div><div class="lbl">გახსნილი დღეს</div></div>
-      <div class="stat"><div class="num">${s.total_submitted}/${s.total_quota_target || 0}</div><div class="lbl">განცხადებები (online)</div></div>
+      <div class="stat"><div class="num">${s.total_submitted}/${s.total_quota_target || 0}</div><div class="lbl">განცხადებები (გეგმასთან)</div></div>
+      <div class="stat"><div class="num">${s.clients_today}</div><div class="lbl">კლიენტი დღეს</div></div>
+      <div class="stat"><div class="num">${s.clients_total}</div><div class="lbl">კლიენტი ჯამურად</div></div>
+      <div class="stat"><div class="num">${s.quota_missed}</div><div class="lbl">გეგმა ვერ შესრულდა</div></div>
       <div class="stat"><div class="num">${s.pending_dayoffs}</div><div class="lbl">მოლოდინში (შვებ.)</div></div>
       <div class="stat"><div class="num">${s.agents_total}</div><div class="lbl">სულ აგენტი</div></div>
     </div>
@@ -273,6 +318,7 @@ function renderTeam(d) {
         </div>
         <div class="side">
           ${statusBadge(t.mode, t.clocked_in, false)}
+          <div class="sub" style="margin-top:3px">👥 ${t.clients_today || 0} დღეს · ${t.clients_total || 0} ჯამურად</div>
           ${t.warnings ? `<div class="sub" style="color:var(--red);margin-top:3px">⚠️ ${t.warnings}</div>` : ""}
         </div>
       </div>`).join("")}
@@ -346,7 +392,103 @@ function bindAdminActions() {
   });
 }
 
+function renderExclusives(rows) {
+  if (!rows.length) return `<div class="card"><div class="empty">აქტიური ექსკლუზივი არ არის. დაამატეთ ბოტში /addexclusive-ით.</div></div>`;
+  return `<div class="card">
+    <h2>🏘️ ექსკლუზივები <span class="cnt">${rows.length}</span></h2>
+    ${rows.map((r) => `
+      <div class="list-row">
+        <div class="avatar">${r.deal_type === "ქირავდება" ? "🔑" : "🏠"}</div>
+        <div class="main">
+          <div class="title">${esc(r.property_type || "-")} · ${esc(r.deal_type || "-")} — ${esc(r.agent_name)}</div>
+          <div class="sub">${esc(r.location || "-")} · ${esc(r.area || "-")} მ² · ${esc(r.rooms || "-")} ოთახი</div>
+          <div class="sub">💰 ${esc(r.price || "-")} ${r.percent ? "· " + esc(r.percent) + "%" : ""}</div>
+        </div>
+      </div>`).join("")}
+  </div>`;
+}
+
+function renderReports(rows) {
+  if (!rows.length) return `<div class="card"><div class="empty">რეპორტი ჯერ არ არის</div></div>`;
+  return `<div class="card">
+    <h2>📝 ბოლო რეპორტები</h2>
+    ${rows.map((r) => `
+      <div class="list-row" data-report="${esc(r.report_id)}">
+        <div class="avatar">${initials(r.agent_name)}</div>
+        <div class="main">
+          <div class="title">${esc(r.agent_name)} — ${esc(r.client_phone || "-")}</div>
+          <div class="sub">${esc(r.actions || "-")}</div>
+          <div class="sub">${esc((r.created_at || "").split(" ")[0] || "")} · ავტომ. ხარისხი: ${esc(r.quality_auto || "-")}/5${r.quality_manual ? " · ხელით: " + esc(r.quality_manual) + "/5" : ""}</div>
+        </div>
+        <div class="side">
+          <button class="btn" data-rate="${esc(r.report_id)}" style="padding:6px 10px">⭐ შეფასება</button>
+        </div>
+      </div>`).join("")}
+  </div>`;
+}
+
+function renderSwaps(rows) {
+  if (!rows.length) return `<div class="card"><div class="empty">დასადასტურებელი მოთხოვნა არ არის</div></div>`;
+  return `<div class="card">
+    <h2>🔁 დასადასტურებელი სმენის გაცვლები <span class="cnt">${rows.length}</span></h2>
+    ${rows.map((r) => `
+      <div class="list-row" data-id="${esc(r.swap_id)}">
+        <div class="avatar">🔁</div>
+        <div class="main">
+          <div class="title">${esc(REQUEST_TYPE_LABELS[r.request_type] || r.request_type)}</div>
+          <div class="sub">${esc(r.agent_name)}${r.target_agent_name ? " ⇄ " + esc(r.target_agent_name) : ""} · ${esc(r.swap_date || "-")}</div>
+          <div class="sub">${esc(r.note || "")}</div>
+        </div>
+      </div>
+      <div class="actions" style="margin:-2px 0 12px">
+        <button class="btn" data-swapact="approved" data-id="${esc(r.swap_id)}">✅ დამტკიცება</button>
+        <button class="btn danger" data-swapact="rejected" data-id="${esc(r.swap_id)}">✖️ უარყოფა</button>
+      </div>`).join("")}
+  </div>`;
+}
+
+function bindReportsActions() {
+  document.querySelectorAll("[data-rate]").forEach((btn) => {
+    btn.onclick = async () => {
+      const input = prompt("შეაფასეთ ხარისხი 1-დან 5-მდე:");
+      const score = parseInt(input, 10);
+      if (!input || isNaN(score) || score < 1 || score > 5) return;
+      btn.disabled = true;
+      try {
+        await api("/api/reports/rate", { method: "POST", body: JSON.stringify({ report_id: btn.dataset.rate, score }) });
+        toast("შეფასდა ✅");
+        delete lazyCache.reports;
+        await renderContent();
+      } catch (e) { toast(e.message); btn.disabled = false; }
+    };
+  });
+}
+
+function bindSwapsActions() {
+  document.querySelectorAll("[data-swapact]").forEach((btn) => {
+    btn.onclick = async () => {
+      btn.disabled = true;
+      try {
+        await api("/api/swaps/decide", {
+          method: "POST",
+          body: JSON.stringify({ swap_id: btn.dataset.id, status: btn.dataset.swapact }),
+        });
+        tg && tg.HapticFeedback && tg.HapticFeedback.notificationOccurred("success");
+        toast(btn.dataset.swapact === "approved" ? "დამტკიცდა ✅" : "უარყოფილია");
+        delete lazyCache.swaps;
+        await renderContent();
+      } catch (e) { toast(e.message); btn.disabled = false; }
+    };
+  });
+}
+
 /* ---------------------------------------------------------- shell */
+
+const LAZY_ENDPOINTS = {
+  exclusives: "/api/exclusives",
+  swaps: "/api/swaps",
+  reports: "/api/reports",
+};
 
 function tabsFor(role) {
   return role === "admin" ? ADMIN_TABS : AGENT_TABS;
@@ -366,10 +508,29 @@ function renderTabbar() {
   });
 }
 
-function renderContent() {
+async function renderContent() {
   const content = document.getElementById("content");
   const d = state.data;
   const tab = state.tab[state.role];
+  renderTabbar();
+
+  if (LAZY_ENDPOINTS[tab]) {
+    if (!lazyCache[tab]) {
+      content.innerHTML = `<div class="card"><div class="empty">იტვირთება…</div></div>`;
+      try {
+        lazyCache[tab] = (await api(LAZY_ENDPOINTS[tab])).rows || [];
+      } catch (e) {
+        content.innerHTML = `<div class="card"><div class="empty">⚠️ ${esc(e.message)}</div></div>`;
+        return;
+      }
+    }
+    const rows = lazyCache[tab];
+    if (tab === "exclusives") content.innerHTML = renderExclusives(rows);
+    else if (tab === "reports") { content.innerHTML = renderReports(rows); bindReportsActions(); }
+    else if (tab === "swaps") { content.innerHTML = renderSwaps(rows); bindSwapsActions(); }
+    return;
+  }
+
   let html = "";
   if (state.role === "agent") {
     const ad = d.agent;
@@ -385,7 +546,6 @@ function renderContent() {
     else if (tab === "warnings") html = renderWarnings(admin);
   }
   content.innerHTML = html;
-  renderTabbar();
   if (state.role === "agent" && tab === "today") bindAgentActions(d.agent);
   if (state.role === "admin" && tab === "dayoffs") bindAdminActions();
 }
@@ -404,11 +564,12 @@ async function load() {
   try {
     const d = await api("/api/dashboard");
     state.data = d;
+    for (const k in lazyCache) delete lazyCache[k];
     const hasAgent = !!d.agent;
     const hasAdmin = !!d.is_admin;
     if (!state.role) state.role = hasAgent ? "agent" : "admin";
     document.getElementById("subtitle").textContent = hasAdmin
-      ? "მენეჯერის დაშბორდი"
+      ? (d.is_team_lead ? "თიმლიდერის დაშბორდი" : "მენეჯერის დაშბორდი")
       : (d.agent ? `👋 ${d.agent.name}` : "");
     renderRoleSwitch(hasAgent, hasAdmin);
     renderContent();
