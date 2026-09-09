@@ -1,5 +1,15 @@
 /* Safe Home Agency — Mini App dashboard (frontend, no build step). */
 
+/* დაუჭერელი JS შეცდომების "დაჭერა" — რომ თუ რამე გაფუჭდა, ეკრანი
+   უბრალოდ არ "გაშავდეს" დუმილში, არამედ თავად შეცდომის ტექსტი ჩანდეს
+   (ეს გვეხმარება მალე ვიპოვოთ პრობლემა). */
+window.addEventListener("error", (ev) => {
+  const content = document.getElementById("content");
+  if (content) {
+    content.innerHTML = `<div class="card"><div class="empty">⚠️ JS შეცდომა: ${String(ev.message || ev)} </div></div>`;
+  }
+});
+
 const tg = window.Telegram ? window.Telegram.WebApp : null;
 if (tg) {
   tg.ready();
@@ -713,43 +723,61 @@ async function renderContent() {
   const tab = state.tab[state.role];
   renderTabbar();
 
-  if (LAZY_ENDPOINTS[tab]) {
-    if (!lazyCache[tab]) {
-      content.innerHTML = `<div class="card"><div class="empty">იტვირთება…</div></div>`;
-      try {
-        lazyCache[tab] = (await api(LAZY_ENDPOINTS[tab])).rows || [];
-      } catch (e) {
-        content.innerHTML = `<div class="card"><div class="empty">⚠️ ${esc(e.message)}</div></div>`;
-        return;
+  try {
+    if (LAZY_ENDPOINTS[tab]) {
+      if (!lazyCache[tab]) {
+        content.innerHTML = `<div class="card"><div class="empty">იტვირთება…</div></div>`;
+        try {
+          lazyCache[tab] = (await api(LAZY_ENDPOINTS[tab])).rows || [];
+        } catch (e) {
+          content.innerHTML = `<div class="card"><div class="empty">⚠️ ${esc(e.message)}</div></div>`;
+          return;
+        }
       }
+      const rows = lazyCache[tab];
+      if (tab === "exclusives") { content.innerHTML = renderExclusives(rows); bindExclusivesActions(rows); }
+      else if (tab === "reports") { content.innerHTML = renderReports(rows); bindReportsActions(rows); }
+      else if (tab === "swaps") { content.innerHTML = renderSwaps(rows); bindSwapsActions(); }
+      else if (tab === "questions") { content.innerHTML = renderQuestions(rows, state.role); bindQuestionsActions(state.role); }
+      return;
     }
-    const rows = lazyCache[tab];
-    if (tab === "exclusives") { content.innerHTML = renderExclusives(rows); bindExclusivesActions(rows); }
-    else if (tab === "reports") { content.innerHTML = renderReports(rows); bindReportsActions(rows); }
-    else if (tab === "swaps") { content.innerHTML = renderSwaps(rows); bindSwapsActions(); }
-    else if (tab === "questions") { content.innerHTML = renderQuestions(rows, state.role); bindQuestionsActions(state.role); }
-    return;
-  }
 
-  let html = "";
-  if (state.role === "agent") {
-    const ad = d.agent;
-    if (tab === "today") html = renderToday(ad);
-    else if (tab === "tasks") html = renderTasks(ad);
-    else if (tab === "kpi") html = renderKpi(ad);
-  } else {
-    const admin = d.admin;
-    if (tab === "overview") html = renderOverview(admin);
-    else if (tab === "team") html = renderTeam(admin);
-    else if (tab === "ranking") html = renderRanking(admin);
-    else if (tab === "dayoffs") html = renderDayoffs(admin);
-    else if (tab === "warnings") html = renderWarnings(admin);
+    let html = "";
+    if (state.role === "agent") {
+      const ad = d.agent;
+      if (tab === "today") html = renderToday(ad);
+      else if (tab === "tasks") html = renderTasks(ad);
+      else if (tab === "kpi") html = renderKpi(ad);
+    } else {
+      const admin = d.admin;
+      if (tab === "overview") html = renderOverview(admin);
+      else if (tab === "team") html = renderTeam(admin);
+      else if (tab === "ranking") html = renderRanking(admin);
+      else if (tab === "dayoffs") html = renderDayoffs(admin);
+      else if (tab === "warnings") html = renderWarnings(admin);
+    }
+    content.innerHTML = html;
+    if (state.role === "agent" && tab === "today") bindAgentActions(d.agent);
+    if (state.role === "agent" && tab === "tasks") bindTasksActions(d.agent);
+    if (state.role === "admin" && tab === "dayoffs") bindAdminActions();
+    if (state.role === "admin" && tab === "team") bindTeamActions(d.admin);
+  } catch (e) {
+    console.error("renderContent შეცდომა:", e);
+    content.innerHTML = `<div class="card"><div class="empty">⚠️ ვერ ჩაიტვირთა: ${esc(e.message || e)}</div></div>`;
   }
-  content.innerHTML = html;
-  if (state.role === "agent" && tab === "today") bindAgentActions(d.agent);
-  if (state.role === "agent" && tab === "tasks") bindTasksActions(d.agent);
-  if (state.role === "admin" && tab === "dayoffs") bindAdminActions();
-  if (state.role === "admin" && tab === "team") bindTeamActions(d.admin);
+}
+
+function updateSubtitle() {
+  const d = state.data;
+  if (!d) return;
+  const sub = document.getElementById("subtitle");
+  if (state.role === "admin" && d.is_admin) {
+    sub.textContent = d.is_team_lead ? "თიმლიდერის დაშბორდი" : "მენეჯერის დაშბორდი";
+  } else if (d.agent) {
+    sub.textContent = `👋 ${d.agent.name}`;
+  } else {
+    sub.textContent = "";
+  }
 }
 
 function renderRoleSwitch(hasAgent, hasAdmin) {
@@ -758,7 +786,7 @@ function renderRoleSwitch(hasAgent, hasAdmin) {
   el.hidden = false;
   el.querySelectorAll("button").forEach((b) => {
     b.classList.toggle("active", b.dataset.role === state.role);
-    b.onclick = () => { state.role = b.dataset.role; renderRoleSwitch(hasAgent, hasAdmin); renderContent(); };
+    b.onclick = () => { state.role = b.dataset.role; renderRoleSwitch(hasAgent, hasAdmin); updateSubtitle(); renderContent(); };
   });
 }
 
@@ -770,9 +798,7 @@ async function load() {
     const hasAgent = !!d.agent;
     const hasAdmin = !!d.is_admin;
     if (!state.role) state.role = hasAgent ? "agent" : "admin";
-    document.getElementById("subtitle").textContent = hasAdmin
-      ? (d.is_team_lead ? "თიმლიდერის დაშბორდი" : "მენეჯერის დაშბორდი")
-      : (d.agent ? `👋 ${d.agent.name}` : "");
+    updateSubtitle();
     renderRoleSwitch(hasAgent, hasAdmin);
     renderContent();
   } catch (e) {

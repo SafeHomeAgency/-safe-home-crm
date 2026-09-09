@@ -83,13 +83,14 @@ body {
 
 /* ---------- Role switch ---------- */
 .roleswitch {
-  display: flex;
+  display: none;
   background: var(--secondary-bg);
   border-radius: 999px;
   padding: 4px;
   margin: 10px 0 4px;
   box-shadow: var(--shadow);
 }
+.roleswitch:not([hidden]) { display: flex; }
 .roleswitch button {
   flex: 1;
   border: none;
@@ -252,10 +253,11 @@ body {
   left: 0; right: 0; bottom: 0;
   background: var(--secondary-bg);
   border-top: 1px solid rgba(124,138,151,.15);
-  display: flex;
+  display: none;
   padding: 6px 6px calc(6px + env(safe-area-inset-bottom));
   z-index: 20;
 }
+.tabbar:not([hidden]) { display: flex; }
 .tabbar button {
   flex: 1;
   border: none;
@@ -314,9 +316,17 @@ body {
   position: fixed;
   inset: 0;
   background: rgba(3, 8, 14, .55);
-  display: flex;
+  display: none;
   align-items: flex-end;
   z-index: 50;
+}
+/* მნიშვნელოვანი: `[hidden]`-ის ნაგულისხმევ დამალვას თანაბარი
+   სპეციფიკურობის კლასის წესი გადააწერდა („author > user-agent"
+   კასკადის წესით) — ამიტომ `display` აქ საერთოდ არ ეხება
+   `[hidden]`-ს, არამედ ცალკე ირთვება ამ კლასით, როცა `hidden`
+   მოხსნილია. */
+.modal-backdrop:not([hidden]) {
+  display: flex;
 }
 .modal {
   background: var(--secondary-bg);
