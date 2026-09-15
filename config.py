@@ -74,13 +74,28 @@ if WEBAPP_URL and not WEBAPP_URL.startswith("http"):
 # აწვდის PORT env ცვლადს)
 PORT = int(os.environ.get("PORT", "8080"))
 
+# --- Phase 1: მონაცემთა ბექენდი (Google Sheets -> PostgreSQL) --------
+#
+# DATA_BACKEND ცარიელი/დაუყენებელი (ნაგულისხმევი) => ყველაფერი ზუსტად
+# ისე, როგორც აქამდე: Google Sheets. არაფერი არ იცვლება production-ში,
+# სანამ ვინმე ცნობიერად არ დააყენებს "postgres"-ს — იხილეთ
+# README_PHASE1_POSTGRES.md, სანამ ამას გააკეთებდეთ.
+DATA_BACKEND = os.environ.get("DATA_BACKEND", "sheets").strip().lower()
+# Railway-ს Postgres add-on-ი ამას ავტომატურად გამოიმუშავებს, როცა
+# add-on-ს დაამატებთ პროექტზე — ხელით არაფრის ჩაწერა არ სჭირდება.
+DATABASE_URL = os.environ.get("DATABASE_URL", "").strip()
+
 
 def validate():
     missing = []
+    if DATA_BACKEND == "postgres":
+        if not DATABASE_URL:
+            missing.append("DATABASE_URL")
+    else:
+        if not GOOGLE_SHEET_ID:
+            missing.append("GOOGLE_SHEET_ID")
     if not TELEGRAM_BOT_TOKEN:
         missing.append("TELEGRAM_BOT_TOKEN")
-    if not GOOGLE_SHEET_ID:
-        missing.append("GOOGLE_SHEET_ID")
     if not ADMIN_CHAT_IDS:
         missing.append("ADMIN_CHAT_IDS")
     if missing:

@@ -32,6 +32,7 @@ from telegram.ext import (
 import config
 import sheets
 import webserver
+import migrate_sheets_to_postgres
 
 logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
@@ -1476,6 +1477,40 @@ async def reactivate_agent(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("ასეთი agent_id ვერ ვიპოვე.")
 
 
+async def migratepg_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """ადმინი-მხოლოდ: /migratepg — Google Sheets-ის მონაცემების გადატანა
+    PostgreSQL-ში (Phase 1). ნაგულისხმევად dry-run (არაფერს არ წერს) —
+    ნამდვილად ჩასაწერად: /migratepg confirm.
+
+    ეს ბრძანება არაფერს ცვლის იმაში, სად კითხულობს/წერს დღეს ბოტი
+    (config.DATA_BACKEND კვლავ განსაზღვრავს იმას) — უბრალოდ ამზადებს
+    Postgres-ის მხარეს, სანამ DATA_BACKEND=postgres-ზე გადართვას
+    გადაწყვეტთ. საჭიროა წინასწარ დამატებული DATABASE_URL (Railway-ს
+    Postgres add-on)."""
+    if not is_admin(update.effective_chat.id):
+        return
+    if not config.DATABASE_URL:
+        await update.message.reply_text(
+            "DATABASE_URL ჯერ არაა დაყენებული — ჯერ დაამატეთ Postgres "
+            "Railway-ზე (იხ. README_PHASE1_POSTGRES.md)."
+        )
+        return
+    dry_run = not (context.args and context.args[0].strip().lower() == "confirm")
+    await update.message.reply_text(
+        "მიგრაცია დაწყებულია (" + ("dry-run" if dry_run else "ნამდვილი ჩაწერა") + ")… "
+        "დაელოდეთ, შეიძლება ცოტა ხანი დასჭირდეს."
+    )
+    try:
+        report, ok = migrate_sheets_to_postgres.run_migration(dry_run=dry_run)
+    except Exception as e:
+        log.exception("PostgreSQL მიგრაცია ჩავარდა")
+        await update.message.reply_text(f"❌ მიგრაცია ჩავარდა: {e}")
+        return
+    # Telegram-ის შეტყობინების სიგრძის ლიმიტის გამო, გრძელ რეპორტს ვჭრით
+    for i in range(0, len(report), 3500):
+        await update.message.reply_text(report[i:i + 3500])
+
+
 async def setteam_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_chat.id):
         return
@@ -1893,6 +1928,7 @@ def main():
     app.add_handler(CommandHandler("schedule", schedule_today))
     app.add_handler(CommandHandler("warnings", warnings_list))
     app.add_handler(CommandHandler("reactivate", reactivate_agent))
+    app.add_handler(CommandHandler("migratepg", migratepg_cmd))
     app.add_handler(CommandHandler("setteam", setteam_cmd))
     app.add_handler(CommandHandler("setrole", setrole_cmd))
     app.add_handler(CommandHandler("setnumber", setnumber_cmd))
