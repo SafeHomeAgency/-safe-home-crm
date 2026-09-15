@@ -1,13 +1,22 @@
 /* Safe Home Agency-ს ბრენდის ფერები (ლოგოდან): ღრმა ნავი + ოქრო.
    შეგნებულად არ ვეყრდნობით tg-theme-*-ს — რომ Mini App ყოველთვის
    კომპანიის ბრენდში გამოიყურებოდეს, მომხმარებლის ტელეგრამის თემისგან
-   დამოუკიდებლად. */
+   დამოუკიდებლად.
+
+   ეს ვერსია ვიზუალურად უფრო "პრემიუმ" შეგრძნებას სძენს იმავე კომპონენტებს:
+   ღრმა გრადიენტული ფონი, ნაზი ჩრდილები/ღუმფები (glow), აქცენტური
+   ტიპოგრაფია (Cormorant Garamond ბრენდისთვის + Manrope ინტერფეისისთვის),
+   რბილი გამოჩენის ანიმაციები და გაწონასწორებული კომპონენტების დეტალები.
+   არცერთი id/class, რომელსაც app.js ეყრდნობა, არ შეცვლილა. */
+
 :root {
   --navy: #0a1420;
   --navy-2: #10263c;
   --navy-3: #17324c;
+  --navy-4: #0e1e30;
   --gold: #c9a227;
   --gold-light: #e9c46a;
+  --gold-soft: #f2d78b;
 
   --bg: var(--navy);
   --secondary-bg: var(--navy-2);
@@ -22,9 +31,16 @@
   --green: #34d399;
   --amber: #f5b942;
   --red: #f26d6d;
-  --radius: 18px;
-  --radius-sm: 12px;
-  --shadow: 0 1px 2px rgba(0, 0, 0, .18), 0 8px 24px rgba(0, 0, 0, .28);
+  --radius: 20px;
+  --radius-sm: 13px;
+  --border: rgba(201, 162, 39, .16);
+  --hairline: rgba(147, 166, 188, .14);
+  --shadow: 0 1px 2px rgba(0, 0, 0, .22), 0 10px 28px rgba(0, 0, 0, .32);
+  --shadow-soft: 0 6px 18px rgba(0, 0, 0, .22);
+  --glow-gold: 0 6px 20px rgba(201, 162, 39, .28);
+
+  --font-ui: "Manrope", -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Roboto, sans-serif;
+  --font-brand: "Cormorant Garamond", Georgia, "Times New Roman", serif;
 }
 
 * { box-sizing: border-box; }
@@ -34,63 +50,101 @@ html, body {
   padding: 0;
   background: var(--bg);
   color: var(--text);
-  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Roboto, sans-serif;
+  font-family: var(--font-ui);
   -webkit-font-smoothing: antialiased;
   overflow-y: auto;
   -webkit-overflow-scrolling: touch;
 }
 
 body {
-  padding-bottom: 84px;
+  padding-bottom: 92px;
   min-height: 100vh;
+  position: relative;
+  /* ღრმა, ფენოვანი ფონი: ცენტრში ნაზი ოქროსფერი ნათება + ვერტიკალური
+     გრადიენტი სიღრმისთვის. ფონი ფიქსირდება, რომ სქროლისას "სუნთქავდეს". */
+  background:
+    radial-gradient(900px 480px at 18% -8%, rgba(201, 162, 39, .10), transparent 60%),
+    radial-gradient(700px 420px at 100% 10%, rgba(233, 196, 106, .06), transparent 55%),
+    linear-gradient(180deg, var(--navy) 0%, #0b1a29 45%, var(--navy) 100%);
+  background-attachment: fixed, fixed, fixed;
 }
 
 .container { padding: 12px 14px 4px; max-width: 560px; margin: 0 auto; }
 
 /* ---------- App bar ---------- */
 .appbar {
-  padding: 18px 16px 10px;
+  padding: 20px 16px 14px;
   max-width: 560px;
   margin: 0 auto;
+  position: relative;
+}
+.appbar::after {
+  /* ნაზი ოქროსფერი ხაზი appbar-ის ქვემოთ, თემისთვის ცხადი ვიზუალური
+     "სასაზღვრო" ხაზი — ცვლის ადრინდელ ვიზუალურ ცარიელობას. */
+  content: "";
+  position: absolute;
+  left: 16px; right: 16px; bottom: 0;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, var(--border) 20%, var(--border) 80%, transparent);
 }
 .appbar-row {
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   justify-content: space-between;
   gap: 10px;
 }
-.appbar .titlewrap { min-width: 0; }
-.appbar h1 {
-  font-size: 19px; margin: 0 0 2px; font-weight: 800; letter-spacing: .2px;
-  color: var(--gold-light);
-  text-transform: uppercase;
+.brand-mark {
+  flex: none;
+  width: 38px; height: 38px;
+  border-radius: 11px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-family: var(--font-brand);
+  font-weight: 700;
+  font-size: 16px;
+  letter-spacing: .5px;
+  color: var(--navy);
+  background: linear-gradient(150deg, var(--gold-soft), var(--gold) 60%, #a9821c);
+  box-shadow: var(--glow-gold);
+  margin-right: 2px;
 }
-.appbar .sub { color: var(--hint); font-size: 13px; }
+.appbar .titlewrap { min-width: 0; flex: 1; display: flex; align-items: center; gap: 10px; }
+.appbar .titletext { min-width: 0; }
+.appbar h1 {
+  font-family: var(--font-brand);
+  font-size: 22px; margin: 0; font-weight: 700; letter-spacing: .3px;
+  color: var(--gold-light);
+  line-height: 1.15;
+}
+.appbar .sub { color: var(--hint); font-size: 12.5px; margin-top: 2px; }
 .appbar .sitelink {
   flex: none;
-  margin-top: 2px;
   display: inline-flex;
   align-items: center;
   gap: 5px;
   font-size: 12px;
   font-weight: 700;
   color: var(--navy);
-  background: var(--gold);
-  padding: 7px 11px;
+  background: linear-gradient(135deg, var(--gold-soft), var(--gold));
+  padding: 8px 12px;
   border-radius: 999px;
   border: none;
   white-space: nowrap;
+  box-shadow: var(--glow-gold);
+  transition: transform .12s ease, opacity .15s ease;
 }
-.appbar .sitelink:active { opacity: .85; }
+.appbar .sitelink:active { transform: scale(.95); opacity: .9; }
 
 /* ---------- Role switch ---------- */
 .roleswitch {
   display: none;
   background: var(--secondary-bg);
+  border: 1px solid var(--hairline);
   border-radius: 999px;
   padding: 4px;
-  margin: 10px 0 4px;
-  box-shadow: var(--shadow);
+  margin: 12px 0 2px;
+  box-shadow: var(--shadow-soft);
 }
 .roleswitch:not([hidden]) { display: flex; }
 .roleswitch button {
@@ -102,37 +156,58 @@ body {
   font-weight: 600;
   padding: 9px 0;
   border-radius: 999px;
-  transition: all .15s ease;
+  transition: all .18s ease;
 }
 .roleswitch button.active {
-  background: var(--btn);
+  background: linear-gradient(135deg, var(--gold-soft), var(--gold));
   color: var(--btn-text);
+  box-shadow: var(--glow-gold);
 }
 
 /* ---------- Cards ---------- */
+@keyframes fadeInUp {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
 .card {
-  background: var(--secondary-bg);
+  background: linear-gradient(180deg, var(--navy-3) 0%, var(--secondary-bg) 100%);
+  border: 1px solid var(--hairline);
   border-radius: var(--radius);
   box-shadow: var(--shadow);
-  padding: 16px;
+  padding: 17px 16px;
   margin-bottom: 12px;
+  position: relative;
+  overflow: hidden;
+  animation: fadeInUp .32s cubic-bezier(.2, .7, .3, 1) both;
+}
+.card::before {
+  /* ზედა თხელი ოქროსფერი აქცენტ-ხაზი — ბარათებს "დიზაინერულ" შეხებას
+     სძენს ერთგვაროვნების დარღვევის გარეშე. */
+  content: "";
+  position: absolute;
+  top: 0; left: 0; right: 0;
+  height: 2px;
+  background: linear-gradient(90deg, transparent, var(--gold) 30%, var(--gold-light) 50%, var(--gold) 70%, transparent);
+  opacity: .55;
 }
 .card h2 {
   font-size: 14px;
   font-weight: 700;
-  margin: 0 0 12px;
+  margin: 0 0 13px;
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 7px;
   color: var(--text);
+  letter-spacing: .1px;
 }
 .card h2 .cnt {
   margin-left: auto;
-  font-size: 12px;
-  font-weight: 700;
-  color: var(--hint);
-  background: var(--bg);
-  padding: 2px 8px;
+  font-size: 11.5px;
+  font-weight: 800;
+  color: var(--gold-light);
+  background: rgba(201, 162, 39, .14);
+  border: 1px solid var(--border);
+  padding: 2px 9px;
   border-radius: 999px;
 }
 
@@ -140,27 +215,35 @@ body {
 .grid3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
 
 .stat {
-  background: var(--bg);
+  background: rgba(10, 20, 32, .55);
+  border: 1px solid var(--hairline);
   border-radius: var(--radius-sm);
-  padding: 12px;
+  padding: 13px 10px;
   text-align: center;
+  transition: border-color .15s ease;
 }
-.stat .num { font-size: 22px; font-weight: 800; letter-spacing: -.5px; }
-.stat .lbl { font-size: 11px; color: var(--hint); margin-top: 2px; }
+.stat .num {
+  font-size: 23px; font-weight: 800; letter-spacing: -.5px;
+  background: linear-gradient(135deg, var(--text), var(--gold-soft));
+  -webkit-background-clip: text; background-clip: text; color: transparent;
+}
+.stat .lbl { font-size: 11px; color: var(--hint); margin-top: 3px; font-weight: 500; }
 
 /* ---------- Today card ---------- */
 .today-hero {
   display: flex;
   align-items: center;
-  gap: 14px;
+  gap: 16px;
 }
 .ring {
   position: relative;
   width: 74px;
   height: 74px;
   flex: none;
+  filter: drop-shadow(0 3px 10px rgba(201, 162, 39, .25));
 }
 .ring svg { transform: rotate(-90deg); }
+.ring circle { transition: stroke-dashoffset .7s cubic-bezier(.2, .7, .3, 1); }
 .ring .pct {
   position: absolute;
   inset: 0;
@@ -172,92 +255,135 @@ body {
 }
 .today-info { flex: 1; min-width: 0; }
 .today-info .mode {
-  font-size: 15px;
+  font-size: 16px;
   font-weight: 700;
-  margin-bottom: 2px;
+  margin-bottom: 3px;
+  color: var(--text);
 }
-.today-info .meta { font-size: 12px; color: var(--hint); }
+.today-info .meta { font-size: 12.5px; color: var(--hint); }
 
 .badge {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
+  gap: 5px;
   font-size: 11px;
   font-weight: 700;
-  padding: 3px 9px;
+  padding: 4px 10px;
   border-radius: 999px;
+  letter-spacing: .1px;
 }
-.badge.green { background: rgba(34,197,94,.14); color: var(--green); }
-.badge.amber { background: rgba(245,158,11,.15); color: var(--amber); }
-.badge.red { background: rgba(239,68,68,.14); color: var(--red); }
-.badge.gray { background: rgba(124,138,151,.14); color: var(--hint); }
+.badge::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; flex: none; }
+.badge.green { background: rgba(52, 211, 153, .14); color: var(--green); }
+.badge.amber { background: rgba(245, 185, 66, .15); color: var(--amber); }
+.badge.red { background: rgba(242, 109, 109, .14); color: var(--red); }
+.badge.gray { background: rgba(147, 166, 188, .14); color: var(--hint); }
 
-.actions { display: flex; gap: 10px; margin-top: 14px; }
+.actions { display: flex; gap: 10px; margin-top: 16px; }
 .btn {
   flex: 1;
   border: none;
   border-radius: var(--radius-sm);
-  padding: 12px;
+  padding: 13px;
   font-size: 14px;
   font-weight: 700;
-  background: var(--btn);
+  background: linear-gradient(135deg, var(--gold-soft), var(--gold) 65%, #b8901f);
   color: var(--btn-text);
-  transition: transform .1s ease, opacity .15s ease;
+  box-shadow: var(--glow-gold);
+  transition: transform .12s ease, opacity .15s ease, box-shadow .15s ease;
+  letter-spacing: .1px;
 }
-.btn:active { transform: scale(.97); }
-.btn.secondary { background: var(--bg); color: var(--text); }
-.btn.danger { background: rgba(239,68,68,.12); color: var(--red); }
-.btn[disabled] { opacity: .45; }
+.btn:active { transform: scale(.97); box-shadow: 0 3px 10px rgba(201, 162, 39, .25); }
+.btn.secondary {
+  background: rgba(147, 166, 188, .1);
+  color: var(--text);
+  box-shadow: none;
+  border: 1px solid var(--hairline);
+}
+.btn.danger { background: rgba(239, 68, 68, .13); color: var(--red); box-shadow: none; border: 1px solid rgba(242, 109, 109, .22); }
+.btn[disabled] { opacity: .4; box-shadow: none; }
 
 /* ---------- Lists ---------- */
 .list-row {
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding: 10px 0;
-  border-bottom: 1px solid var(--bg);
+  gap: 11px;
+  padding: 11px 2px;
+  border-bottom: 1px solid var(--hairline);
+  border-radius: 10px;
+  transition: background .15s ease;
 }
 .list-row:last-child { border-bottom: none; }
 .avatar {
-  width: 34px; height: 34px; border-radius: 50%;
+  width: 36px; height: 36px; border-radius: 50%;
   background: linear-gradient(135deg, var(--accent), var(--accent-2));
-  color: #fff; font-weight: 700; font-size: 13px;
+  color: #16202c; font-weight: 800; font-size: 13px;
   display: flex; align-items: center; justify-content: center;
   flex: none;
+  box-shadow: 0 3px 8px rgba(201, 162, 39, .3);
+  border: 2px solid rgba(255, 255, 255, .06);
 }
 .list-row .main { flex: 1; min-width: 0; }
-.list-row .title { font-size: 14px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.list-row .sub { font-size: 12px; color: var(--hint); margin-top: 1px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.list-row .title { font-size: 14px; font-weight: 650; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.list-row .sub { font-size: 12px; color: var(--hint); margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .list-row .side { text-align: right; flex: none; }
 
-.week-strip { display: flex; gap: 6px; margin-top: 4px; }
+/* ---------- დაკლიკებადი სტრიქონები (მეტი დეტალისთვის) ---------- */
+.list-row.clickable { cursor: pointer; }
+.list-row.clickable:active { background: rgba(201, 162, 39, .07); opacity: .85; }
+
+.week-strip { display: flex; gap: 6px; margin-top: 6px; }
 .week-strip .day {
   flex: 1;
   text-align: center;
-  padding: 8px 2px;
-  border-radius: 10px;
-  background: var(--bg);
+  padding: 9px 2px;
+  border-radius: 12px;
+  background: rgba(10, 20, 32, .5);
+  border: 1px solid var(--hairline);
+  transition: transform .15s ease;
 }
-.week-strip .day .d { font-size: 10px; color: var(--hint); font-weight: 700; }
-.week-strip .day .m { font-size: 15px; margin-top: 3px; }
-.week-strip .day.today { outline: 2px solid var(--btn); }
+.week-strip .day .d { font-size: 10px; color: var(--hint); font-weight: 700; letter-spacing: .3px; }
+.week-strip .day .m { font-size: 16px; margin-top: 4px; }
+.week-strip .day.today {
+  background: rgba(201, 162, 39, .12);
+  border: 1px solid var(--gold);
+  box-shadow: var(--glow-gold);
+  transform: translateY(-2px);
+}
 
-.bar-row { margin-bottom: 10px; }
-.bar-row .top { display: flex; justify-content: space-between; font-size: 12.5px; margin-bottom: 5px; }
-.bar-row .track { height: 8px; border-radius: 99px; background: var(--bg); overflow: hidden; }
-.bar-row .fill { height: 100%; border-radius: 99px; background: linear-gradient(90deg, var(--accent), var(--accent-2)); }
+.bar-row { margin-bottom: 12px; }
+.bar-row:last-child { margin-bottom: 0; }
+.bar-row .top { display: flex; justify-content: space-between; font-size: 12.5px; margin-bottom: 6px; font-weight: 600; }
+.bar-row .track { height: 9px; border-radius: 99px; background: rgba(10, 20, 32, .55); overflow: hidden; border: 1px solid var(--hairline); }
+.bar-row .fill {
+  height: 100%; border-radius: 99px;
+  background: linear-gradient(90deg, var(--accent), var(--accent-2));
+  box-shadow: 0 0 8px rgba(201, 162, 39, .45);
+  transition: width .7s cubic-bezier(.2, .7, .3, 1);
+}
 
-.empty { color: var(--hint); font-size: 13px; text-align: center; padding: 14px 0; }
+.empty {
+  color: var(--hint);
+  font-size: 13.5px;
+  text-align: center;
+  padding: 22px 10px;
+  line-height: 1.5;
+}
 
 /* ---------- Bottom tabs ---------- */
 .tabbar {
   position: fixed;
-  left: 0; right: 0; bottom: 0;
-  background: var(--secondary-bg);
-  border-top: 1px solid rgba(124,138,151,.15);
+  left: 10px; right: 10px; bottom: 10px;
+  background: rgba(16, 38, 60, .92);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+  border: 1px solid var(--hairline);
+  border-radius: 20px;
   display: none;
-  padding: 6px 6px calc(6px + env(safe-area-inset-bottom));
+  padding: 7px 6px calc(7px + env(safe-area-inset-bottom));
   z-index: 20;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, .35);
+  max-width: 560px;
+  margin: 0 auto;
 }
 .tabbar:not([hidden]) { display: flex; }
 .tabbar button {
@@ -266,58 +392,62 @@ body {
   background: transparent;
   color: var(--hint);
   font-size: 10.5px;
-  font-weight: 600;
-  padding: 6px 0 2px;
+  font-weight: 650;
+  padding: 7px 2px 5px;
   display: flex;
   flex-direction: column;
   align-items: center;
   gap: 3px;
+  border-radius: 13px;
+  transition: color .15s ease, background .15s ease;
 }
-.tabbar button .ic { font-size: 19px; line-height: 1; }
-.tabbar button.active { color: var(--btn); }
+.tabbar button .ic { font-size: 19px; line-height: 1; transition: transform .15s ease; }
+.tabbar button.active {
+  color: var(--gold-light);
+  background: rgba(201, 162, 39, .12);
+}
+.tabbar button.active .ic { transform: translateY(-1px) scale(1.08); }
 
 .section { display: none; }
 .section.active { display: block; }
 
 .toast {
   position: fixed;
-  left: 50%; bottom: 96px;
-  transform: translateX(-50%);
-  background: var(--text);
-  color: var(--bg);
-  padding: 10px 16px;
+  left: 50%; bottom: 104px;
+  transform: translateX(-50%) translateY(6px);
+  background: rgba(243, 239, 228, .97);
+  color: var(--navy);
+  padding: 11px 18px;
   border-radius: 999px;
   font-size: 13px;
-  font-weight: 600;
+  font-weight: 700;
   opacity: 0;
   pointer-events: none;
-  transition: opacity .2s ease;
+  transition: opacity .22s ease, transform .22s ease;
   z-index: 30;
   max-width: 90%;
   text-align: center;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, .35);
 }
-.toast.show { opacity: .96; }
+.toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
 
 .skeleton {
   height: 14px;
   border-radius: 6px;
-  background: linear-gradient(90deg, var(--bg) 25%, rgba(124,138,151,.18) 37%, var(--bg) 63%);
+  background: linear-gradient(90deg, rgba(147,166,188,.08) 25%, rgba(201,162,39,.16) 37%, rgba(147,166,188,.08) 63%);
   background-size: 400% 100%;
   animation: shimmer 1.4s ease infinite;
 }
 @keyframes shimmer { 0% { background-position: 100% 50%; } 100% { background-position: 0 50%; } }
 
-.loading-wrap { padding: 40px 0; text-align: center; color: var(--hint); font-size: 13px; }
-
-/* ---------- დაკლიკებადი სტრიქონები (მეტი დეტალისთვის) ---------- */
-.list-row.clickable { cursor: pointer; transition: opacity .12s ease; }
-.list-row.clickable:active { opacity: .7; }
+.loading-wrap { padding: 48px 0; text-align: center; color: var(--hint); font-size: 13px; }
 
 /* ---------- დეტალის მოდალი ---------- */
 .modal-backdrop {
   position: fixed;
   inset: 0;
-  background: rgba(3, 8, 14, .55);
+  background: rgba(3, 8, 14, .6);
+  backdrop-filter: blur(2px);
   display: none;
   align-items: flex-end;
   z-index: 50;
@@ -331,18 +461,32 @@ body {
   display: flex;
 }
 .modal {
-  background: var(--secondary-bg);
+  background: linear-gradient(180deg, var(--navy-3), var(--secondary-bg));
   width: 100%;
-  max-height: 82vh;
+  max-height: 84vh;
   overflow-y: auto;
-  border-radius: 20px 20px 0 0;
-  padding: 18px 18px calc(18px + env(safe-area-inset-bottom));
-  box-shadow: 0 -8px 30px rgba(0,0,0,.35);
+  border-radius: 22px 22px 0 0;
+  border-top: 1px solid var(--border);
+  padding: 22px 18px calc(18px + env(safe-area-inset-bottom));
+  box-shadow: 0 -10px 34px rgba(0, 0, 0, .4);
+  position: relative;
+  animation: slideUp .28s cubic-bezier(.2, .7, .3, 1) both;
+}
+@keyframes slideUp { from { transform: translateY(16px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
+.modal::before {
+  content: "";
+  position: absolute;
+  top: 8px; left: 50%;
+  transform: translateX(-50%);
+  width: 38px; height: 4px;
+  border-radius: 99px;
+  background: var(--hairline);
 }
 .modal h3 {
-  margin: 0 0 12px;
-  font-size: 16px;
-  font-weight: 800;
+  margin: 6px 0 14px;
+  font-family: var(--font-brand);
+  font-size: 19px;
+  font-weight: 700;
   color: var(--gold-light);
   display: flex;
   justify-content: space-between;
@@ -351,58 +495,62 @@ body {
 }
 .modal .close {
   border: none;
-  background: var(--bg);
+  background: rgba(10, 20, 32, .6);
   color: var(--hint);
-  width: 28px; height: 28px;
+  width: 30px; height: 30px;
   border-radius: 50%;
   font-size: 14px;
   flex: none;
+  font-family: var(--font-ui);
 }
-.modal .field { padding: 8px 0; border-bottom: 1px solid var(--bg); font-size: 13.5px; }
+.modal .field { padding: 9px 0; border-bottom: 1px solid var(--hairline); font-size: 13.5px; }
 .modal .field:last-child { border-bottom: none; }
-.modal .field .k { color: var(--hint); font-size: 11.5px; margin-bottom: 2px; }
+.modal .field .k { color: var(--hint); font-size: 11.5px; margin-bottom: 3px; font-weight: 600; letter-spacing: .1px; }
 .modal .field .v { word-break: break-word; }
 
 /* ---------- კითხვა მენეჯერს ---------- */
 .qa-compose { display: flex; flex-direction: column; gap: 8px; margin-bottom: 4px; }
 .qa-compose textarea {
   resize: vertical;
-  min-height: 64px;
+  min-height: 68px;
   border-radius: var(--radius-sm);
   border: 1px solid var(--navy-3);
-  background: var(--bg);
+  background: rgba(10, 20, 32, .5);
   color: var(--text);
-  padding: 10px 12px;
+  padding: 11px 13px;
   font-size: 14px;
   font-family: inherit;
 }
-.qa-thread { margin-top: 6px; }
-.qa-item { padding: 10px 0; border-bottom: 1px solid var(--bg); }
+.qa-compose textarea:focus, .qa-compose select:focus { outline: 1px solid var(--gold); }
+.qa-thread { margin-top: 8px; }
+.qa-item { padding: 11px 0; border-bottom: 1px solid var(--hairline); }
 .qa-item:last-child { border-bottom: none; }
-.qa-item .qa-q { font-size: 13.5px; }
-.qa-item .qa-meta { font-size: 11px; color: var(--hint); margin-top: 2px; }
+.qa-item .qa-q { font-size: 13.5px; line-height: 1.4; }
+.qa-item .qa-meta { font-size: 11px; color: var(--hint); margin-top: 3px; }
 .qa-item .qa-a {
-  margin-top: 8px;
-  background: var(--bg);
+  margin-top: 9px;
+  background: rgba(10, 20, 32, .55);
+  border: 1px solid var(--hairline);
   border-radius: var(--radius-sm);
-  padding: 9px 11px;
+  padding: 10px 12px;
   font-size: 13px;
+  line-height: 1.4;
 }
-.qa-item .qa-a .who { color: var(--gold-light); font-weight: 700; font-size: 11.5px; margin-bottom: 3px; }
+.qa-item .qa-a .who { color: var(--gold-light); font-weight: 700; font-size: 11.5px; margin-bottom: 4px; }
 .qa-item textarea { width: 100%; margin-top: 8px; }
-.qa-item .btn { margin-top: 8px; padding: 9px 12px; font-size: 13px; }
+.qa-item .btn { margin-top: 8px; padding: 10px 12px; font-size: 13px; }
 
 .qa-compose select {
   resize: vertical;
   border-radius: var(--radius-sm);
   border: 1px solid var(--navy-3);
-  background: var(--bg);
+  background: rgba(10, 20, 32, .5);
   color: var(--text);
-  padding: 10px 12px;
+  padding: 11px 13px;
   font-size: 14px;
   font-family: inherit;
 }
 
 /* ---------- ექსკლუზივის გაზიარება კოლეგასთან (თანამშრომლობა) ---------- */
-.modal .share-box { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--navy-3); }
-.modal .share-box .lbl { font-weight: 700; margin-bottom: 8px; font-size: 13.5px; color: var(--gold-light); }
+.modal .share-box { margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--border); }
+.modal .share-box .lbl { font-weight: 700; margin-bottom: 9px; font-size: 13.5px; color: var(--gold-light); }
