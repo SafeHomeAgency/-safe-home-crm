@@ -454,6 +454,68 @@ def api_agents_active():
     return jsonify(ok=True)
 
 
+@app.post("/api/tasks/new")
+def api_tasks_new():
+    """ახალი კლიენტის/ლიდის დამატება Mini App-იდან — იგივე ორი
+    სცენარი, რაც აქამდე მხოლოდ ბოტის /newtask ბრძანებით შეეძლო
+    ადმინს: "ზოგადი" კლიენტი (ავტომატურად ერგება საუკეთესო/სუსტესი
+    შემსრულებელს, პრიორიტეტის მიხედვით) და "კონკრეტული ბინა" (პირდაპირ
+    არჩეულ აგენტზე). ადმინისთვის — მთელ კომპანიაზე; თიმლიდერისთვის —
+    მხოლოდ საკუთარ გუნდში (იგივე კურატორის პრინციპი, რაც უკვე აქვს
+    დავალების გადაბარებაზე)."""
+    agent, admin, err = _authed_agent()
+    if err:
+        return err
+    if not (admin or _is_team_lead(agent)):
+        return jsonify(error="მხოლოდ მენეჯერისთვის/თიმლიდერისთვის"), 403
+    body = request.get_json(silent=True) or {}
+    kind = body.get("kind")
+    if kind not in ("general", "listing"):
+        return jsonify(error="არასწორი მოთხოვნა"), 400
+
+    my_team = None if admin else str(agent.get("team", "")).strip()
+    created_by = "admin" if admin else str(agent.get("agent_id") or "")
+
+    if kind == "general":
+        phone = (body.get("phone") or "").strip()
+        deal_type = (body.get("deal_type") or "").strip()
+        priority = (body.get("priority") or "").strip()
+        if not phone or deal_type not in ("ქირა", "ყიდვა") or priority not in ("მაღალი", "საშუალო", "დაბალი"):
+            return jsonify(error="არასწორი მოთხოვნა"), 400
+        if not admin and not my_team:
+            return jsonify(error="ჯერ არ გაქვთ საკუთარი გუნდი მინიჭებული"), 400
+        target_agent_id = sheets.pick_agent_for_priority(priority, team=my_team)
+        if not target_agent_id:
+            return jsonify(error="შესაფერისი აქტიური აგენტი ვერ მოიძებნა"), 400
+        title = f"კლიენტი {phone} ({deal_type})"
+        task_id = sheets.create_task(
+            title=title, description="", assigned_to=target_agent_id, priority=priority,
+            due_date="", created_by=created_by, lead_type="general",
+            client_phone=phone, deal_type=deal_type,
+        )
+    else:  # kind == "listing"
+        target_agent_id = body.get("agent_id")
+        listing_id = (body.get("listing_id") or "").strip()
+        phone = (body.get("phone") or "").strip()
+        viewing_time = (body.get("viewing_time") or "").strip()
+        if not target_agent_id or not listing_id or not phone:
+            return jsonify(error="არასწორი მოთხოვნა"), 400
+        target = next((a for a in sheets.get_agents() if str(a.get("agent_id")) == str(target_agent_id)), None)
+        if not target or str(target.get("active", "yes")).strip().lower() == "no":
+            return jsonify(error="ეს აგენტი აღარაა აქტიური"), 400
+        if not admin and (not my_team or str(target.get("team", "")).strip() != my_team):
+            return jsonify(error="მხოლოდ საკუთარი გუნდის აგენტზე შეგიძლიათ დამატება"), 403
+        title = f"ნახვა: {listing_id}"
+        description = f"ნახვის დრო: {viewing_time}" if viewing_time else ""
+        task_id = sheets.create_task(
+            title=title, description=description, assigned_to=target_agent_id,
+            priority="მაღალი", due_date=viewing_time, created_by=created_by,
+            lead_type="listing", client_phone=phone, listing_id=listing_id, viewing_time=viewing_time,
+        )
+
+    return jsonify(ok=True, task_id=task_id)
+
+
 @app.get("/api/tasks")
 def api_tasks():
     """ღია დავალებების/კლიენტების სია გადაბარებისთვის — ადმინს ყველა

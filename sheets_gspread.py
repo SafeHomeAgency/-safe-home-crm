@@ -580,7 +580,7 @@ def get_agent_performance(days: int = 30) -> dict:
     return stats
 
 
-def pick_agent_for_priority(priority: str, days: int = 30) -> str | None:
+def pick_agent_for_priority(priority: str, days: int = 30, team: str | None = None) -> str | None:
     """
     ირჩევს agent_id-ს პრიორიტეტის მიხედვით:
       მაღალი   -> საუკეთესო შესრულების მაჩვენებლის მქონე აქტიური აგენტი
@@ -592,12 +592,17 @@ def pick_agent_for_priority(priority: str, days: int = 30) -> str | None:
     მიიღებდნენ), და — თუ მათთვის გრაფიკი (/setschedule) დაყენებულია —
     მხოლოდ ისინი, ვინც დღეს გრაფიკითაა გათვალისწინებული და უკვე
     დააჭირა /clockin-ს (წინააღმდეგ შემთხვევაში კლიენტი არ ერგებათ).
+
+    `team` — თუ მითითებულია, კანდიდატები იზღუდება მხოლოდ ამ გუნდით
+    (თიმლიდერისთვის Mini App-ის ახალი კლიენტის დამატებისას — საკუთარ
+    გუნდში გადანაწილება, კომპანიის მთელი პულის ნაცვლად).
     """
     agents = [
         a for a in get_agents()
         if str(a.get("active", "")).strip().lower() != "no"
         and str(a.get("telegram_chat_id", "")).strip()
         and agent_available_now(a["agent_id"])
+        and (team is None or str(a.get("team", "")).strip() == team.strip())
     ]
     if not agents:
         return None

@@ -341,12 +341,15 @@ def get_agent_performance(days: int = 30) -> dict:
     return stats
 
 
-def pick_agent_for_priority(priority: str, days: int = 30) -> str | None:
+def pick_agent_for_priority(priority: str, days: int = 30, team: str | None = None) -> str | None:
+    """იხ. sheets_gspread.py-ის იგივე ფუნქციის დოკუმენტაცია — `team`
+    პარამეტრი კანდიდატებს ზღუდავს ერთ გუნდზე (თიმლიდერისთვის)."""
     agents = [
         a for a in get_agents()
         if str(a.get("active", "")).strip().lower() != "no"
         and str(a.get("telegram_chat_id", "")).strip()
         and agent_available_now(a["agent_id"])
+        and (team is None or str(a.get("team", "")).strip() == team.strip())
     ]
     if not agents:
         return None

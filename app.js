@@ -789,21 +789,56 @@ function bindAgentsMgmtActions() {
 }
 
 /* ------------------------------------------ დავალების/კლიენტის გადაბარება
-   (ადმინი — ნებისმიერ აგენტზე, თიმლიდერი — მხოლოდ საკუთარ გუნდში,
-   კურატორის პრინციპით — ადრე ეს მხოლოდ ადმინს შეეძლო ცხრილის ხელით
-   რედაქტირებით). */
+   და ახალი კლიენტის დამატება (ადმინი — ნებისმიერ აგენტზე/მთელ
+   კომპანიაზე, თიმლიდერი — მხოლოდ საკუთარ გუნდში, კურატორის
+   პრინციპით — ადრე ორივე ეს ფუნქცია მხოლოდ ადმინს შეეძლო, ბოტის
+   /newtask ბრძანებით ან ცხრილის ხელით რედაქტირებით). */
 const ADMINTASKS_PRIORITY_COLOR = { "მაღალი": "red", "საშუალო": "amber" };
+let newTaskKind = "general";
+
+function renderNewTaskForm(agents) {
+  const agentOptions = agents
+    .map((a) => `<option value="${esc(a.agent_id)}">${esc(a.name)}${a.team ? " (" + esc(a.team) + ")" : ""}</option>`)
+    .join("");
+  return `<div class="card">
+    <h2>➕ ახალი კლიენტი</h2>
+    <div class="period-switch" id="newTaskKindSwitch">
+      <button data-kind="general" class="${newTaskKind === "general" ? "active" : ""}">ზოგადი კლიენტი</button>
+      <button data-kind="listing" class="${newTaskKind === "listing" ? "active" : ""}">კონკრეტული ბინა</button>
+    </div>
+    <div class="qa-compose" data-kind-fields="general" ${newTaskKind === "general" ? "" : "hidden"}>
+      <input id="ntPhone" placeholder="კლიენტის ტელეფონი" />
+      <select id="ntDeal">
+        <option value="ქირა">ქირა</option>
+        <option value="ყიდვა">ყიდვა</option>
+      </select>
+      <select id="ntPriority">
+        <option value="მაღალი">პრიორიტეტი: მაღალი (საუკეთესო აგენტს ერგება)</option>
+        <option value="საშუალო">პრიორიტეტი: საშუალო (ყველაზე სუსტს ერგება)</option>
+        <option value="დაბალი">პრიორიტეტი: დაბალი (შემთხვევით ერგება)</option>
+      </select>
+    </div>
+    <div class="qa-compose" data-kind-fields="listing" ${newTaskKind === "listing" ? "" : "hidden"}>
+      <select id="ntAgent">${agentOptions || `<option value="">აგენტი არ არის</option>`}</select>
+      <input id="ntListingId" placeholder="ლისტინგის/ბინის ID" />
+      <input id="ntListingPhone" placeholder="კლიენტის ტელეფონი" />
+      <input id="ntViewingTime" placeholder="ნახვის დრო (მაგ. ხვალ 12:00)" />
+    </div>
+    <button class="btn" id="ntSubmit" style="margin-top:4px">დამატება</button>
+  </div>`;
+}
 
 function renderAdminTasks(payload) {
   const tasks = (payload && payload.rows) || [];
   const agents = (payload && payload.agents) || [];
-  if (!tasks.length) return `<div class="card"><div class="empty">ღია დავალება არ არის ✅</div></div>`;
   const optionsFor = (currentAgentId) => `<option value="">აგენტის არჩევა…</option>` +
     agents
       .filter((a) => String(a.agent_id) !== String(currentAgentId))
       .map((a) => `<option value="${esc(a.agent_id)}">${esc(a.name)}${a.team ? " (" + esc(a.team) + ")" : ""}</option>`)
       .join("");
-  return `<div class="card">
+  const tasksHtml = !tasks.length
+    ? `<div class="card"><div class="empty">ღია დავალება არ არის ✅</div></div>`
+    : `<div class="card">
     <h2>📄 ღია დავალებები <span class="cnt">${tasks.length}</span></h2>
     ${tasks.map((t) => `
       <div class="list-row" style="align-items:flex-start">
@@ -818,6 +853,7 @@ function renderAdminTasks(payload) {
         </div>
       </div>`).join("")}
   </div>`;
+  return renderNewTaskForm(agents) + tasksHtml;
 }
 
 function bindAdminTasksActions() {
@@ -837,6 +873,57 @@ function bindAdminTasksActions() {
       } catch (e) { toast(e.message); btn.disabled = false; }
     };
   });
+
+  const kindSwitch = document.getElementById("newTaskKindSwitch");
+  if (kindSwitch) {
+    kindSwitch.querySelectorAll("button").forEach((b) => {
+      b.onclick = () => {
+        newTaskKind = b.dataset.kind;
+        kindSwitch.querySelectorAll("button").forEach((x) => x.classList.toggle("active", x === b));
+        document.querySelectorAll("[data-kind-fields]").forEach((el) => {
+          el.hidden = el.dataset.kindFields !== newTaskKind;
+        });
+      };
+    });
+  }
+
+  const submitBtn = document.getElementById("ntSubmit");
+  if (submitBtn) {
+    submitBtn.onclick = async () => {
+      let body;
+      if (newTaskKind === "general") {
+        const phone = (document.getElementById("ntPhone").value || "").trim();
+        if (!phone) { toast("შეიყვანეთ ტელეფონის ნომერი"); return; }
+        body = {
+          kind: "general",
+          phone,
+          deal_type: document.getElementById("ntDeal").value,
+          priority: document.getElementById("ntPriority").value,
+        };
+      } else {
+        const agentId = document.getElementById("ntAgent").value;
+        const listingId = (document.getElementById("ntListingId").value || "").trim();
+        const phone = (document.getElementById("ntListingPhone").value || "").trim();
+        if (!agentId) { toast("აირჩიეთ აგენტი"); return; }
+        if (!listingId || !phone) { toast("შეავსეთ ლისტინგის ID და ტელეფონი"); return; }
+        body = {
+          kind: "listing",
+          agent_id: agentId,
+          listing_id: listingId,
+          phone,
+          viewing_time: (document.getElementById("ntViewingTime").value || "").trim(),
+        };
+      }
+      submitBtn.disabled = true;
+      try {
+        await api("/api/tasks/new", { method: "POST", body: JSON.stringify(body) });
+        tg && tg.HapticFeedback && tg.HapticFeedback.notificationOccurred("success");
+        toast("დამატებულია ✅");
+        delete lazyCache.admintasks;
+        await renderContent();
+      } catch (e) { toast(e.message); submitBtn.disabled = false; }
+    };
+  }
 }
 
 function renderSwaps(rows) {

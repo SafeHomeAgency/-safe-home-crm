@@ -552,7 +552,7 @@ body {
 .qa-item textarea { width: 100%; margin-top: 8px; }
 .qa-item .btn { margin-top: 8px; padding: 10px 12px; font-size: 13px; }
 
-.qa-compose select {
+.qa-compose select, .qa-compose input {
   resize: vertical;
   border-radius: var(--radius-sm);
   border: 1px solid var(--navy-3);
@@ -561,7 +561,10 @@ body {
   padding: 11px 13px;
   font-size: 14px;
   font-family: inherit;
+  width: 100%;
 }
+.qa-compose input:focus { outline: 1px solid var(--gold); }
+.qa-compose input::placeholder { color: var(--hint); }
 
 /* ---------- ექსკლუზივის გაზიარება კოლეგასთან (თანამშრომლობა) ---------- */
 .modal .share-box { margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--border); }
