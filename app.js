@@ -37,7 +37,7 @@ const WARNING_LABELS = {
   quota_missed: "დღიური გეგმა ვერ შესრულდა",
 };
 
-const state = { role: null, data: null, tab: {} };
+const state = { role: null, data: null, tab: {}, period: "month" };
 
 const AGENT_TABS = [
   { id: "today", label: "დღეს", icon: "🏠" },
@@ -50,6 +50,7 @@ const ADMIN_TABS = [
   { id: "overview", label: "მიმოხილვა", icon: "📊" },
   { id: "team", label: "გუნდი", icon: "🧑‍🤝‍🧑" },
   { id: "ranking", label: "რეიტინგი", icon: "🏆" },
+  { id: "admintasks", label: "დავალებები", icon: "📄", lazy: true },
   { id: "dayoffs", label: "შვებულებები", icon: "🗓️" },
   { id: "warnings", label: "გაფრთხილებები", icon: "⚠️" },
   { id: "swaps", label: "სმენის გაცვლა", icon: "🔁", lazy: true },
@@ -57,6 +58,61 @@ const ADMIN_TABS = [
   { id: "exclusives", label: "ექსკლუზივები", icon: "🏘️", lazy: true },
   { id: "questions", label: "კითხვები", icon: "💬", lazy: true },
 ];
+
+const PERIODS = [
+  ["day", "დღე"],
+  ["week", "კვირა"],
+  ["month", "თვე"],
+];
+
+/* პერიოდის ფილტრი (დღე/კვირა/თვე) — შედეგების/რეიტინგის ფანჯარას
+   ცვლის სერვერზე (`/api/dashboard?period=...`). ერთი საერთო state,
+   ვრცელდება KPI-ზეც (აგენტი) და მიმოხილვა/რეიტინგზეც (ადმინი). */
+function renderPeriodSwitch() {
+  return `<div class="period-switch" id="periodSwitch">
+    ${PERIODS.map(([id, label]) => `<button data-period="${id}" class="${state.period === id ? "active" : ""}">${label}</button>`).join("")}
+  </div>`;
+}
+function bindPeriodSwitch() {
+  const el = document.getElementById("periodSwitch");
+  if (!el) return;
+  el.querySelectorAll("button").forEach((b) => {
+    b.onclick = () => {
+      if (state.period === b.dataset.period) return;
+      state.period = b.dataset.period;
+      load();
+    };
+  });
+}
+
+/* მარტივი, დამოუკიდებელი SVG სვეტოვანი დიაგრამა (გარე ბიბლიოთეკის
+   გარეშე — იმავე პრინციპით, რაც ring()-ია KPI-ის რგოლისთვის). */
+function barChart(items, opts = {}) {
+  if (!items.length) return "";
+  const h = opts.height || 108;
+  const barW = opts.barWidth || 34;
+  const gap = opts.gap || 16;
+  const max = opts.max || Math.max(1, ...items.map((i) => i.value || 0));
+  const w = items.length * (barW + gap) + gap;
+  const bars = items.map((it, i) => {
+    const bh = Math.max(2, Math.round(((it.value || 0) / max) * (h - 30)));
+    const x = gap + i * (barW + gap);
+    const y = h - bh - 20;
+    return `
+      <rect x="${x}" y="${y}" width="${barW}" height="${bh}" rx="7" fill="url(#barg)"/>
+      <text x="${x + barW / 2}" y="${h - 6}" text-anchor="middle" class="chart-lbl">${esc(it.label)}</text>
+      <text x="${x + barW / 2}" y="${y - 7}" text-anchor="middle" class="chart-val">${esc(it.valueLabel != null ? it.valueLabel : it.value)}</text>
+    `;
+  }).join("");
+  return `<div class="chart-wrap">
+    <svg viewBox="0 0 ${w} ${h}" width="100%" height="${h}" preserveAspectRatio="xMinYMid meet">
+      <defs><linearGradient id="barg" x1="0" y1="0" x2="0" y2="1">
+        <stop offset="0%" stop-color="var(--accent-2)"/><stop offset="100%" stop-color="var(--accent)"/>
+      </linearGradient></defs>
+      ${bars}
+    </svg>
+  </div>`;
+}
 
 const REQUEST_TYPE_LABELS = {
   open_swap: "ღია გაცვლა",
@@ -264,13 +320,21 @@ function bindTasksActions(d) {
   });
 }
 
+const PERIOD_TITLES = { day: "დღეს", week: "ბოლო კვირა", month: "ბოლო თვე" };
+
 function renderKpi(d) {
   const p = d.performance;
   const r = ratePct(p.rate);
   const meetings = d.meetings || [];
+  const chart = barChart([
+    { label: "მიღებული", value: p.assigned || 0 },
+    { label: "დროულად", value: p.on_time || 0 },
+  ]);
   return `
   <div class="card">
-    <h2>📈 ბოლო 30 დღე</h2>
+    ${renderPeriodSwitch()}
+    <h2>📈 შედეგები — ${esc(PERIOD_TITLES[state.period] || "")}</h2>
+    ${chart}
     <div class="grid3">
       <div class="stat"><div class="num">${p.assigned}</div><div class="lbl">მიღებული</div></div>
       <div class="stat"><div class="num">${p.on_time}</div><div class="lbl">დროულად</div></div>
@@ -336,8 +400,13 @@ function bindAgentActions(d) {
 
 function renderOverview(d) {
   const s = d.summary;
+  const chart = barChart([
+    { label: "შესრ.", value: s.total_submitted || 0 },
+    { label: "გეგმა", value: s.total_quota_target || 0 },
+  ]);
   return `
   <div class="card">
+    ${renderPeriodSwitch()}
     <h2>📊 დღევანდელი სურათი</h2>
     <div class="grid2">
       <div class="stat"><div class="num">${s.clocked_in}/${s.active_total}</div><div class="lbl">გახსნილი დღეს</div></div>
@@ -346,11 +415,13 @@ function renderOverview(d) {
       <div class="stat"><div class="num">${s.clients_total}</div><div class="lbl">კლიენტი ჯამურად</div></div>
       <div class="stat"><div class="num">${s.quota_missed}</div><div class="lbl">გეგმა ვერ შესრულდა</div></div>
       <div class="stat"><div class="num">${s.pending_dayoffs}</div><div class="lbl">მოლოდინში (შვებ.)</div></div>
-      <div class="stat"><div class="num">${s.agents_total}</div><div class="lbl">სულ აგენტი</div></div>
+      <div class="stat"><div class="num">${s.active_total}</div><div class="lbl">აქტიური აგენტი</div></div>
+      ${s.inactive_total ? `<div class="stat"><div class="num">${s.inactive_total}</div><div class="lbl">გათავისუფლებული</div></div>` : ""}
     </div>
+    ${chart}
   </div>
   <div class="card">
-    <h2>🏆 ტოპ 5</h2>
+    <h2>🏆 ტოპ 5 — ${esc(PERIOD_TITLES[state.period] || "")}</h2>
     ${(d.ranking || []).slice(0, 5).length === 0 ? `<div class="empty">ჯერ საკმარისი მონაცემი არ არის</div>` :
       d.ranking.slice(0, 5).map((t, i) => `
         <div class="bar-row">
@@ -367,23 +438,51 @@ const TEAM_FIELD_LABELS = [
   ["warnings", "გაფრთხილებები"], ["collaboration", "თანამშრომლობა (ექსკლუზივის გაზიარება)"],
 ];
 
+/* გუნდი დაჯგუფებულია მენეჯერის/თიმის მიხედვით (t.team ველით) — ადმინს
+   საშუალებას აძლევს ერთბაშად ნახოს, რომელი მენეჯერის ქვეშ რომელი
+   აგენტები არიან და თითოეული ჯგუფის საშუალო შედეგი. თიმლიდერს (რომლის
+   ხედვაც სერვერზეა უკვე გაფილტრული საკუთარ გუნდზე) უბრალოდ ერთი
+   ჯგუფი გამოუჩნდება. */
 function renderTeam(d) {
   const team = d.team.slice().sort((a, b) => (a.name || "").localeCompare(b.name || ""));
+  const groups = new Map();
+  team.forEach((t, i) => {
+    const key = (t.team || "").trim() || "დაუნაწილებელი";
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push({ t, i });
+  });
+  const groupNames = Array.from(groups.keys()).sort((a, b) => a.localeCompare(b));
+
+  const groupsHtml = groupNames.map((gname) => {
+    const members = groups.get(gname);
+    const rates = members.map((m) => m.t.rate).filter((r) => r != null);
+    const avgRate = rates.length ? Math.round((rates.reduce((a, b) => a + b, 0) / rates.length) * 100) : null;
+    const lead = members.find((m) => m.t.role === "team_lead");
+    return `
+      <div class="team-group">
+        <div class="team-group-head">
+          <span class="tg-name">🧑‍💼 ${esc(gname)}</span>
+          <span class="tg-meta">${members.length} წევრი${lead ? " · 👑 " + esc(lead.t.name) : ""}${avgRate != null ? " · საშ. " + avgRate + "%" : ""}</span>
+        </div>
+        ${members.map(({ t, i }) => `
+          <div class="list-row clickable" data-team-idx="${i}">
+            <div class="avatar">${initials(t.name)}</div>
+            <div class="main">
+              <div class="title">${esc(t.name)} ${t.role === "team_lead" ? "👑" : ""}</div>
+              <div class="sub">${MODE_ICON[t.mode] || "🌙"} ${esc(MODE_LABELS[t.mode] || t.mode)}</div>
+            </div>
+            <div class="side">
+              ${statusBadge(t.mode, t.clocked_in, false)}
+              <div class="sub" style="margin-top:3px">👥 ${t.clients_today || 0} დღეს · ${t.clients_total || 0} ჯამურად</div>
+              ${t.warnings ? `<div class="sub" style="color:var(--red);margin-top:3px">⚠️ ${t.warnings}</div>` : ""}
+            </div>
+          </div>`).join("")}
+      </div>`;
+  }).join("");
+
   return `<div class="card">
     <h2>🧑‍🤝‍🧑 გუნდი <span class="cnt">${team.length}</span></h2>
-    ${team.map((t, i) => `
-      <div class="list-row clickable" data-team-idx="${i}">
-        <div class="avatar">${initials(t.name)}</div>
-        <div class="main">
-          <div class="title">${esc(t.name)} ${t.active === "no" ? "🚫" : ""}</div>
-          <div class="sub">${esc(t.team || "—")} · ${MODE_ICON[t.mode] || "🌙"} ${esc(MODE_LABELS[t.mode] || t.mode)}</div>
-        </div>
-        <div class="side">
-          ${statusBadge(t.mode, t.clocked_in, false)}
-          <div class="sub" style="margin-top:3px">👥 ${t.clients_today || 0} დღეს · ${t.clients_total || 0} ჯამურად</div>
-          ${t.warnings ? `<div class="sub" style="color:var(--red);margin-top:3px">⚠️ ${t.warnings}</div>` : ""}
-        </div>
-      </div>`).join("")}
+    ${groupsHtml}
   </div>`;
 }
 
@@ -407,8 +506,18 @@ function bindTeamActions(d) {
 
 function renderRanking(d) {
   const rk = d.ranking || [];
+  const chart = barChart(
+    rk.slice(0, 6).map((t) => ({
+      label: (t.name || "").length > 7 ? t.name.slice(0, 6) + "…" : (t.name || ""),
+      value: ratePct(t.rate),
+      valueLabel: ratePct(t.rate) + "%",
+    })),
+    { max: 100 },
+  );
   return `<div class="card">
-    <h2>🏆 შესრულების რეიტინგი (30დღე)</h2>
+    ${renderPeriodSwitch()}
+    <h2>🏆 შესრულების რეიტინგი — ${esc(PERIOD_TITLES[state.period] || "")}</h2>
+    ${chart}
     ${rk.length === 0 ? `<div class="empty">ჯერ საკმარისი მონაცემი არ არის</div>` :
       rk.map((t, i) => `
         <div class="bar-row">
@@ -594,6 +703,57 @@ function renderReports(rows) {
   </div>`;
 }
 
+/* ------------------------------------------ დავალების/კლიენტის გადაბარება
+   (ადმინი — ნებისმიერ აგენტზე, თიმლიდერი — მხოლოდ საკუთარ გუნდში,
+   კურატორის პრინციპით — ადრე ეს მხოლოდ ადმინს შეეძლო ცხრილის ხელით
+   რედაქტირებით). */
+const ADMINTASKS_PRIORITY_COLOR = { "მაღალი": "red", "საშუალო": "amber" };
+
+function renderAdminTasks(payload) {
+  const tasks = (payload && payload.rows) || [];
+  const agents = (payload && payload.agents) || [];
+  if (!tasks.length) return `<div class="card"><div class="empty">ღია დავალება არ არის ✅</div></div>`;
+  const optionsFor = (currentAgentId) => `<option value="">აგენტის არჩევა…</option>` +
+    agents
+      .filter((a) => String(a.agent_id) !== String(currentAgentId))
+      .map((a) => `<option value="${esc(a.agent_id)}">${esc(a.name)}${a.team ? " (" + esc(a.team) + ")" : ""}</option>`)
+      .join("");
+  return `<div class="card">
+    <h2>📄 ღია დავალებები <span class="cnt">${tasks.length}</span></h2>
+    ${tasks.map((t) => `
+      <div class="list-row" style="align-items:flex-start">
+        <div class="avatar">${t.lead_type === "listing" ? "🏠" : "👤"}</div>
+        <div class="main">
+          <div class="title">${esc(t.title || "")} <span class="badge ${ADMINTASKS_PRIORITY_COLOR[t.priority] || "gray"}" style="margin-left:2px">${esc(t.priority || "-")}</span></div>
+          <div class="sub">კურატორი: ${esc(t.assigned_to_name || t.assigned_to || "—")}${t.client_phone ? " · " + esc(t.client_phone) : ""}</div>
+          <div class="qa-compose" style="margin-top:8px">
+            <select data-reassign-select="${esc(t.task_id)}">${optionsFor(t.assigned_to)}</select>
+            <button class="btn" data-reassign-btn="${esc(t.task_id)}" style="padding:9px 12px">🔁 გადაბარება</button>
+          </div>
+        </div>
+      </div>`).join("")}
+  </div>`;
+}
+
+function bindAdminTasksActions() {
+  document.querySelectorAll("[data-reassign-btn]").forEach((btn) => {
+    btn.onclick = async () => {
+      const taskId = btn.dataset.reassignBtn;
+      const sel = document.querySelector(`[data-reassign-select="${CSS.escape(taskId)}"]`);
+      const toId = sel && sel.value;
+      if (!toId) { toast("აირჩიეთ აგენტი"); return; }
+      btn.disabled = true;
+      try {
+        await api("/api/tasks/reassign", { method: "POST", body: JSON.stringify({ task_id: taskId, to_agent_id: toId }) });
+        tg && tg.HapticFeedback && tg.HapticFeedback.notificationOccurred("success");
+        toast("გადაბარდა ✅");
+        delete lazyCache.admintasks;
+        await renderContent();
+      } catch (e) { toast(e.message); btn.disabled = false; }
+    };
+  });
+}
+
 function renderSwaps(rows) {
   if (!rows.length) return `<div class="card"><div class="empty">დასადასტურებელი მოთხოვნა არ არის</div></div>`;
   return `<div class="card">
@@ -758,6 +918,7 @@ const LAZY_ENDPOINTS = {
   swaps: "/api/swaps",
   reports: "/api/reports",
   questions: "/api/questions",
+  admintasks: "/api/tasks",
 };
 
 function tabsFor(role) {
@@ -789,7 +950,8 @@ async function renderContent() {
       if (!lazyCache[tab]) {
         content.innerHTML = `<div class="card"><div class="empty">იტვირთება…</div></div>`;
         try {
-          lazyCache[tab] = (await api(LAZY_ENDPOINTS[tab])).rows || [];
+          const resp = await api(LAZY_ENDPOINTS[tab]);
+          lazyCache[tab] = tab === "admintasks" ? resp : (resp.rows || []);
         } catch (e) {
           content.innerHTML = `<div class="card"><div class="empty">⚠️ ${esc(e.message)}</div></div>`;
           return;
@@ -800,6 +962,7 @@ async function renderContent() {
       else if (tab === "reports") { content.innerHTML = renderReports(rows); bindReportsActions(rows); }
       else if (tab === "swaps") { content.innerHTML = renderSwaps(rows); bindSwapsActions(); }
       else if (tab === "questions") { content.innerHTML = renderQuestions(rows, state.role); bindQuestionsActions(state.role); }
+      else if (tab === "admintasks") { content.innerHTML = renderAdminTasks(rows); bindAdminTasksActions(); }
       return;
     }
 
@@ -820,8 +983,10 @@ async function renderContent() {
     content.innerHTML = html;
     if (state.role === "agent" && tab === "today") bindAgentActions(d.agent);
     if (state.role === "agent" && tab === "tasks") bindTasksActions(d.agent);
+    if (state.role === "agent" && tab === "kpi") bindPeriodSwitch();
     if (state.role === "admin" && tab === "dayoffs") bindAdminActions();
     if (state.role === "admin" && tab === "team") bindTeamActions(d.admin);
+    if (state.role === "admin" && (tab === "overview" || tab === "ranking")) bindPeriodSwitch();
   } catch (e) {
     console.error("renderContent შეცდომა:", e);
     content.innerHTML = `<div class="card"><div class="empty">⚠️ ვერ ჩაიტვირთა: ${esc(e.message || e)}</div></div>`;
@@ -853,7 +1018,7 @@ function renderRoleSwitch(hasAgent, hasAdmin) {
 
 async function load() {
   try {
-    const d = await api("/api/dashboard");
+    const d = await api("/api/dashboard?period=" + encodeURIComponent(state.period));
     state.data = d;
     for (const k in lazyCache) delete lazyCache[k];
     const hasAgent = !!d.agent;

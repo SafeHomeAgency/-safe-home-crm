@@ -104,6 +104,16 @@ def _is_team_lead(agent) -> bool:
     return bool(agent) and str(agent.get("role", "")).strip() == "team_lead"
 
 
+_PERIOD_DAYS = {"day": 1, "week": 7, "month": 30}
+
+
+def _period_to_days(period: str | None) -> int:
+    """Mini App-ის შედეგების/მონაცემების პერიოდის ფილტრი (დღე/კვირა/
+    თვე) -> `days` პარამეტრი performance-გამოთვლებისთვის. უცნობი/ცარიელი
+    მნიშვნელობისას ნაგულისხმევად თვე (30) რჩება — ძველი ქცევა უცვლელია."""
+    return _PERIOD_DAYS.get((period or "").strip().lower(), 30)
+
+
 @app.get("/api/me")
 def api_me():
     agent, admin, err = _authed_agent()
@@ -124,21 +134,24 @@ def api_me():
 
 @app.get("/api/dashboard")
 def api_dashboard():
+    """`?period=day|week|month` — შედეგების/რეიტინგის ფანჯარა (ნაგულის-
+    ხმევად "month" = ძველი 30-დღიანი ქცევა, უცვლელი)."""
     agent, admin, err = _authed_agent()
     if err:
         return err
+    days = _period_to_days(request.args.get("period"))
     team_lead = _is_team_lead(agent)
-    payload = {"is_admin": admin or team_lead, "is_team_lead": team_lead}
+    payload = {"is_admin": admin or team_lead, "is_team_lead": team_lead, "period": request.args.get("period") or "month"}
     if admin or team_lead:
         try:
             team_filter = None if admin else agent.get("team", "")
-            payload["admin"] = sheets.get_admin_dashboard(team=team_filter)
+            payload["admin"] = sheets.get_admin_dashboard(team=team_filter, days=days)
         except Exception:
             log.exception("admin dashboard ჩავარდა")
             return jsonify(error="მონაცემების ჩატვირთვა ვერ მოხერხდა"), 500
     if agent:
         try:
-            payload["agent"] = sheets.get_agent_dashboard(agent["agent_id"])
+            payload["agent"] = sheets.get_agent_dashboard(agent["agent_id"], days=days)
         except Exception:
             log.exception("agent dashboard ჩავარდა")
             return jsonify(error="მონაცემების ჩატვირთვა ვერ მოხერხდა"), 500
@@ -308,6 +321,87 @@ def api_swaps_decide():
                 int(a["telegram_chat_id"]),
                 f"სმენის გაცვლის მოთხოვნა ({row.get('swap_date')}) — {label}",
             )
+    return jsonify(ok=True, row=row)
+
+
+@app.get("/api/tasks")
+def api_tasks():
+    """ღია დავალებების/კლიენტების სია გადაბარებისთვის — ადმინს ყველა
+    ეჩვენება, თიმლიდერს მხოლოდ საკუთარი გუნდის აგენტებზე მინიჭებული
+    (კურატორის პრინციპი). აბრუნებს ასევე `agents` — აქტიური აგენტების
+    სიას, ვისზეც დასაშვებია გადაბარება (frontend-ის dropdown-ისთვის)."""
+    agent, admin, err = _authed_agent()
+    if err:
+        return err
+    if not (admin or _is_team_lead(agent)):
+        return jsonify(error="მხოლოდ მენეჯერისთვის/თიმლიდერისთვის"), 403
+
+    all_agents = sheets.get_agents()
+    active_agents = [a for a in all_agents if str(a.get("active", "yes")).strip().lower() != "no"]
+
+    if admin:
+        eligible = active_agents
+        team_ids = None
+    else:
+        my_team = str(agent.get("team", "")).strip()
+        eligible = [a for a in active_agents if str(a.get("team", "")).strip() == my_team]
+        team_ids = {str(a.get("agent_id")) for a in eligible}
+
+    rows = [t for t in sheets.get_tasks() if str(t.get("status")) != "Done"]
+    if team_ids is not None:
+        rows = [t for t in rows if str(t.get("assigned_to")) in team_ids]
+    rows.sort(key=lambda t: str(t.get("created_at", "")), reverse=True)
+
+    agents_out = sorted(
+        [{"agent_id": a.get("agent_id"), "name": a.get("name"), "team": a.get("team", "")} for a in eligible],
+        key=lambda r: r.get("name") or "",
+    )
+    return jsonify(rows=rows[:100], agents=agents_out)
+
+
+@app.post("/api/tasks/reassign")
+def api_tasks_reassign():
+    """დავალების/კლიენტის სხვა აგენტზე გადაბარება — ადმინისთვის
+    ნებისმიერ აქტიურ აგენტზე, თიმლიდერისთვის მხოლოდ საკუთარ გუნდში
+    (კურატორის პრინციპი — ადმინის იგივე ფუნქცია, ახლა თიმლიდერსაც
+    აქვს)."""
+    agent, admin, err = _authed_agent()
+    if err:
+        return err
+    if not (admin or _is_team_lead(agent)):
+        return jsonify(error="მხოლოდ მენეჯერისთვის/თიმლიდერისთვის"), 403
+    body = request.get_json(silent=True) or {}
+    task_id = body.get("task_id")
+    to_agent_id = body.get("to_agent_id")
+    if not task_id or not to_agent_id:
+        return jsonify(error="არასწორი მოთხოვნა"), 400
+
+    to_agent = next((a for a in sheets.get_agents() if str(a.get("agent_id")) == str(to_agent_id)), None)
+    if not to_agent or str(to_agent.get("active", "yes")).strip().lower() == "no":
+        return jsonify(error="ეს აგენტი აღარაა აქტიური"), 400
+    if not admin:
+        my_team = str(agent.get("team", "")).strip()
+        if str(to_agent.get("team", "")).strip() != my_team or not my_team:
+            return jsonify(error="მხოლოდ საკუთარი გუნდის აგენტზე შეგიძლიათ გადაბარება"), 403
+
+    actor = "admin" if admin else str(agent.get("agent_id") or "")
+    row = sheets.reassign_task(task_id, to_agent_id, actor_agent_id=actor)
+    if not row:
+        return jsonify(error="დავალება ვერ მოიძებნა"), 404
+
+    if to_agent.get("telegram_chat_id"):
+        _send_telegram_message(
+            int(to_agent["telegram_chat_id"]),
+            f"📋 გადმოგეცით დავალება: {row.get('title')}"
+            + (f"\nკლიენტი: {row.get('client_phone')}" if row.get("client_phone") else ""),
+        )
+        # უკვე გავაგზავნეთ საკუთარი (უფრო ინფორმატიული) შეტყობინება
+        # პირდაპირ აქედან — ვნიშნავთ, რომ არ გავაორმაგოთ ფონური
+        # check_new_tasks job-ის ზოგადი შეტყობინებით.
+        try:
+            sheets.mark_task_notified(task_id)
+        except Exception:
+            log.exception("mark_task_notified ჩავარდა reassign-ის შემდეგ")
     return jsonify(ok=True, row=row)
 
 

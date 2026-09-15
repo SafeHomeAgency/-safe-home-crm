@@ -1659,7 +1659,14 @@ async def ranking(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_chat.id):
         return
     perf = sheets.get_agent_performance(30)
-    agents = {a["agent_id"]: a["name"] for a in sheets.get_agents()}
+    all_agents = sheets.get_agents()
+    agents = {a["agent_id"]: a["name"] for a in all_agents}
+    # გათავისუფლებული/დეაქტივირებული აგენტები რეიტინგში აღარ ჩანან —
+    # წინააღმდეგ შემთხვევაში უკვე წასული აგენტი კვლავ "ჩნდებოდა" აქ.
+    active_ids = {
+        a["agent_id"] for a in all_agents
+        if str(a.get("active", "yes")).strip().lower() != "no"
+    }
 
     if not perf:
         await update.message.reply_text("ბოლო 30 დღეში მინიჭებული დავალება არცერთ აგენტს არ ჰქონია.")
@@ -1667,11 +1674,17 @@ async def ranking(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     rows = []
     for agent_id, s in perf.items():
+        if agent_id not in active_ids:
+            continue
         name = agents.get(agent_id, agent_id)
         rate = s["rate"]
         rate_str = f"{rate * 100:.0f}%" if rate is not None else "-"
         rows.append((rate if rate is not None else -1, name, s["assigned"], s["on_time"], rate_str))
     rows.sort(key=lambda r: r[0], reverse=True)
+
+    if not rows:
+        await update.message.reply_text("ბოლო 30 დღეში მინიჭებული დავალება არცერთ აქტიურ აგენტს არ ჰქონია.")
+        return
 
     lines = ["🏆 აგენტების რეიტინგი (ბოლო 30 დღე, 24სთ-ში დახურვის %):", ""]
     for _, name, assigned, on_time, rate_str in rows:

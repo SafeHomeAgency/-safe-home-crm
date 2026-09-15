@@ -518,6 +518,24 @@ def get_unnotified_tasks() -> list[dict]:
     ]
 
 
+def reassign_task(task_id: str, new_agent_id: str, actor_agent_id: str = "") -> dict | None:
+    """დავალების/კლიენტის სხვა აგენტზე გადაბარება (ადმინი — ნებისმიერ
+    აგენტზე; თიმლიდერი — მხოლოდ საკუთარ გუნდში, კურატორის პრინციპით).
+    `notified`-ს ისევ "no"-ზე აბრუნებს, რომ არსებული ფონური
+    შეტყობინების job-მა ახალ აგენტს ავტომატურად აცნობოს."""
+    with _lock:
+        ws, cell = _find_task_row(task_id)
+        if not cell:
+            return None
+        ws.update_cell(cell.row, TASKS_HEADERS.index("assigned_to") + 1, new_agent_id)
+        ws.update_cell(cell.row, TASKS_HEADERS.index("assigned_to_name") + 1, agent_name_by_id(new_agent_id))
+        ws.update_cell(cell.row, TASKS_HEADERS.index("updated_at") + 1, _now())
+        ws.update_cell(cell.row, TASKS_HEADERS.index("notified") + 1, "no")
+        row = ws.row_values(cell.row)
+        _invalidate(config.TASKS_SHEET_NAME)
+        return dict(zip(TASKS_HEADERS, row))
+
+
 # ---------- Performance / assignment ----------
 
 def _parse_dt(value: str):
@@ -1186,15 +1204,16 @@ def client_counts(agent_id: str) -> dict:
     return {"today": today_count, "total": len(agent_tasks)}
 
 
-def get_agent_dashboard(agent_id: str) -> dict | None:
+def get_agent_dashboard(agent_id: str, days: int = 30) -> dict | None:
     """ერთი აგენტის სრული დღევანდელი სურათი — Mini App-ის "ჩემი დღე"
-    გვერდისთვის."""
+    გვერდისთვის. `days` განსაზღვრავს "performance"-ის პერიოდს (მაგ. 1
+    დღე / 7 დღე / 30 დღე ფილტრისთვის Mini App-ში)."""
     agent = next((a for a in get_agents() if str(a.get("agent_id")) == str(agent_id)), None)
     if not agent:
         return None
     att = get_today_attendance(agent_id) or {}
     mode = get_today_mode(agent_id)
-    perf = get_agent_performance(30).get(str(agent_id), {"assigned": 0, "on_time": 0, "rate": None})
+    perf = get_agent_performance(days).get(str(agent_id), {"assigned": 0, "on_time": 0, "rate": None})
     warns = get_warnings(agent_id=agent_id, days=config.WARNING_WINDOW_DAYS)
     sched = get_agent_schedule(agent_id) or {}
     tasks = get_tasks_for_agent(agent_id, only_open=True)
@@ -1235,14 +1254,24 @@ def get_agent_dashboard(agent_id: str) -> dict | None:
     }
 
 
-def get_admin_dashboard(team: str | None = None) -> dict:
+def get_admin_dashboard(team: str | None = None, days: int = 30) -> dict:
     """მთელი გუნდის (ან, თუ `team` მითითებულია — მხოლოდ ერთი გუნდის,
     თიმლიდერის ფილტრირებული ხედვისთვის) დღევანდელი სურათი — Mini
-    App-ის მენეჯერის დაშბორდისთვის."""
-    agents = get_agents()
+    App-ის მენეჯერის დაშბორდისთვის.
+
+    `days` განსაზღვრავს "performance"/რეიტინგის პერიოდს (Mini App-ის
+    დღე/კვირა/თვე ფილტრისთვის).
+
+    შენიშვნა: გათავისუფლებული/დეაქტივირებული აგენტები (active=no)
+    განზრახ გამორიცხულია გუნდის სიიდან, რეიტინგიდან და დაკავშირებული
+    ჯამებიდან — რომ აღარ "გამოჩნდნენ" აქტიურ დაშბორდზე მას შემდეგ, რაც
+    უკვე აღარაა გუნდში (ძველი დავალებები/ისტორია მათთვის ცალკე,
+    ცხრილებში, ხელუხლებელი რჩება)."""
+    all_agents = get_agents()
     if team:
-        agents = [a for a in agents if str(a.get("team", "")).strip() == team.strip()]
-    perf = get_agent_performance(30)
+        all_agents = [a for a in all_agents if str(a.get("team", "")).strip() == team.strip()]
+    agents = [a for a in all_agents if str(a.get("active", "yes")).strip().lower() != "no"]
+    perf = get_agent_performance(days)
     today_att = {str(r.get("agent_id")): r for r in get_today_attendance_all()}
 
     team_rows = []
@@ -1278,6 +1307,7 @@ def get_admin_dashboard(team: str | None = None) -> dict:
             "agent_id": aid,
             "name": a.get("name", ""),
             "team": a.get("team", ""),
+            "role": a.get("role", "agent"),
             "active": a.get("active", "yes"),
             "mode": mode,
             "clocked_in": clocked,
@@ -1314,8 +1344,9 @@ def get_admin_dashboard(team: str | None = None) -> dict:
         "pending_dayoffs": pending_dayoffs,
         "recent_warnings": recent_warnings,
         "summary": {
-            "agents_total": len(agents),
-            "active_total": sum(1 for a in agents if str(a.get("active", "yes")).lower() != "no"),
+            "agents_total": len(all_agents),
+            "active_total": len(agents),
+            "inactive_total": len(all_agents) - len(agents),
             "clocked_in": clocked_in_count,
             "total_submitted": total_submitted,
             "total_quota_target": total_quota_target,
