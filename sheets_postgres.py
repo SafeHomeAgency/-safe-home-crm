@@ -191,7 +191,10 @@ def add_agent(name: str, phone: str, team: str = "") -> str:
 
 def set_agent_team(agent_id: str, team: str) -> bool:
     with _lock:
-        return _update_field("agents", "agent_id", agent_id, "team", team)
+        ok = _update_field("agents", "agent_id", agent_id, "team", team)
+    if ok:
+        _audit("set_agent_team", "agent", agent_id, new_value={"team": team})
+    return ok
 
 
 def set_agent_active(agent_id: str, value: str) -> bool:
@@ -884,7 +887,8 @@ def client_counts(agent_id: str) -> dict:
 
 
 def get_agent_dashboard(agent_id: str, days: int = 30) -> dict | None:
-    agent = next((a for a in get_agents() if str(a.get("agent_id")) == str(agent_id)), None)
+    all_agents = get_agents()
+    agent = next((a for a in all_agents if str(a.get("agent_id")) == str(agent_id)), None)
     if not agent:
         return None
     att = get_today_attendance(agent_id) or {}
@@ -895,6 +899,23 @@ def get_agent_dashboard(agent_id: str, days: int = 30) -> dict | None:
     tasks = get_tasks_for_agent(agent_id, only_open=True)
     meetings = get_meetings(agent_id=agent_id)[-5:][::-1]
     clients = client_counts(agent_id)
+
+    # "პირამიდის" სტრუქტურა: ჩვეულებრივმა აგენტმა (არა-თიმლიდერმა) Mini
+    # App-ში უნდა იცოდეს, ვინაა მისი მენეჯერი — ვეძებთ იმავე `team`
+    # მნიშვნელობის მქონე თიმლიდერს.
+    manager_name = None
+    if str(agent.get("role", "")).strip() != "team_lead":
+        team_val = str(agent.get("team", "")).strip()
+        if team_val:
+            lead = next(
+                (a for a in all_agents
+                 if str(a.get("role", "")).strip() == "team_lead"
+                 and str(a.get("team", "")).strip() == team_val),
+                None,
+            )
+            if lead:
+                manager_name = lead.get("name")
+
     return {
         "agent": {
             "agent_id": agent.get("agent_id", ""),
@@ -902,6 +923,7 @@ def get_agent_dashboard(agent_id: str, days: int = 30) -> dict | None:
             "phone": agent.get("phone", ""),
             "team": agent.get("team", ""),
             "active": agent.get("active", "yes"),
+            "manager_name": manager_name,
         },
         "today": {
             "mode": mode,

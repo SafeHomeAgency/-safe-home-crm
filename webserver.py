@@ -324,6 +324,136 @@ def api_swaps_decide():
     return jsonify(ok=True, row=row)
 
 
+@app.get("/api/agents")
+def api_agents():
+    """აგენტების/მენეჯერების მართვის ცხრილი (მხოლოდ ადმინისთვის —
+    "დირექტორის" დონის მოქმედება, არა თიმლიდერისთვის). თითოეულ აგენტთან
+    აბრუნებს მის მიმდინარე "მენეჯერს" (თუ არის), და `managers` — ყველა
+    არსებული თიმლიდერის სია, ახალი დანიშვნის dropdown-ისთვის."""
+    _, admin, err = _authed_agent()
+    if err:
+        return err
+    if not admin:
+        return jsonify(error="მხოლოდ ადმინისთვის"), 403
+
+    all_agents = sheets.get_agents()
+    leads_by_team = {}
+    for a in all_agents:
+        if str(a.get("role", "")).strip() == "team_lead":
+            key = str(a.get("team", "")).strip()
+            if key:
+                leads_by_team[key] = a
+
+    rows = []
+    for a in all_agents:
+        team_val = str(a.get("team", "")).strip()
+        is_lead = str(a.get("role", "")).strip() == "team_lead"
+        manager = None
+        if not is_lead and team_val and team_val in leads_by_team:
+            lead = leads_by_team[team_val]
+            manager = {"agent_id": lead.get("agent_id"), "name": lead.get("name")}
+        rows.append({
+            "agent_id": a.get("agent_id"),
+            "name": a.get("name"),
+            "phone": a.get("phone"),
+            "active": a.get("active", "yes"),
+            "role": a.get("role", "agent"),
+            "team": team_val,
+            "registered": bool(a.get("telegram_chat_id")),
+            "manager": manager,
+        })
+    rows.sort(key=lambda r: r.get("name") or "")
+    managers_out = [
+        {"agent_id": a.get("agent_id"), "name": a.get("name"), "team": str(a.get("team", "")).strip()}
+        for a in all_agents if str(a.get("role", "")).strip() == "team_lead"
+    ]
+    return jsonify(rows=rows, managers=managers_out)
+
+
+@app.post("/api/agents/assign")
+def api_agents_assign():
+    """აგენტის დანიშვნა: დამოუკიდებელი / თიმლიდერი (საკუთარი გუნდი) /
+    კონკრეტული თიმლიდერის გუნდის წევრი — "პირამიდის" სტრუქტურის
+    აწყობა Mini App-იდანვე, ცხრილის ხელით რედაქტირების ან agent_id-ის
+    ზეპირად აკრეფის გარეშე. მხოლოდ ადმინისთვის."""
+    _, admin, err = _authed_agent()
+    if err:
+        return err
+    if not admin:
+        return jsonify(error="მხოლოდ ადმინისთვის"), 403
+    body = request.get_json(silent=True) or {}
+    agent_id = body.get("agent_id")
+    mode = body.get("mode")
+    if not agent_id or mode not in ("independent", "lead", "member"):
+        return jsonify(error="არასწორი მოთხოვნა"), 400
+
+    all_agents = sheets.get_agents()
+    target = next((a for a in all_agents if str(a.get("agent_id")) == str(agent_id)), None)
+    if not target:
+        return jsonify(error="აგენტი ვერ მოიძებნა"), 404
+
+    if mode == "independent":
+        sheets.set_agent_role(agent_id, "agent")
+        sheets.set_agent_team(agent_id, "")
+        return jsonify(ok=True)
+
+    if mode == "lead":
+        sheets.set_agent_role(agent_id, "team_lead")
+        if not str(target.get("team", "")).strip():
+            sheets.set_agent_team(agent_id, target.get("name") or agent_id)
+        return jsonify(ok=True)
+
+    # mode == "member" — კონკრეტული თიმლიდერის გუნდში ჩართვა
+    manager_id = body.get("manager_id")
+    manager = next((a for a in all_agents if str(a.get("agent_id")) == str(manager_id)), None)
+    if not manager or str(manager.get("role", "")).strip() != "team_lead":
+        return jsonify(error="მენეჯერი ვერ მოიძებნა"), 400
+    if str(agent_id) == str(manager_id):
+        return jsonify(error="საკუთარ თავზე ვერ დანიშნავთ"), 400
+
+    team_key = str(manager.get("team", "")).strip()
+    if not team_key:
+        team_key = manager.get("name") or manager_id
+        sheets.set_agent_team(manager_id, team_key)
+
+    is_new_member = str(target.get("team", "")).strip() != team_key or str(target.get("role", "")).strip() == "team_lead"
+    sheets.set_agent_role(agent_id, "agent")
+    sheets.set_agent_team(agent_id, team_key)
+
+    if is_new_member and manager.get("telegram_chat_id"):
+        _send_telegram_message(
+            int(manager["telegram_chat_id"]),
+            f"👥 თქვენს გუნდს დაემატა ახალი წევრი: {target.get('name')}",
+        )
+    if target.get("telegram_chat_id"):
+        _send_telegram_message(
+            int(target["telegram_chat_id"]),
+            f"ℹ️ თქვენი მენეჯერია: {manager.get('name')}",
+        )
+    return jsonify(ok=True)
+
+
+@app.post("/api/agents/active")
+def api_agents_active():
+    """აგენტის გააქტიურება/გამორთვა Mini App-იდან (იგივე, რაც ბოტის
+    /reactivate-ს შეეძლო — ახლა ცხრილიდანვე, agent_id-ის ძებნის
+    გარეშე). მხოლოდ ადმინისთვის."""
+    _, admin, err = _authed_agent()
+    if err:
+        return err
+    if not admin:
+        return jsonify(error="მხოლოდ ადმინისთვის"), 403
+    body = request.get_json(silent=True) or {}
+    agent_id = body.get("agent_id")
+    active = body.get("active")
+    if not agent_id or active not in ("yes", "no"):
+        return jsonify(error="არასწორი მოთხოვნა"), 400
+    ok = sheets.set_agent_active(agent_id, active)
+    if not ok:
+        return jsonify(error="აგენტი ვერ მოიძებნა"), 404
+    return jsonify(ok=True)
+
+
 @app.get("/api/tasks")
 def api_tasks():
     """ღია დავალებების/კლიენტების სია გადაბარებისთვის — ადმინს ყველა

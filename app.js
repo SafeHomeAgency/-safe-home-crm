@@ -50,6 +50,7 @@ const ADMIN_TABS = [
   { id: "overview", label: "მიმოხილვა", icon: "📊" },
   { id: "team", label: "გუნდი", icon: "🧑‍🤝‍🧑" },
   { id: "ranking", label: "რეიტინგი", icon: "🏆" },
+  { id: "agentsmgmt", label: "აგენტები", icon: "🗂️", lazy: true, adminOnly: true },
   { id: "admintasks", label: "დავალებები", icon: "📄", lazy: true },
   { id: "dayoffs", label: "შვებულებები", icon: "🗓️" },
   { id: "warnings", label: "გაფრთხილებები", icon: "⚠️" },
@@ -237,6 +238,7 @@ function renderToday(d) {
         <div class="mode">${MODE_LABELS[t.mode] || t.mode}</div>
         <div class="meta">${hasQuota ? `${submitted} / ${quota} განცხადება` : (t.clock_in ? `დაწყებულია ${esc(t.clock_in).split(" ")[1] || ""}` : "დღევანდელი გეგმა")}</div>
         <div style="margin-top:6px">${statusBadge(t.mode, clockedIn, t.clock_out)}</div>
+        ${d.agent && d.agent.manager_name ? `<div class="meta" style="margin-top:4px">👔 მენეჯერი: ${esc(d.agent.manager_name)}</div>` : ""}
       </div>
     </div>
     ${breakdown}
@@ -703,6 +705,89 @@ function renderReports(rows) {
   </div>`;
 }
 
+/* ------------------------------------------ აგენტების/მენეჯერების მართვა
+   ("პირამიდის" აწყობა) — მხოლოდ ადმინისთვის (დირექტორის დონის
+   მოქმედება). თითო აგენტს ერთი dropdown-ით ენიშნება: დამოუკიდებელი /
+   თიმლიდერი (საკუთარი გუნდი) / კონკრეტული თიმლიდერის გუნდის წევრი.
+   მენეჯერს ავტომატურად მიდის შეტყობინება ახალი წევრის შესახებ, და
+   აგენტსაც — თავისი მენეჯერის შესახებ. */
+function renderAgentsMgmt(payload) {
+  const rows = (payload && payload.rows) || [];
+  const managers = (payload && payload.managers) || [];
+  if (!rows.length) return `<div class="card"><div class="empty">აგენტი ჯერ არ დამატებულა. /addagent</div></div>`;
+  return `<div class="card">
+    <h2>🗂️ აგენტების მართვა <span class="cnt">${rows.length}</span></h2>
+    ${rows.map((r) => {
+      const sel = r.role === "team_lead" ? "lead" : (r.manager ? "member:" + r.manager.agent_id : "independent");
+      const roleBadge = r.role === "team_lead"
+        ? `<span class="badge amber">👑 თიმლიდერი</span>`
+        : (r.manager ? `<span class="badge gray">აგენტი</span>` : `<span class="badge gray">დამოუკიდებელი</span>`);
+      const options = [
+        `<option value="independent" ${sel === "independent" ? "selected" : ""}>დამოუკიდებელი აგენტი</option>`,
+        `<option value="lead" ${sel === "lead" ? "selected" : ""}>თიმლიდერი (საკუთარი გუნდი)</option>`,
+        ...managers
+          .filter((m) => String(m.agent_id) !== String(r.agent_id))
+          .map((m) => `<option value="member:${esc(m.agent_id)}" ${sel === "member:" + m.agent_id ? "selected" : ""}>${esc(m.name)}-ის გუნდის წევრი</option>`),
+      ].join("");
+      return `
+      <div class="list-row" style="align-items:flex-start">
+        <div class="avatar">${initials(r.name)}</div>
+        <div class="main">
+          <div class="title">${esc(r.name)} ${r.active === "no" ? "🚫" : ""} ${roleBadge}</div>
+          <div class="sub">${esc(r.phone || "")} · ${r.registered ? "✅ დარეგისტრირებული" : "⏳ ელოდება რეგისტრაციას"}</div>
+          ${r.manager ? `<div class="sub">მენეჯერი: ${esc(r.manager.name)}</div>` : ""}
+          <div class="qa-compose" style="margin-top:8px">
+            <select data-assign-select="${esc(r.agent_id)}">${options}</select>
+            <button class="btn" data-assign-btn="${esc(r.agent_id)}" style="padding:9px 12px">შენახვა</button>
+          </div>
+          <div class="actions" style="margin-top:8px">
+            ${r.active === "no"
+              ? `<button class="btn secondary" data-active-btn="${esc(r.agent_id)}" data-active-val="yes" style="padding:9px 12px">✅ გააქტიურება</button>`
+              : `<button class="btn danger" data-active-btn="${esc(r.agent_id)}" data-active-val="no" style="padding:9px 12px">🚫 გათავისუფლება</button>`}
+          </div>
+        </div>
+      </div>`;
+    }).join("")}
+  </div>`;
+}
+
+function bindAgentsMgmtActions() {
+  document.querySelectorAll("[data-assign-btn]").forEach((btn) => {
+    btn.onclick = async () => {
+      const agentId = btn.dataset.assignBtn;
+      const sel = document.querySelector(`[data-assign-select="${CSS.escape(agentId)}"]`);
+      const val = sel && sel.value;
+      if (!val) return;
+      const body = { agent_id: agentId };
+      if (val === "independent") body.mode = "independent";
+      else if (val === "lead") body.mode = "lead";
+      else { body.mode = "member"; body.manager_id = val.split(":")[1]; }
+      btn.disabled = true;
+      try {
+        await api("/api/agents/assign", { method: "POST", body: JSON.stringify(body) });
+        tg && tg.HapticFeedback && tg.HapticFeedback.notificationOccurred("success");
+        toast("განახლდა ✅");
+        delete lazyCache.agentsmgmt;
+        await renderContent();
+      } catch (e) { toast(e.message); btn.disabled = false; }
+    };
+  });
+  document.querySelectorAll("[data-active-btn]").forEach((btn) => {
+    btn.onclick = async () => {
+      btn.disabled = true;
+      try {
+        await api("/api/agents/active", {
+          method: "POST",
+          body: JSON.stringify({ agent_id: btn.dataset.activeBtn, active: btn.dataset.activeVal }),
+        });
+        toast(btn.dataset.activeVal === "yes" ? "გააქტიურდა ✅" : "გათავისუფლდა");
+        delete lazyCache.agentsmgmt;
+        await renderContent();
+      } catch (e) { toast(e.message); btn.disabled = false; }
+    };
+  });
+}
+
 /* ------------------------------------------ დავალების/კლიენტის გადაბარება
    (ადმინი — ნებისმიერ აგენტზე, თიმლიდერი — მხოლოდ საკუთარ გუნდში,
    კურატორის პრინციპით — ადრე ეს მხოლოდ ადმინს შეეძლო ცხრილის ხელით
@@ -919,10 +1004,19 @@ const LAZY_ENDPOINTS = {
   reports: "/api/reports",
   questions: "/api/questions",
   admintasks: "/api/tasks",
+  agentsmgmt: "/api/agents",
 };
 
+/* `adminOnly` ტაბები (მაგ. აგენტების/მენეჯერების მართვა) დირექტორის
+   დონის მოქმედებაა — თიმლიდერს (რომელიც ტექნიკურად იმავე "admin"
+   role-ზეა Mini App-ში, საკუთარი გუნდის ფილტრირებული ხედვით) არ
+   უჩნდება, რომ არ დაერიოს პირამიდის სტრუქტურაში. */
 function tabsFor(role) {
-  return role === "admin" ? ADMIN_TABS : AGENT_TABS;
+  const tabs = role === "admin" ? ADMIN_TABS : AGENT_TABS;
+  if (role === "admin" && state.data && state.data.is_team_lead) {
+    return tabs.filter((t) => !t.adminOnly);
+  }
+  return tabs;
 }
 
 function renderTabbar() {
@@ -951,7 +1045,7 @@ async function renderContent() {
         content.innerHTML = `<div class="card"><div class="empty">იტვირთება…</div></div>`;
         try {
           const resp = await api(LAZY_ENDPOINTS[tab]);
-          lazyCache[tab] = tab === "admintasks" ? resp : (resp.rows || []);
+          lazyCache[tab] = (tab === "admintasks" || tab === "agentsmgmt") ? resp : (resp.rows || []);
         } catch (e) {
           content.innerHTML = `<div class="card"><div class="empty">⚠️ ${esc(e.message)}</div></div>`;
           return;
@@ -963,6 +1057,7 @@ async function renderContent() {
       else if (tab === "swaps") { content.innerHTML = renderSwaps(rows); bindSwapsActions(); }
       else if (tab === "questions") { content.innerHTML = renderQuestions(rows, state.role); bindQuestionsActions(state.role); }
       else if (tab === "admintasks") { content.innerHTML = renderAdminTasks(rows); bindAdminTasksActions(); }
+      else if (tab === "agentsmgmt") { content.innerHTML = renderAgentsMgmt(rows); bindAgentsMgmtActions(); }
       return;
     }
 

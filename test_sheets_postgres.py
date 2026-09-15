@@ -367,6 +367,24 @@ def test_reassign_task_moves_to_new_agent_and_resets_notified():
     check(sp.reassign_task("არარსებული_id", b) is None, "არარსებულ task_id-ზე None უბრუნდება")
 
 
+def test_agent_dashboard_shows_manager_name():
+    setup()
+    lead = sp.add_agent("მენეჯერი მენა", "555018", team="")
+    sp.set_agent_role(lead, "team_lead")
+    sp.set_agent_team(lead, "მენეჯერი მენა")  # ისე, როგორც /api/agents/assign "lead"-ზე აკეთებს
+    member = sp.add_agent("წევრი", "555019", team="მენეჯერი მენა")
+    independent = sp.add_agent("დამოუკიდებელი", "555020")
+
+    d_member = sp.get_agent_dashboard(member)
+    check(d_member["agent"]["manager_name"] == "მენეჯერი მენა", "გუნდის წევრს უჩვენებს სწორ მენეჯერს")
+
+    d_independent = sp.get_agent_dashboard(independent)
+    check(d_independent["agent"]["manager_name"] is None, "დამოუკიდებელ აგენტს მენეჯერი არა აქვს")
+
+    d_lead = sp.get_agent_dashboard(lead)
+    check(d_lead["agent"]["manager_name"] is None, "თიმლიდერს საკუთარი თავი მენეჯერად არ ეწერება")
+
+
 def test_admin_dashboard_excludes_deactivated_agents():
     setup()
     active = sp.add_agent("აქტიური", "555016", team="TeamY")
