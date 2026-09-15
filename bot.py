@@ -309,7 +309,13 @@ async def agents_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lines = []
     for a in agents:
         status = "✅ დარეგისტრირებული" if a.get("telegram_chat_id") else "⏳ ელოდება რეგისტრაციას"
-        lines.append(f"• {a['name']} ({a['phone']}) — {status}")
+        role = " · 👑 თიმლიდერი" if str(a.get("role", "")).strip() == "team_lead" else ""
+        inactive = " · 🚫 გათავისუფლებული" if str(a.get("active", "yes")).strip().lower() == "no" else ""
+        team = f" · გუნდი: {a.get('team')}" if a.get("team") else ""
+        lines.append(
+            f"• {a['name']} ({a['phone']}) — {status}{team}{role}{inactive}\n"
+            f"   id: {a.get('agent_id')}"
+        )
     await update.message.reply_text("\n".join(lines))
 
 
