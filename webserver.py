@@ -132,6 +132,27 @@ def api_me():
     )
 
 
+@app.get("/api/regulations")
+def api_regulations():
+    """ინსტრუქცია/წესები ტაბისთვის — ცოცხალი, კონფიგურირებადი ლიმიტები
+    (და არა ტექსტში ხელით ჩაწერილი რიცხვები), რომ თუ admin მომავალში
+    environment-ცვლადს შეცვლის, Mini App-ის ინსტრუქციაც ავტომატურად
+    განახლდეს."""
+    _, _, err = _authed_agent()
+    if err:
+        return err
+    return jsonify(limits={
+        "online_daily_quota": config.ONLINE_DAILY_QUOTA,
+        "office_daily_quota": config.OFFICE_DAILY_QUOTA,
+        "dayoff_monthly_limit": config.DAYOFF_MONTHLY_LIMIT,
+        "shift_swap_monthly_limit": config.SHIFT_SWAP_MONTHLY_LIMIT,
+        "warning_limit": config.WARNING_LIMIT,
+        "warning_window_days": config.WARNING_WINDOW_DAYS,
+        "report_deadline_hour": config.REPORT_DEADLINE_HOUR,
+        "attendance_grace_minutes": config.ATTENDANCE_GRACE_MINUTES,
+    })
+
+
 @app.get("/api/dashboard")
 def api_dashboard():
     """`?period=day|week|month` — შედეგების/რეიტინგის ფანჯარა (ნაგულის-
@@ -305,7 +326,7 @@ def api_reports():
         rows = [r for r in rows if _within(r)]
 
     rows = sorted(rows, key=lambda r: str(r.get("created_at", "")), reverse=True)
-    teams = sorted({str(a.get("team", "")).strip() for a in sheets.get_agents() if a.get("team")}) if admin else []
+    teams = sheets.get_team_directory() if admin else []
     agents_out = sorted(
         [
             {"agent_id": a.get("agent_id"), "name": a.get("name")}
@@ -319,19 +340,26 @@ def api_reports():
 
 @app.get("/api/swaps")
 def api_swaps():
+    """მენეჯერისთვის დასადასტურებელი (`pending`) + სრული ისტორია
+    (`history` — მოლოდინში კოლეგის პასუხის, დამტკიცებული, უარყოფილი),
+    რომ ყოველთვის ჩანდეს ვინ მოითხოვა, ვისთან გაცვალა და კონკრეტულად
+    რომელი სმენა/თარიღი."""
     agent, admin, err = _authed_agent()
     if err:
         return err
     if not (admin or _is_team_lead(agent)):
         return jsonify(error="მხოლოდ მენეჯერისთვის/თიმლიდერისთვის"), 403
-    rows = sheets.get_shift_swaps(status="pending_manager")
+    rows = sheets.get_shift_swaps()
     if not admin and agent:
         team_ids = {
             str(a.get("agent_id")) for a in sheets.get_agents()
             if str(a.get("team", "")).strip() == str(agent.get("team", "")).strip()
         }
         rows = [r for r in rows if str(r.get("agent_id")) in team_ids or str(r.get("target_agent_id")) in team_ids]
-    return jsonify(rows=rows)
+    pending = [r for r in rows if r.get("status") == "pending_manager"]
+    history = [r for r in rows if r.get("status") != "pending_manager"]
+    history.sort(key=lambda r: str(r.get("decided_at") or r.get("created_at", "")), reverse=True)
+    return jsonify(pending=pending, history=history)
 
 
 @app.post("/api/swaps/decide")
@@ -408,7 +436,35 @@ def api_agents():
         {"agent_id": a.get("agent_id"), "name": a.get("name"), "team": str(a.get("team", "")).strip()}
         for a in all_agents if str(a.get("role", "")).strip() == "team_lead"
     ]
-    return jsonify(rows=rows, managers=managers_out)
+    # თუ ორ სხვადასხვა თიმლიდერს ერთი და იგივე გუნდის კოდი ერგო (ძველი
+    # მონაცემებიდან ან ხელით /setteam-ით) — ცხადად ვაფრთხილებთ ადმინს,
+    # რომ არ მოხდეს გუნდების ჩუმად არევა.
+    duplicate_teams = sheets.find_duplicate_team_keys()
+    return jsonify(rows=rows, managers=managers_out, duplicate_teams=duplicate_teams)
+
+
+@app.post("/api/agents/rekey_team")
+def api_agents_rekey_team():
+    """კონკრეტული თიმლიდერის გუნდის კოდის განახლება მისივე agent_id-ზე
+    (გარანტირებულად უნიკალური) — გამოსასწორებლად, თუ ორ თიმლიდერს
+    ერთი და იგივე გუნდის კოდი ერგო შემთხვევით. მხოლოდ თვითონ
+    თიმლიდერის საკუთარ ჩანაწერს ცვლის — მისი გუნდის წევრები არ
+    იცვლება ავტომატურად (ისინი admin-მა ხელახლა უნდა შეარჩიოს
+    "აგენტების მართვა" ტაბიდან, რომ სწორად მიებას ახალ კოდს)."""
+    _, admin, err = _authed_agent()
+    if err:
+        return err
+    if not admin:
+        return jsonify(error="მხოლოდ ადმინისთვის"), 403
+    body = request.get_json(silent=True) or {}
+    agent_id = body.get("agent_id")
+    if not agent_id:
+        return jsonify(error="არასწორი მოთხოვნა"), 400
+    target = next((a for a in sheets.get_agents() if str(a.get("agent_id")) == str(agent_id)), None)
+    if not target or str(target.get("role", "")).strip() != "team_lead":
+        return jsonify(error="მხოლოდ თიმლიდერისთვის"), 400
+    sheets.set_agent_team(agent_id, agent_id)
+    return jsonify(ok=True)
 
 
 @app.post("/api/agents/assign")
@@ -439,9 +495,20 @@ def api_agents_assign():
         return jsonify(ok=True)
 
     if mode == "lead":
+        was_already_lead = str(target.get("role", "")).strip() == "team_lead"
         sheets.set_agent_role(agent_id, "team_lead")
-        if not str(target.get("team", "")).strip():
-            sheets.set_agent_team(agent_id, target.get("name") or agent_id)
+        # მნიშვნელოვანი: ახლად დანიშნულ თიმლიდერს ყოველთვის ეძლევა
+        # ახალი, გარანტირებულად უნიკალური გუნდის კოდი (თავისივე
+        # agent_id) — და არა მხოლოდ მაშინ, როცა `team` ველი ცარიელია.
+        # თუ ეს პირი ადრე სხვის გუნდში იყო წევრი, მისი ძველი `team`
+        # მნიშვნელობა კვლავ იმ ყოფილი მენეჯერისას ემთხვევა და, თუ
+        # უცვლელი დარჩება, ორივე ("ძველი" და "ახალი" თიმლიდერი) ერთსა
+        # და იმავე გუნდის კოდს გაინაწილებენ — რაც სწორედ არასწორი
+        # მენეჯერის ჩვენების მიზეზი იყო. უკვე არსებულ თიმლიდერს კი (თუ
+        # ეს ღილაკი უბრალოდ ხელახლა დაეჭირა) მისი უკვე სწორი გუნდის
+        # კოდი უცვლელი რჩება.
+        if not was_already_lead:
+            sheets.set_agent_team(agent_id, agent_id)
         return jsonify(ok=True)
 
     # mode == "member" — კონკრეტული თიმლიდერის გუნდში ჩართვა
@@ -561,7 +628,8 @@ def api_agent_requests_list():
     status = request.args.get("status") or None
     team = None if admin else str(agent.get("team", "")).strip()
     rows = sheets.get_agent_requests(status=status, team=team)
-    return jsonify(rows=rows)
+    teams = sheets.get_team_directory() if admin else []
+    return jsonify(rows=rows, teams=teams)
 
 
 @app.post("/api/agent-requests/decide")
@@ -762,7 +830,7 @@ def api_task_history():
             if not target or str(target.get("team", "")).strip() != team:
                 return jsonify(error="მხოლოდ საკუთარი გუნდის აგენტის ისტორია"), 403
         rows = sheets.get_task_history(days=days, agent_id=agent_id, team=None if agent_id else team)
-        teams = sorted({str(a.get("team", "")).strip() for a in sheets.get_agents() if a.get("team")}) if admin else []
+        teams = sheets.get_team_directory() if admin else []
         agents_out = sorted(
             [
                 {"agent_id": a.get("agent_id"), "name": a.get("name")}

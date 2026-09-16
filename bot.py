@@ -1877,7 +1877,11 @@ async def send_team_digests(context: ContextTypes.DEFAULT_TYPE):
         team = str(lead.get("team", "")).strip()
         try:
             team_digest = sheets.get_daily_digest(team=team)
-            text = _build_team_digest_text(team_digest, f"📋 დღის შეჯამება — გუნდი „{team}“")
+            # თიმლიდერის სახელით ვნიშნავთ (და არა ნედლი `team` კოდით) —
+            # რომ ცალსახად ჩანდეს, კონკრეტულად რომელი მენეჯერის გუნდზეა
+            # საუბარი, თუნდაც ორ სხვადასხვა თიმლიდერს `team` კოდი
+            # შემთხვევით ერთნაირი ჰქონდეს.
+            text = _build_team_digest_text(team_digest, f"📋 დღის შეჯამება — {lead.get('name', '')}-ის გუნდი")
             await _send_long_message(context, int(lead["telegram_chat_id"]), text)
         except Exception:
             log.exception("დღის ამბები ვერ გაეგზავნა team_lead=%s", lead.get("agent_id"))

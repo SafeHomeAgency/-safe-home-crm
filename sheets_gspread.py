@@ -449,6 +449,65 @@ def find_agent_by_internal_number(number: str) -> dict | None:
     return None
 
 
+def get_team_directory() -> list[dict]:
+    """გუნდების საცნობარო სია — თითო აქტიურ თიმლიდერზე ერთი ჩანაწერი:
+    {"team": <შიდა გუნდის კოდი>, "name": <თიმლიდერის სახელი>,
+    "agent_id": <თიმლიდერის id>, "member_count": ...}. ეს არის
+    ერთადერთი სწორი წყარო იმისთვის, თუ როგორ უნდა გამოჩნდეს "გუნდი"
+    ნებისმიერ ჩამონათვალში/ფილტრში (რეპორტები, ისტორია, დღის ამბები) —
+    ნედლი `team` ველის მაგივრად ყოველთვის თიმლიდერის სახელი (მაგ.
+    "გაბოს გუნდი"), რომ ორი განსხვავებული თიმლიდერის შემთხვევითი
+    ერთნაირი `team` მნიშვნელობა არასდროს აირიოს ერთმანეთში ჩუმად."""
+    agents = get_agents()
+    leads = [
+        a for a in agents
+        if str(a.get("role", "")).strip() == "team_lead"
+        and str(a.get("active", "yes")).strip().lower() != "no"
+        and str(a.get("team", "")).strip()
+    ]
+    out = []
+    for lead in leads:
+        team_key = str(lead.get("team", "")).strip()
+        member_count = sum(
+            1 for a in agents
+            if str(a.get("team", "")).strip() == team_key
+            and str(a.get("agent_id")) != str(lead.get("agent_id"))
+            and str(a.get("active", "yes")).strip().lower() != "no"
+        )
+        out.append({
+            "team": team_key,
+            "name": lead.get("name", ""),
+            "agent_id": lead.get("agent_id"),
+            "member_count": member_count,
+        })
+    out.sort(key=lambda t: t["name"] or "")
+    return out
+
+
+def find_duplicate_team_keys() -> list[dict]:
+    """უსაფრთხოების საკონტროლო შემოწმება: თუ ორ სხვადასხვა (აქტიურ)
+    თიმლიდერს ერთი და იგივე `team` კოდი ერგო (ძველი მონაცემებიდან ან
+    ხელით /setteam-ით) — ისინი Mini App-ში ერთმანეთში აირევა (ერთის
+    გუნდის წევრი მეორის გუნდში გამოჩნდება). აბრუნებს ასეთ კოლიზიებს,
+    რომ ადმინმა "აგენტების მართვა" ტაბიდან ერთი ღილაკით გაასწოროს."""
+    agents = get_agents()
+    leads = [
+        a for a in agents
+        if str(a.get("role", "")).strip() == "team_lead"
+        and str(a.get("active", "yes")).strip().lower() != "no"
+    ]
+    by_key: dict[str, list[dict]] = {}
+    for lead in leads:
+        key = str(lead.get("team", "")).strip()
+        if not key:
+            continue
+        by_key.setdefault(key, []).append(lead)
+    return [
+        {"team": key, "leads": [{"agent_id": l.get("agent_id"), "name": l.get("name")} for l in ls]}
+        for key, ls in by_key.items() if len(ls) > 1
+    ]
+
+
 def swap_internal_numbers(agent_id_a: str, agent_id_b: str) -> bool:
     """ორი აგენტის შიდა ნომრების ერთმანეთში გაცვლა."""
     with _lock:
@@ -1601,7 +1660,7 @@ def get_daily_digest(team: str | None = None) -> dict:
                 f"({config.WARNING_WINDOW_DAYS} დღეში)"
             )
 
-    teams = sorted({str(a.get("team", "")).strip() for a in all_agents if a.get("team")}) if team is None else []
+    teams = get_team_directory() if team is None else []
 
     return {
         "date": today,

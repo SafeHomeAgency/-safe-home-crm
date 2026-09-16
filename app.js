@@ -51,7 +51,7 @@ const AGENT_TABS = [
   { id: "meetings", label: "შეხვედრები", icon: "🤝", lazy: true },
   { id: "exclusives", label: "ექსკლუზივები", icon: "🏘️", lazy: true },
   { id: "questions", label: "კითხვები", icon: "💬", lazy: true },
-  { id: "regulations", label: "ინსტრუქცია", icon: "📘" },
+  { id: "regulations", label: "ინსტრუქცია", icon: "📘", lazy: true },
 ];
 const ADMIN_TABS = [
   { id: "overview", label: "მიმოხილვა", icon: "📊" },
@@ -69,7 +69,7 @@ const ADMIN_TABS = [
   { id: "reports", label: "რეპორტები", icon: "📝", lazy: true },
   { id: "exclusives", label: "ექსკლუზივები", icon: "🏘️", lazy: true },
   { id: "questions", label: "კითხვები", icon: "💬", lazy: true },
-  { id: "regulations", label: "ინსტრუქცია/წესები", icon: "📘" },
+  { id: "regulations", label: "ინსტრუქცია/წესები", icon: "📘", lazy: true },
 ];
 
 const PERIODS = [
@@ -310,10 +310,22 @@ function renderToday(d) {
 }
 
 const TASK_FIELD_LABELS = [
-  ["title", "სათაური"], ["description", "აღწერა"], ["priority", "პრიორიტეტი"],
-  ["status", "სტატუსი"], ["due_date", "ვადა"], ["client_phone", "კლიენტის ტელეფონი"],
+  ["title", "სათაური"], ["description", "აღწერა"], ["assigned_to_name", "შემსრულებელი"],
+  ["priority", "პრიორიტეტი"], ["status", "სტატუსი"], ["lead_type", "ტიპი"],
+  ["due_date", "ვადა"], ["client_phone", "კლიენტის ტელეფონი"],
   ["deal_type", "გარიგება"], ["listing_id", "ლისტინგის ID"], ["viewing_time", "ნახვის დრო"],
-  ["created_at", "შექმნის თარიღი"],
+  ["created_at", "შექმნის თარიღი"], ["updated_at", "ბოლო განახლება"],
+];
+
+const MEETING_FIELD_LABELS = [
+  ["agent_name", "აგენტი"], ["address", "მისამართი"], ["district", "რაიონი"],
+  ["owner_phone", "მეპატრონის ტელეფონი"], ["client_phone", "კლიენტის ტელეფონი"],
+  ["condition", "მდგომარეობა"], ["price", "ფასი"], ["percent", "საკომისიო %"],
+  ["meeting_date", "შეხვედრის თარიღი"], ["time", "დრო"],
+  ["myhome_link", "myhome ბმული"], ["myhome_id", "myhome ID"],
+  ["ssge_link", "ss.ge ბმული"], ["ssge_id", "ss.ge ID"],
+  ["internal_number", "შიდა ნომერი"], ["agent_phone", "აგენტის ტელეფონი"],
+  ["team_leader", "თიმლიდერი"], ["timestamp", "დაფიქსირების დრო"],
 ];
 
 function renderTasks(d) {
@@ -491,18 +503,25 @@ function renderTeam(d) {
     if (!groups.has(key)) groups.set(key, []);
     groups.get(key).push({ t, i });
   });
-  const groupNames = Array.from(groups.keys()).sort((a, b) => a.localeCompare(b));
+  // ჯგუფის სახელად ყოველთვის თიმლიდერის სახელი ჩანს (არა ნედლი "team"
+  // კოდი, რომელიც შეიძლება წაუკითხავი ან, კოლიზიის შემთხვევაში,
+  // შეცდომაში შემყვანი იყოს) — გამონაკლისი მხოლოდ "დაუნაწილებელი"
+  // ჯგუფია, სადაც თიმლიდერი საერთოდ არ ფიგურირებს.
+  const groupEntries = Array.from(groups.entries()).map(([key, members]) => {
+    const lead = members.find((m) => m.t.role === "team_lead");
+    const label = key === "დაუნაწილებელი" ? key : (lead ? `${lead.t.name}-ის გუნდი` : key);
+    return { key, label, members };
+  }).sort((a, b) => a.label.localeCompare(b.label));
 
-  const groupsHtml = groupNames.map((gname) => {
-    const members = groups.get(gname);
+  const groupsHtml = groupEntries.map(({ label, members }) => {
     const rates = members.map((m) => m.t.rate).filter((r) => r != null);
     const avgRate = rates.length ? Math.round((rates.reduce((a, b) => a + b, 0) / rates.length) * 100) : null;
     const lead = members.find((m) => m.t.role === "team_lead");
     return `
       <div class="team-group">
         <div class="team-group-head">
-          <span class="tg-name">🧑‍💼 ${esc(gname)}</span>
-          <span class="tg-meta">${members.length} წევრი${lead ? " · 👑 " + esc(lead.t.name) : ""}${avgRate != null ? " · საშ. " + avgRate + "%" : ""}</span>
+          <span class="tg-name">🧑‍💼 ${esc(label)}</span>
+          <span class="tg-meta">${members.length} წევრი${avgRate != null ? " · საშ. " + avgRate + "%" : ""}</span>
         </div>
         ${members.map(({ t, i }) => `
           <div class="list-row clickable" data-team-idx="${i}" ${t.late ? `style="border-left:3px solid var(--red)"` : ""}>
@@ -754,7 +773,7 @@ function renderReports(payload) {
     <div class="qa-compose" style="margin-bottom:10px">
       ${isAdmin ? `<select id="repTeamSelect">
         <option value="">ყველა გუნდი</option>
-        ${teams.map((t) => `<option value="${esc(t)}" ${state.reportsTeam === t ? "selected" : ""}>${esc(t)}</option>`).join("")}
+        ${teams.map((t) => `<option value="${esc(t.team)}" ${state.reportsTeam === t.team ? "selected" : ""}>${esc(t.name)}-ის გუნდი (${t.member_count})</option>`).join("")}
       </select>` : ""}
       <select id="repAgentSelect">
         <option value="">ყველა აგენტი</option>
@@ -794,8 +813,18 @@ function renderReports(payload) {
 function renderAgentsMgmt(payload) {
   const rows = (payload && payload.rows) || [];
   const managers = (payload && payload.managers) || [];
+  const duplicateTeams = (payload && payload.duplicate_teams) || [];
   if (!rows.length) return `<div class="card"><div class="empty">აგენტი ჯერ არ დამატებულა. /addagent</div></div>`;
-  return `<div class="card">
+  const warningHtml = duplicateTeams.length ? `<div class="card" style="border-color:var(--red)">
+    <h2 style="color:var(--red)">⚠️ ორ თიმლიდერს ერთი გუნდის კოდი ერგო</h2>
+    <div class="sub" style="margin-bottom:8px">ეს ნიშნავს, რომ ქვემოთ ჩამოთვლილი თიმლიდერების გუნდის წევრები Mini App-ში შეიძლება ერთმანეთში აირიოს (მცდარი მენეჯერი უჩვენოს). დააჭირეთ „გასწორებას" თითოეულზე — ამის შემდეგ, ვისი მენეჯერიც არასწორად ჩანდა, „აგენტების მართვა" სიაში ხელახლა აარჩიეთ სწორი მენეჯერი და დააჭირეთ „შენახვა".</div>
+    ${duplicateTeams.map((d) => d.leads.map((l) => `
+      <div class="list-row">
+        <div class="main"><div class="title">${esc(l.name)}</div><div class="sub">გუნდის კოდი გაზიარებულია: ${esc(d.leads.map((x) => x.name).join(", "))}</div></div>
+        <div class="side"><button class="btn" data-rekey-btn="${esc(l.agent_id)}" style="padding:8px 10px">🔑 გასწორება</button></div>
+      </div>`).join("")).join("")}
+  </div>` : "";
+  return warningHtml + `<div class="card">
     <h2>🗂️ აგენტების მართვა <span class="cnt">${rows.length}</span></h2>
     ${rows.map((r) => {
       const sel = r.role === "team_lead" ? "lead" : (r.manager ? "member:" + r.manager.agent_id : "independent");
@@ -861,6 +890,17 @@ function bindAgentsMgmtActions() {
           body: JSON.stringify({ agent_id: btn.dataset.activeBtn, active: btn.dataset.activeVal }),
         });
         toast(btn.dataset.activeVal === "yes" ? "გააქტიურდა ✅" : "გათავისუფლდა");
+        delete lazyCache.agentsmgmt;
+        await renderContent();
+      } catch (e) { toast(e.message); btn.disabled = false; }
+    };
+  });
+  document.querySelectorAll("[data-rekey-btn]").forEach((btn) => {
+    btn.onclick = async () => {
+      btn.disabled = true;
+      try {
+        await api("/api/agents/rekey_team", { method: "POST", body: JSON.stringify({ agent_id: btn.dataset.rekeyBtn }) });
+        toast("გუნდის კოდი გასწორდა ✅ — ახლა გადაამოწმეთ ამ თიმლიდერის წევრები ქვემოთ და საჭიროებისამებრ ხელახლა შეარჩიეთ");
         delete lazyCache.agentsmgmt;
         await renderContent();
       } catch (e) { toast(e.message); btn.disabled = false; }
@@ -1013,8 +1053,8 @@ function renderMeetings(payload) {
     ${renderPeriodSwitch()}
     <h2>🤝 შეხვედრები — ${esc(PERIOD_TITLES[state.period] || "")} <span class="cnt">${rows.length}</span></h2>
     ${!rows.length ? `<div class="empty">ამ პერიოდში შეხვედრა არ ყოფილა</div>` :
-      rows.map((m) => `
-      <div class="list-row" style="align-items:flex-start">
+      rows.map((m, i) => `
+      <div class="list-row clickable" style="align-items:flex-start" data-meeting-idx="${i}">
         <div class="avatar">🏠</div>
         <div class="main">
           <div class="title">${esc(m.address || m.district || "მისამართი უცნობია")}</div>
@@ -1024,6 +1064,17 @@ function renderMeetings(payload) {
         <div class="side sub">${esc((m.timestamp || "").split(" ")[0] || "")}</div>
       </div>`).join("")}
   </div>`;
+}
+
+function bindMeetingsActions(payload) {
+  const rows = (payload && payload.rows) || [];
+  document.querySelectorAll("[data-meeting-idx]").forEach((el) => {
+    el.onclick = () => {
+      const m = rows[parseInt(el.dataset.meetingIdx, 10)];
+      if (!m) return;
+      openDetail(m.address || m.district || "შეხვედრა", MEETING_FIELD_LABELS.map(([k, label]) => ({ label, value: m[k] })));
+    };
+  });
 }
 
 /* ------------------------------------------------------ დავალებების ისტორია */
@@ -1037,7 +1088,7 @@ function renderTaskHistory(payload) {
     <div class="qa-compose" style="margin-bottom:10px">
       ${isAdmin ? `<select id="histTeamSelect">
         <option value="">ყველა გუნდი</option>
-        ${teams.map((t) => `<option value="${esc(t)}" ${state.historyTeam === t ? "selected" : ""}>${esc(t)}</option>`).join("")}
+        ${teams.map((t) => `<option value="${esc(t.team)}" ${state.historyTeam === t.team ? "selected" : ""}>${esc(t.name)}-ის გუნდი (${t.member_count})</option>`).join("")}
       </select>` : ""}
       <select id="histAgentSelect">
         <option value="">ყველა აგენტი</option>
@@ -1049,8 +1100,8 @@ function renderTaskHistory(payload) {
     <h2>📜 დავალებების ისტორია — ${esc(PERIOD_TITLES[state.period] || "")} <span class="cnt">${rows.length}</span></h2>
     ${drilldown}
     ${!rows.length ? `<div class="empty">ამ პერიოდში დავალება არ ყოფილა</div>` :
-      rows.map((t) => `
-      <div class="list-row" style="align-items:flex-start">
+      rows.map((t, i) => `
+      <div class="list-row clickable" style="align-items:flex-start" data-hist-idx="${i}">
         <div class="avatar">${t.lead_type === "listing" ? "🏠" : "👤"}</div>
         <div class="main">
           <div class="title">${esc(t.title || "")}</div>
@@ -1062,7 +1113,15 @@ function renderTaskHistory(payload) {
   </div>`;
 }
 
-function bindTaskHistoryActions() {
+function bindTaskHistoryActions(payload) {
+  const rows = (payload && payload.rows) || [];
+  document.querySelectorAll("[data-hist-idx]").forEach((el) => {
+    el.onclick = () => {
+      const t = rows[parseInt(el.dataset.histIdx, 10)];
+      if (!t) return;
+      openDetail(t.title || "დავალება", TASK_FIELD_LABELS.map(([k, label]) => ({ label, value: t[k] })));
+    };
+  });
   const teamSel = document.getElementById("histTeamSelect");
   if (teamSel) {
     teamSel.onchange = () => {
@@ -1096,10 +1155,10 @@ function renderDigest(payload) {
     ${isAdmin ? `<div class="qa-compose" style="margin-bottom:10px">
       <select id="digestTeamSelect">
         <option value="">მთელი კომპანია</option>
-        ${teams.map((t) => `<option value="${esc(t)}" ${state.digestTeam === t ? "selected" : ""}>${esc(t)}</option>`).join("")}
+        ${teams.map((t) => `<option value="${esc(t.team)}" ${state.digestTeam === t.team ? "selected" : ""}>${esc(t.name)}-ის გუნდი</option>`).join("")}
       </select>
     </div>` : ""}
-    <h2>🗞️ დღის ამბები — ${esc(d.date || "")}</h2>
+    <h2>🗞️ დღის ამბები — ${isAdmin ? (state.digestTeam ? esc((teams.find((t) => t.team === state.digestTeam) || {}).name || "") + "-ის გუნდი — " : "მთელი კომპანია — ") : "ჩემი გუნდი — "}${esc(d.date || "")}</h2>
     ${section("1️⃣", `გამოცხადდა (${(d.came || []).length})`, d.came, "დღეს ჯერ არავინ დაწყებულა")}
     ${d.not_started && d.not_started.length ? section("🔴", "ჯერ არ დაწყებულა", d.not_started, "") : ""}
     ${section("2️⃣", "დღეს კლიენტი ჩაბარდა", d.clients_assigned, "დღეს არავის ჩაბარებია")}
@@ -1121,23 +1180,43 @@ function bindDigestActions() {
   }
 }
 
-function renderSwaps(rows) {
-  if (!rows.length) return `<div class="card"><div class="empty">დასადასტურებელი მოთხოვნა არ არის</div></div>`;
-  return `<div class="card">
-    <h2>🔁 დასადასტურებელი სმენის გაცვლები <span class="cnt">${rows.length}</span></h2>
-    ${rows.map((r) => `
-      <div class="list-row" data-id="${esc(r.swap_id)}">
+const SWAP_STATUS_LABEL = {
+  pending_peer: "⏳ კოლეგის პასუხის მოლოდინში", pending_manager: "⏳ მენეჯერის მოლოდინში",
+  approved: "✅ დამტკიცებული", rejected: "❌ უარყოფილი",
+};
+const SWAP_FIELD_LABELS = [
+  ["agent_name", "მოითხოვა"], ["target_agent_name", "გაცვლის მხარე"],
+  ["request_type", "ტიპი"], ["swap_date", "თარიღი"],
+  ["from_mode", "ძველი სმენა"], ["to_mode", "ახალი სმენა"],
+  ["note", "შენიშვნა"], ["accepted_by_name", "დაეთანხმა"],
+  ["status", "სტატუსი"], ["decided_by", "გადაწყვიტა"], ["decided_at", "გადაწყვეტის დრო"],
+  ["created_at", "მოთხოვნის დრო"],
+];
+
+function renderSwaps(payload) {
+  const pending = (payload && payload.pending) || [];
+  const history = (payload && payload.history) || [];
+  const swapRow = (r, withActions) => `
+      <div class="list-row clickable" data-swap-id="${esc(r.swap_id)}">
         <div class="avatar">🔁</div>
         <div class="main">
           <div class="title">${esc(REQUEST_TYPE_LABELS[r.request_type] || r.request_type)}</div>
           <div class="sub">${esc(r.agent_name)}${r.target_agent_name ? " ⇄ " + esc(r.target_agent_name) : ""} · ${esc(r.swap_date || "-")}</div>
-          <div class="sub">${esc(r.note || "")}</div>
+          <div class="sub">${r.from_mode ? esc(MODE_LABELS[r.from_mode] || r.from_mode) + " → " : ""}${r.to_mode ? esc(MODE_LABELS[r.to_mode] || r.to_mode) : ""}${r.note ? " · " + esc(r.note) : ""}</div>
+          ${!withActions ? `<div class="sub">${esc(SWAP_STATUS_LABEL[r.status] || r.status)}</div>` : ""}
         </div>
       </div>
-      <div class="actions" style="margin:-2px 0 12px">
+      ${withActions ? `<div class="actions" style="margin:-2px 0 12px">
         <button class="btn" data-swapact="approved" data-id="${esc(r.swap_id)}">✅ დამტკიცება</button>
         <button class="btn danger" data-swapact="rejected" data-id="${esc(r.swap_id)}">✖️ უარყოფა</button>
-      </div>`).join("")}
+      </div>` : ""}`;
+  return `<div class="card">
+    <h2>🔁 დასადასტურებელი სმენის გაცვლები <span class="cnt">${pending.length}</span></h2>
+    ${!pending.length ? `<div class="empty">დასადასტურებელი მოთხოვნა არ არის</div>` : pending.map((r) => swapRow(r, true)).join("")}
+  </div>
+  <div class="card">
+    <h2>📜 გაცვლების ისტორია <span class="cnt">${history.length}</span></h2>
+    ${!history.length ? `<div class="empty">ისტორია ჯერ ცარიელია</div>` : history.map((r) => swapRow(r, false)).join("")}
   </div>`;
 }
 
@@ -1203,9 +1282,11 @@ function bindReportsActions(payload) {
   }
 }
 
-function bindSwapsActions() {
+function bindSwapsActions(payload) {
+  const all = [...((payload && payload.pending) || []), ...((payload && payload.history) || [])];
   document.querySelectorAll("[data-swapact]").forEach((btn) => {
-    btn.onclick = async () => {
+    btn.onclick = async (e) => {
+      e.stopPropagation();
       btn.disabled = true;
       try {
         await api("/api/swaps/decide", {
@@ -1217,6 +1298,13 @@ function bindSwapsActions() {
         delete lazyCache.swaps;
         await renderContent();
       } catch (e) { toast(e.message); btn.disabled = false; }
+    };
+  });
+  document.querySelectorAll("[data-swap-id]").forEach((el) => {
+    el.onclick = () => {
+      const r = all.find((x) => String(x.swap_id) === el.dataset.swapId);
+      if (!r) return;
+      openDetail(REQUEST_TYPE_LABELS[r.request_type] || "სმენის გაცვლა", SWAP_FIELD_LABELS.map(([k, label]) => ({ label, value: k === "status" ? (SWAP_STATUS_LABEL[r.status] || r.status) : r[k] })));
     };
   });
 }
@@ -1320,13 +1408,24 @@ let arKind = "add";
 
 function renderAgentRequests(payload) {
   const rows = (payload && payload.rows) || [];
+  const teamsDirectory = (payload && payload.teams) || [];
   const isTeamLead = state.role === "admin" && state.data && state.data.is_team_lead;
   const isAdmin = state.role === "admin" && !isTeamLead;
-  const teamAgents = ((isTeamLead && state.data.admin && state.data.admin.team) || [])
+  // თიმლიდერს საკუთარი გუნდის აგენტების სია მოსდის უკვე ჩატვირთული
+  // დაშბორდიდან (state.data.admin.team ისედაც მისივე გუნდზეა
+  // გაფილტრული); ადმინს — მთელი კომპანიის როსტერი (იმავე ველიდან,
+  // რადგან ადმინისთვის ეს ველი არ ფილტრდება არცერთ გუნდზე).
+  const rosterAgents = ((state.data && state.data.admin && state.data.admin.team) || [])
     .filter((a) => a.role !== "team_lead");
 
-  const form = isTeamLead ? `<div class="card">
-    <h2>📥 ახალი მოთხოვნა ადმინთან</h2>
+  const teamPicker = isAdmin ? `<select id="arTeamSelect" style="margin-top:8px">
+      <option value="">დამოუკიდებელი (გუნდის გარეშე)</option>
+      ${teamsDirectory.map((t) => `<option value="${esc(t.team)}">${esc(t.name)}-ის გუნდი</option>`).join("")}
+    </select>` : "";
+
+  const form = `<div class="card">
+    <h2>📥 ${isAdmin ? "ახალი მოთხოვნა" : "ახალი მოთხოვნა ადმინთან"}</h2>
+    ${isTeamLead ? `<div class="sub" style="margin-bottom:8px">აქედან სთხოვთ ადმინს ახალი აგენტის დამატებას თქვენს გუნდში, ან არსებულის გათავისუფლებას — ის ქვემოთ, „მოთხოვნების ისტორიაში", დაადასტურებს ან უარყოფს.</div>` : ""}
     <div class="period-switch" id="arKindSwitch">
       <button data-kind="add" class="${arKind === "add" ? "active" : ""}">აგენტის მოწვევა</button>
       <button data-kind="remove" class="${arKind === "remove" ? "active" : ""}">აგენტის გათავისუფლება</button>
@@ -1334,18 +1433,19 @@ function renderAgentRequests(payload) {
     <div class="qa-compose" data-ar-fields="add" ${arKind === "add" ? "" : "hidden"} style="margin-top:10px">
       <input id="arName" placeholder="ახალი აგენტის სახელი" />
       <input id="arPhone" placeholder="ტელეფონის ნომერი" />
+      ${teamPicker}
     </div>
     <div class="qa-compose" data-ar-fields="remove" ${arKind === "remove" ? "" : "hidden"} style="margin-top:10px">
       <select id="arTargetAgent">
         <option value="">აირჩიეთ აგენტი…</option>
-        ${teamAgents.map((a) => `<option value="${esc(a.agent_id)}">${esc(a.name)}</option>`).join("")}
+        ${rosterAgents.map((a) => `<option value="${esc(a.agent_id)}">${esc(a.name)}${a.team ? " (" + esc(a.team) + ")" : ""}</option>`).join("")}
       </select>
     </div>
     <div class="qa-compose" style="margin-top:8px">
       <textarea id="arReason" placeholder="მიზეზი (არასავალდებულო)"></textarea>
     </div>
     <button class="btn" id="arSubmit" style="margin-top:8px">გაგზავნა</button>
-  </div>` : "";
+  </div>`;
 
   const listHtml = `<div class="card">
     <h2>📋 მოთხოვნების ისტორია <span class="cnt">${rows.length}</span></h2>
@@ -1355,7 +1455,7 @@ function renderAgentRequests(payload) {
         <div class="avatar">${r.kind === "add" ? "➕" : "➖"}</div>
         <div class="main">
           <div class="title">${esc(AGENT_REQUEST_KIND_LABEL[r.kind] || r.kind)} — ${esc(r.name || r.target_agent_id || "")}</div>
-          <div class="sub">მოითხოვა: ${esc(r.requested_by_name || "")}${r.team ? " · " + esc(r.team) : ""}</div>
+          <div class="sub">მოითხოვა: ${esc(r.requested_by_name || "ადმინმა")}${r.team ? " · " + esc(r.team) : ""}</div>
           ${r.reason ? `<div class="sub">${esc(r.reason)}</div>` : ""}
           <div class="sub">${esc((r.created_at || "").split(" ")[0] || "")} · ${esc(AGENT_REQUEST_STATUS_LABEL[r.status] || r.status)}</div>
         </div>
@@ -1391,6 +1491,8 @@ function bindAgentRequestsActions() {
         if (!name) { toast("შეიყვანეთ სახელი"); return; }
         body.name = name;
         body.phone = (document.getElementById("arPhone").value || "").trim();
+        const teamSel = document.getElementById("arTeamSelect");
+        if (teamSel) body.team = teamSel.value || "";
       } else {
         const targetId = document.getElementById("arTargetAgent").value;
         if (!targetId) { toast("აირჩიეთ აგენტი"); return; }
@@ -1424,74 +1526,153 @@ function bindAgentRequestsActions() {
 }
 
 /* ------------------------------------------------ რეგულაციები/ინსტრუქცია
-   (item 3) — კომპანიის რეგულაციები (თავდაპირველი, ადმინის მიერ
-   მომავალში დასარედაქტირებელი ვერსია — საიტზე ცალკე გამოქვეყნებული
-   ტექსტი ვერ მოიძებნა ავტომატურად) + ბოტის გამოყენების ინსტრუქცია,
-   ცალ-ცალკე აგენტისთვის და მენეჯერისთვის (ბოტის რეალურ ბრძანებებზე
-   დაყრდნობით). */
-const COMPANY_REGULATIONS_ITEMS = [
-  "კლიენტთან კომუნიკაცია ყოველთვის თავაზიანი და პროფესიულია.",
-  "განცხადებების დღიური გეგმა (საიტი/myhome/ss.ge ან ონლაინ რეჟიმზე საერთო რაოდენობა) სავალდებულოა და ივსება იმავე დღეს, /clockout-ისას.",
-  "სამუშაო დღის დაწყება/დასრულება ბოტში (/clockin, /clockout) ან Mini App-ის „დღეს“ ტაბიდან აღინიშნება.",
-  "კლიენტთან შეხვედრის/მუშაობის შემდეგ რეპორტი ივსება იმავე დღეს (/clientreport ან /clockout-ის დროს).",
-  "დასვენების დღე წინასწარ, /dayoff ბრძანებით ან Mini App-იდან, მოთხოვნილია — დამტკიცებამდე დასვენება არ ითვლება ოფიციალურად.",
-  "ერთ აგენტს კალენდარულ თვეში მაქსიმუმ 3 დღეოფის დამტკიცება შეუძლია.",
-  "ექსკლუზივის ინფორმაცია კონფიდენციალურია — კოლეგისთვის მხოლოდ Mini App-ის „გაზიარების“ ფუნქციით ნაწილდება.",
-  "განმეორებითი გაფრთხილება (დაგვიანება, გამოტოვებული რეპორტი, შეუსრულებელი გეგმა) დისციპლინურ ზომებს იწვევს.",
+   (item 3, გაფართოებული item 10-ის თხოვნით — მეტი დეტალი და ვიზუალური
+   დატვირთვა) — კომპანიის რეგულაციები კატეგორიებად (თავდაპირველი,
+   ადმინის მიერ მომავალში დასარედაქტირებელი ვერსია — საიტზე ცალკე
+   გამოქვეყნებული ტექსტი ვერ მოიძებნა ავტომატურად) + ბოტის სრული
+   გამოყენების ინსტრუქცია კატეგორიებად, ცალ-ცალკე აგენტისთვის და
+   მენეჯერისთვის (ბოტის რეალურ ბრძანებებზე დაყრდნობით), პლუს
+   ცოცხალი (server-იდან წამოსული, არა ტექსტში ჩაწერილი) ლიმიტების
+   ცხრილი. */
+const REGULATION_GROUPS = [
+  { icon: "🗣️", title: "კომუნიკაცია და პროფესიონალიზმი", items: [
+    "კლიენტთან კომუნიკაცია ყოველთვის თავაზიანი, სწრაფი და პროფესიულია.",
+    "კოლეგებთან ურთიერთობაშიც კორექტულობა და ურთიერთდახმარებაა მოსალოდნელი.",
+  ] },
+  { icon: "📊", title: "დღიური გეგმა და ანგარიშგება", items: [
+    "დღიური განცხადებების გეგმა (ოფისზე — საიტი/myhome/ss.ge ცალ-ცალკე, ონლაინზე — საერთო რაოდენობა) სავალდებულოა და ივსება იმავე დღეს, /clockout-ის დროს.",
+    "კლიენტთან შეხვედრის/მუშაობის შემდეგ რეპორტი ივსება იმავე დღეს (/clientreport ან /clockout-ის დროს ერთდროულად).",
+    "შეხვედრაზე ყოფნისას /meeting-ით ფიქსირდება — მისამართი, მეპატრონის საკონტაქტო და პირობები.",
+  ] },
+  { icon: "🕐", title: "დასწრება და სამუშაო დღე", items: [
+    "სამუშაო დღის დაწყება/დასრულება ბოტში (/clockin, /clockout) ან Mini App-ის „დღეს“ ტაბიდან აღინიშნება — არარეგისტრირებული დღე არ ითვლება ნამუშევრად.",
+    "ცვლის შეცვლა (მაგ. დღეს სახლიდან/ოფისიდან მუშაობა) წინასწარ, /swapshift-ით ან მენეჯერთან შეთანხმებით ხდება.",
+  ] },
+  { icon: "🏖️", title: "დასვენების დღეები", items: [
+    "დასვენების დღე წინასწარ, /dayoff ბრძანებით ან Mini App-იდან, მოთხოვნილია — დამტკიცებამდე დასვენება არ ითვლება ოფიციალურად.",
+    "დამტკიცება/უარყოფა შეუძლია ადმინს ან საკუთარი გუნდის ფარგლებში — მენეჯერს.",
+  ] },
+  { icon: "🔒", title: "კონფიდენციალურობა", items: [
+    "ექსკლუზივის (მეპატრონის საკონტაქტო, პირობები) ინფორმაცია კონფიდენციალურია.",
+    "კოლეგისთვის ექსკლუზივზე ინფორმაცია მხოლოდ Mini App-ის „გაზიარების“ ფუნქციით ნაწილდება, პირდაპირ არა.",
+  ] },
+  { icon: "⚠️", title: "დისციპლინა", items: [
+    "განმეორებითი გაფრთხილება (დაგვიანება, გამოტოვებული რეპორტი, შეუსრულებელი დღიური გეგმა) აღირიცხება და ლიმიტის მიღწევისას დისციპლინურ ზომებს/ავტომატურ გათიშვას იწვევს.",
+  ] },
 ];
 
-const AGENT_BOT_COMMANDS = [
-  ["/start", "რეგისტრაცია ბოტში"],
-  ["/app", "Mini App-ის (ვიზუალური დაშბორდის) გახსნა"],
-  ["/mytasks", "ჩემი მიმდინარე დავალებების ნახვა"],
-  ["/done (task_id)", "დავალების დასრულებულად მონიშვნა"],
-  ["/myschedule", "საკუთარი კვირის გრაფიკის ნახვა"],
-  ["/clockin", "სამუშაო დღის დაწყება"],
-  ["/clockout", "სამუშაო დღის დასრულება — განცხადებების რაოდენობა + კლიენტის რეპორტი"],
-  ["/clientreport", "კლიენტთან მუშაობის რეპორტის ცალკე შევსება"],
-  ["/dayoff", "დასვენების დღის მოთხოვნა"],
-  ["/meeting", "შეხვედრის დაფიქსირება"],
-  ["/addexclusive", "ახალი ექსკლუზივის დამატება"],
-  ["/exclusives", "აქტიური ექსკლუზივების სია"],
-  ["/swapnumber", "შიდა სამუშაო ნომრის გაცვლა კოლეგასთან"],
-  ["/swapshift", "სამუშაო ცვლის გაცვლის მოთხოვნა (თვეში შეზღუდული რაოდენობა)"],
-  ["/cancel", "მიმდინარე ნაბიჯოვანი ბრძანების გაუქმება"],
+const AGENT_BOT_COMMAND_GROUPS = [
+  { icon: "ℹ️", title: "ზოგადი", items: [
+    ["/start", "რეგისტრაცია ბოტში"],
+    ["/app", "Mini App-ის (ვიზუალური დაშბორდის) გახსნა"],
+    ["/cancel", "მიმდინარე ნაბიჯოვანი ბრძანების გაუქმება"],
+  ] },
+  { icon: "🕐", title: "ყოველდღიური სამუშაო", items: [
+    ["/clockin", "სამუშაო დღის დაწყება"],
+    ["/clockout", "სამუშაო დღის დასრულება — განცხადებების რაოდენობა + კლიენტის რეპორტი"],
+    ["/mytasks", "ჩემი მიმდინარე დავალებების ნახვა"],
+    ["/done (task_id)", "დავალების დასრულებულად მონიშვნა"],
+  ] },
+  { icon: "📝", title: "რეპორტები და შეხვედრები", items: [
+    ["/clientreport", "კლიენტთან მუშაობის რეპორტის ცალკე შევსება"],
+    ["/meeting", "შეხვედრის დაფიქსირება"],
+  ] },
+  { icon: "🏖️", title: "დასვენება და გრაფიკი", items: [
+    ["/dayoff", "დასვენების დღის მოთხოვნა"],
+    ["/myschedule", "საკუთარი კვირის გრაფიკის ნახვა"],
+    ["/swapshift", "სამუშაო ცვლის გაცვლის მოთხოვნა (თვეში შეზღუდული რაოდენობა)"],
+    ["/swapnumber", "შიდა სამუშაო ნომრის გაცვლა კოლეგასთან"],
+  ] },
+  { icon: "🏘️", title: "ექსკლუზივები", items: [
+    ["/addexclusive", "ახალი ექსკლუზივის დამატება"],
+    ["/exclusives", "აქტიური ექსკლუზივების სია"],
+  ] },
 ];
 
+const ADMIN_ONLY_BOT_COMMAND_GROUPS = [
+  { icon: "👑", title: "პერსონალის მართვა", items: [
+    ["/addagent", "ახალი აგენტის დამატება (ან Mini App-ის „აგენტების მართვა“/„მოთხოვნები“)"],
+    ["/agents", "ყველა აგენტის სია"],
+    ["/setrole", "თიმლიდერის დანიშვნა (agent_id team_lead)"],
+    ["/setteam", "აგენტის გუნდში ჩართვა ხელით"],
+    ["/reactivate", "გათავისუფლებული აგენტის ხელახლა გააქტიურება"],
+  ] },
+  { icon: "📄", title: "დავალებები და ანგარიშები", items: [
+    ["/newtask", "ახალი კლიენტის/დავალების დამატება"],
+    ["/report", "დღიური ტექსტური ანგარიში"],
+    ["/ranking", "შედეგების რეიტინგი"],
+    ["/findclient", "კლიენტის ძებნა ტელეფონით (დავალება+რეპორტი+შეხვედრა)"],
+  ] },
+  { icon: "🗓️", title: "დამტკიცებები", items: [
+    ["/dayoffs", "დასადასტურებელი დღეოფების სია"],
+    ["/swaps", "დასადასტურებელი ცვლის გაცვლების სია"],
+    ["/warnings", "ბოლო გაფრთხილებების სია"],
+  ] },
+];
+
+/* მენეჯერის Mini App ტაბები — იგივე იკონები, რაც ADMIN_TABS-შია
+   გამოყენებული, რომ ვიზუალურად ცალსახად ერთმანეთს ემთხვეოდეს. */
 const MANAGER_MINIAPP_TABS = [
-  ["გუნდი", "საკუთარი გუნდის დღევანდელი მდგომარეობა, ვინ დაგვიანდა/არ დაუწყია"],
-  ["მიმოხილვა / რეიტინგი", "გუნდის შედეგები დღე/კვირა/თვის ჭრილში"],
-  ["მოთხოვნები", "ახალი აგენტის მოწვევის ან არსებულის გათავისუფლების მოთხოვნა — საბოლოო დამტკიცება ადმინთანაა"],
-  ["რეპორტები", "გუნდის რეპორტების ისტორია + ხარისხის შეფასება (1-5), თარიღით/პერიოდით ფილტრი"],
-  ["შვებულებები", "გუნდის დღეოფის მოთხოვნების დამტკიცება/უარყოფა (მაქს. 3/თვე თითო აგენტზე)"],
-  ["სმენის გაცვლა", "გუნდის წევრებს შორის ცვლის გაცვლის მოთხოვნების გადაწყვეტა"],
-  ["დავალებები", "ახალი კლიენტის დამატება და დავალების გუნდში გადაბარება"],
-  ["დღის ამბები", "6 პუნქტიანი დღიური შეჯამება გუნდზე"],
-  ["კითხვები", "აგენტების კითხვებზე პასუხის გაცემა"],
+  ["🧑‍🤝‍🧑", "გუნდი", "საკუთარი გუნდის დღევანდელი მდგომარეობა, ვინ დაგვიანდა/არ დაუწყია"],
+  ["📊", "მიმოხილვა / 🏆 რეიტინგი", "გუნდის შედეგები დღე/კვირა/თვის ჭრილში"],
+  ["📥", "მოთხოვნები", "ახალი აგენტის მოწვევის ან არსებულის გათავისუფლების მოთხოვნა — საბოლოო დამტკიცება ადმინთანაა"],
+  ["📝", "რეპორტები", "გუნდის რეპორტების ისტორია + ხარისხის შეფასება (1-5), თარიღით/პერიოდით ფილტრი"],
+  ["🗓️", "შვებულებები", "გუნდის დღეოფის მოთხოვნების დამტკიცება/უარყოფა, პლუს ისტორია"],
+  ["🔁", "სმენის გაცვლა", "გუნდის წევრებს შორის ცვლის გაცვლის მოთხოვნების გადაწყვეტა + ისტორია"],
+  ["📄", "დავალებები", "ახალი კლიენტის დამატება და დავალების გუნდში გადაბარება"],
+  ["🗞️", "დღის ამბები", "6 პუნქტიანი დღიური შეჯამება გუნდზე"],
+  ["💬", "კითხვები", "აგენტების კითხვებზე პასუხის გაცემა"],
 ];
 
-function renderRegulations() {
+function _renderRegGroups(groups, isBotCommands) {
+  return groups.map((g) => `<div class="card">
+    <h2>${g.icon} ${esc(g.title)}</h2>
+    ${isBotCommands
+      ? g.items.map(([c, d]) => `<div class="list-row"><div class="avatar">${g.icon}</div><div class="main"><div class="title">${esc(c)}</div><div class="sub">${esc(d)}</div></div></div>`).join("")
+      : g.items.map((t) => `<div class="list-row"><div class="avatar">${g.icon}</div><div class="main"><div class="title">${esc(t)}</div></div></div>`).join("")}
+  </div>`).join("");
+}
+
+function renderRegulations(payload) {
+  const limits = (payload && payload.limits) || {};
   const isTeamLead = state.role === "admin" && state.data && state.data.is_team_lead;
   const isAdminOnly = state.role === "admin" && !isTeamLead;
-  const guideSection = isAdminOnly
-    ? `<div class="card">
-        <h2>📘 ბოტის სრული ინსტრუქცია — ადმინი</h2>
-        <div class="sub" style="margin-bottom:8px">ადმინს ბოტში ყველა ბრძანება აქვს ხელმისაწვდომი (/agents, /addagent, /setteam, /setrole, /report და სხვ.) — /start გზავნის მათ სრულ სიას. Mini App-ში კი ყველა ტაბი ჩანს, მენეჯერის ტაბების ჩათვლით.</div>
-      </div>`
-    : `<div class="card">
-        <h2>📘 ბოტის ინსტრუქცია — ${isTeamLead ? "მენეჯერი" : "აგენტი"}</h2>
-        ${isTeamLead ? `<div class="sub" style="margin-bottom:8px">მენეჯერული მოქმედებები (გუნდის მართვა, რეპორტების შეფასება, შვებულებების/მოთხოვნების დამტკიცება) — მხოლოდ Mini App-იდან (/app):</div>
-        ${MANAGER_MINIAPP_TABS.map(([t, d]) => `<div class="list-row"><div class="main"><div class="title">${esc(t)}</div><div class="sub">${esc(d)}</div></div></div>`).join("")}
-        <div class="sub" style="margin:10px 0 8px">საკუთარი, პირადი სამუშაო დღისთვის იგივე ბრძანებები გაქვთ, რაც აგენტებს:</div>` : ""}
-        ${AGENT_BOT_COMMANDS.map(([c, d]) => `<div class="list-row"><div class="main"><div class="title">${esc(c)}</div><div class="sub">${esc(d)}</div></div></div>`).join("")}
-      </div>`;
-  return `<div class="card">
-    <h2>📄 კომპანიის რეგულაციები</h2>
-    <ul style="margin:0;padding-left:18px;line-height:1.7">
-      ${COMPANY_REGULATIONS_ITEMS.map((t) => `<li>${esc(t)}</li>`).join("")}
-    </ul>
-  </div>
-  ${guideSection}`;
+
+  const limitsCard = `<div class="card">
+    <h2>🔢 მოქმედი ლიმიტები</h2>
+    <div class="grid3">
+      <div class="stat"><div class="num">${esc(limits.office_daily_quota != null ? limits.office_daily_quota : "-")}</div><div class="lbl">ოფისის დღიური გეგმა</div></div>
+      <div class="stat"><div class="num">${esc(limits.online_daily_quota != null ? limits.online_daily_quota : "-")}</div><div class="lbl">ონლაინ დღიური გეგმა</div></div>
+      <div class="stat"><div class="num">${esc(limits.dayoff_monthly_limit != null ? limits.dayoff_monthly_limit : "-")}</div><div class="lbl">დღეოფი / თვე</div></div>
+      <div class="stat"><div class="num">${esc(limits.shift_swap_monthly_limit != null ? limits.shift_swap_monthly_limit : "-")}</div><div class="lbl">ცვლის გაცვლა / თვე</div></div>
+      <div class="stat"><div class="num">${esc(limits.warning_limit != null ? limits.warning_limit : "-")}</div><div class="lbl">გაფრთხილება → გათიშვა (${esc(limits.warning_window_days || 30)} დღეში)</div></div>
+      <div class="stat"><div class="num">${esc(limits.attendance_grace_minutes != null ? limits.attendance_grace_minutes : "-")} წთ</div><div class="lbl">დაგვიანების ზღვარი</div></div>
+    </div>
+  </div>`;
+
+  const regsHtml = `<div class="card"><h2>📄 კომპანიის რეგულაციები</h2><div class="sub">ეს საწყისი ვერსიაა — ადმინს შეუძლია მოგვიანებით ზუსტი ტექსტით ჩანაცვლება.</div></div>` + _renderRegGroups(REGULATION_GROUPS, false);
+
+  let guideHtml;
+  if (isAdminOnly) {
+    guideHtml = `<div class="card">
+        <h2>📘 ბოტის სრული ინსტრუქცია — ადმინი (დირექტორი)</h2>
+        <div class="sub">Mini App-ში ყველა ტაბი ხელმისაწვდომია, მენეჯერის ტაბების ჩათვლით. ბოტში კი, ჩვეულებრივი ბრძანებების გარდა, დამატებით გაქვთ:</div>
+      </div>` + _renderRegGroups(ADMIN_ONLY_BOT_COMMAND_GROUPS, true) + _renderRegGroups(AGENT_BOT_COMMAND_GROUPS, true);
+  } else if (isTeamLead) {
+    guideHtml = `<div class="card">
+        <h2>📘 ბოტის ინსტრუქცია — მენეჯერი</h2>
+        <div class="sub">მენეჯერული მოქმედებები (გუნდის მართვა, რეპორტების შეფასება, დამტკიცებები) — მხოლოდ Mini App-იდან (/app):</div>
+        ${MANAGER_MINIAPP_TABS.map(([icon, t, d]) => `<div class="list-row"><div class="avatar">${icon}</div><div class="main"><div class="title">${esc(t)}</div><div class="sub">${esc(d)}</div></div></div>`).join("")}
+      </div>
+      <div class="card">
+        <h2>👤 საკუთარი, პირადი სამუშაო დღისთვის</h2>
+        <div class="sub">იგივე ბრძანებები გაქვთ, რაც აგენტებს — თქვენც ხართ გუნდის წევრი:</div>
+      </div>` + _renderRegGroups(AGENT_BOT_COMMAND_GROUPS, true);
+  } else {
+    guideHtml = `<div class="card"><h2>📘 ბოტის ინსტრუქცია — აგენტი</h2></div>` + _renderRegGroups(AGENT_BOT_COMMAND_GROUPS, true);
+  }
+
+  return limitsCard + regsHtml + guideHtml;
 }
 
 /* ---------------------------------------------------------- shell */
@@ -1508,6 +1689,7 @@ const LAZY_ENDPOINTS = {
   digest: "/api/digest",
   dayoffs: "/api/dayoffs",
   agentrequests: "/api/agent-requests",
+  regulations: "/api/regulations",
 };
 /* ტაბები, რომელთა endpoint-საც სჭირდება ?period=day|week|month —
    period-ის შეცვლისას load() ისედაც წმენდს lazyCache-ს მთლიანად,
@@ -1574,7 +1756,7 @@ async function renderContent() {
           if (tab === "digest" && state.digestTeam) params.push("team=" + encodeURIComponent(state.digestTeam));
           if (params.length) url += "?" + params.join("&");
           const resp = await api(url);
-          const wholeObjTabs = ["admintasks", "agentsmgmt", "meetings", "taskhistory", "digest", "reports", "dayoffs"];
+          const wholeObjTabs = ["admintasks", "agentsmgmt", "meetings", "taskhistory", "digest", "reports", "dayoffs", "swaps", "regulations"];
           lazyCache[tab] = wholeObjTabs.includes(tab) ? resp : (resp.rows || []);
         } catch (e) {
           content.innerHTML = `<div class="card"><div class="empty">⚠️ ${esc(e.message)}</div></div>`;
@@ -1584,20 +1766,16 @@ async function renderContent() {
       const rows = lazyCache[tab];
       if (tab === "exclusives") { content.innerHTML = renderExclusives(rows); bindExclusivesActions(rows); }
       else if (tab === "reports") { content.innerHTML = renderReports(rows); bindReportsActions(rows); }
-      else if (tab === "swaps") { content.innerHTML = renderSwaps(rows); bindSwapsActions(); }
+      else if (tab === "swaps") { content.innerHTML = renderSwaps(rows); bindSwapsActions(rows); }
       else if (tab === "questions") { content.innerHTML = renderQuestions(rows, state.role); bindQuestionsActions(state.role); }
       else if (tab === "admintasks") { content.innerHTML = renderAdminTasks(rows); bindAdminTasksActions(); }
       else if (tab === "agentsmgmt") { content.innerHTML = renderAgentsMgmt(rows); bindAgentsMgmtActions(); }
-      else if (tab === "meetings") { content.innerHTML = renderMeetings(rows); bindPeriodSwitch(); }
+      else if (tab === "meetings") { content.innerHTML = renderMeetings(rows); bindPeriodSwitch(); bindMeetingsActions(rows); }
       else if (tab === "taskhistory") { content.innerHTML = renderTaskHistory(rows); bindTaskHistoryActions(rows); }
       else if (tab === "digest") { content.innerHTML = renderDigest(rows); bindDigestActions(); }
       else if (tab === "dayoffs") { content.innerHTML = renderDayoffs(rows); bindDayoffsActions(); }
       else if (tab === "agentrequests") { content.innerHTML = renderAgentRequests(rows); bindAgentRequestsActions(); }
-      return;
-    }
-
-    if (tab === "regulations") {
-      content.innerHTML = renderRegulations();
+      else if (tab === "regulations") { content.innerHTML = renderRegulations(rows); }
       return;
     }
 
