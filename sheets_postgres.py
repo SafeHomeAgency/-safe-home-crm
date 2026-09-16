@@ -253,6 +253,25 @@ def get_tasks_for_agent(agent_id: str, only_open: bool = True) -> list[dict]:
     return tasks
 
 
+def get_task_history(days: int | None = None, agent_id: str | None = None,
+                      team: str | None = None) -> list[dict]:
+    """დავალებების ისტორია (ღიაც და დახურულიც) — Mini App-ის
+    დღე/კვირა/თვე ფილტრისთვის + გუნდის/აგენტის სქოუფინგისთვის."""
+    rows = get_tasks()
+    if agent_id:
+        rows = [r for r in rows if str(r.get("assigned_to")) == str(agent_id)]
+    if team:
+        team_ids = {
+            str(a.get("agent_id")) for a in get_agents()
+            if str(a.get("team", "")).strip() == team.strip()
+        }
+        rows = [r for r in rows if str(r.get("assigned_to")) in team_ids]
+    if days:
+        cutoff = datetime.datetime.now() - datetime.timedelta(days=days)
+        rows = [r for r in rows if (_parse_dt(r.get("created_at", "")) or cutoff) >= cutoff]
+    return sorted(rows, key=lambda r: str(r.get("created_at", "")), reverse=True)
+
+
 def create_task(title: str, description: str, assigned_to: str,
                  priority: str, due_date: str, created_by: str,
                  lead_type: str = "", client_phone: str = "",
@@ -485,7 +504,8 @@ def create_meeting(fields: dict) -> str:
         return meeting_id
 
 
-def get_meetings(agent_id: str | None = None, client_phone: str | None = None) -> list[dict]:
+def get_meetings(agent_id: str | None = None, client_phone: str | None = None,
+                  days: int | None = None) -> list[dict]:
     with _lock:
         rows = db.query_all("SELECT * FROM meetings")
     if agent_id:
@@ -496,6 +516,9 @@ def get_meetings(agent_id: str | None = None, client_phone: str | None = None) -
             r for r in rows
             if str(r.get("client_phone", "")).strip().lstrip("+") == needle
         ]
+    if days:
+        cutoff = datetime.datetime.now() - datetime.timedelta(days=days)
+        rows = [r for r in rows if (_parse_dt(r.get("timestamp", "")) or cutoff) >= cutoff]
     return rows
 
 
@@ -973,6 +996,7 @@ def get_admin_dashboard(team: str | None = None, days: int = 30) -> dict:
     quota_missed_count = 0
     clients_today_total = 0
     clients_all_total = 0
+    late_count = 0
     for a in agents:
         aid = a.get("agent_id")
         mode = get_today_mode(aid)
@@ -990,6 +1014,17 @@ def get_admin_dashboard(team: str | None = None, days: int = 30) -> dict:
             total_submitted += count_submitted
             if att.get("clock_out") and count_submitted < quota:
                 quota_missed_count += 1
+        # "დღეს ვინ დაგვიანდა/არ დაუწყია" — Mini App-ის ცოცხალი სურათისთვის
+        # (item 6): ოფისის ცვლაზეა, ჯერ არ დაუწყია, და საათი უკვე
+        # grace-ის მიღმაა.
+        late = False
+        if mode in ("office_morning", "office_evening") and not att.get("clock_in"):
+            start_hour = 10 if mode == "office_morning" else 16
+            _now_dt = datetime.datetime.now()
+            _deadline = _now_dt.replace(hour=start_hour, minute=config.ATTENDANCE_GRACE_MINUTES, second=0, microsecond=0)
+            if _now_dt >= _deadline:
+                late = True
+                late_count += 1
         w = len(get_warnings(agent_id=aid, days=config.WARNING_WINDOW_DAYS))
         p = perf.get(str(aid), {})
         c = client_counts(aid)
@@ -999,6 +1034,7 @@ def get_admin_dashboard(team: str | None = None, days: int = 30) -> dict:
             "agent_id": aid,
             "name": a.get("name", ""),
             "team": a.get("team", ""),
+            "late": late,
             "role": a.get("role", "agent"),
             "active": a.get("active", "yes"),
             "mode": mode,
@@ -1014,6 +1050,7 @@ def get_admin_dashboard(team: str | None = None, days: int = 30) -> dict:
             "clients_today": c["today"],
             "clients_total": c["total"],
             "collaboration": collaboration_count(aid),
+            "schedule": get_agent_schedule(aid) or {},
         })
 
     ranking = sorted(
@@ -1046,5 +1083,109 @@ def get_admin_dashboard(team: str | None = None, days: int = 30) -> dict:
             "pending_dayoffs": len(pending_dayoffs),
             "clients_today": clients_today_total,
             "clients_total": clients_all_total,
+            "late_count": late_count,
         },
+    }
+
+
+_DIGEST_MODE_LABELS = {
+    "office_morning": "ოფისი, დილის ცვლა",
+    "office_evening": "ოფისი, საღამოს ცვლა",
+    "online": "ონლაინ (სახლიდან)",
+}
+_DIGEST_WARNING_LABELS = {
+    "late_report": "დაგვიანებული/გამოტოვებული ანგარიში",
+    "late_arrival": "დაგვიანება სამუშაოზე",
+    "no_show": "არ გამოცხადება",
+    "quota_missed": "დღიური გეგმა ვერ შესრულდა",
+}
+
+
+def get_daily_digest(team: str | None = None) -> dict:
+    """დღის შეჯამება (6 პუნქტი) — ერთი საერთო წყარო, რომელსაც იყენებს
+    ორივე: ბოტის ყოველდღიური ტექსტური შეტყობინება ადმინისთვის/
+    თიმლიდერისთვის და Mini App-ის „დღის ამბები“ ტაბი. `team=None` —
+    მთელი კომპანია (ადმინი), კონკრეტული `team` — მხოლოდ ის გუნდი."""
+    today = _today_str()
+    all_agents = get_agents()
+    agents = [
+        a for a in all_agents
+        if str(a.get("active", "yes")).strip().lower() != "no"
+        and (team is None or str(a.get("team", "")).strip() == team.strip())
+    ]
+    agent_ids = {str(a.get("agent_id")) for a in agents}
+    names = {str(a.get("agent_id")): a.get("name", "") for a in agents}
+    att_all = {str(r.get("agent_id")): r for r in get_today_attendance_all()}
+
+    came, not_started = [], []
+    for a in agents:
+        aid = str(a.get("agent_id"))
+        mode = get_today_mode(aid)
+        if mode == "off":
+            continue
+        mode_label = _DIGEST_MODE_LABELS.get(mode, mode)
+        att = att_all.get(aid)
+        if att and att.get("clock_in"):
+            status = "დასრულებულია" if att.get("clock_out") else "ჯერ მუშაობს"
+            came.append(f"{a.get('name')} — {mode_label} ({status})")
+        else:
+            not_started.append(f"{a.get('name')} — {mode_label}")
+
+    tasks_today = [
+        t for t in get_tasks()
+        if str(t.get("assigned_to")) in agent_ids and str(t.get("created_at", "")).startswith(today)
+    ]
+    clients_assigned = [
+        f"{names.get(str(t.get('assigned_to')), t.get('assigned_to'))} — {t.get('title', '')}"
+        for t in tasks_today
+    ]
+
+    meetings_today = [
+        m for m in get_meetings()
+        if str(m.get("agent_id")) in agent_ids and str(m.get("timestamp", "")).startswith(today)
+    ]
+    meetings_list = [
+        f"{m.get('agent_name') or names.get(str(m.get('agent_id')), '')} — {m.get('address') or m.get('district') or ''}"
+        for m in meetings_today
+    ]
+
+    listing_counts = [
+        f"{a.get('name')}: {att_all[str(a.get('agent_id'))].get('count_submitted')}"
+        for a in agents
+        if str(a.get("agent_id")) in att_all
+        and att_all[str(a.get("agent_id"))].get("count_submitted") not in (None, "")
+    ]
+
+    warns_today = [
+        w for w in get_warnings()
+        if str(w.get("agent_id")) in agent_ids and str(w.get("created_at", "")).startswith(today)
+    ]
+    warnings_today = [
+        f"{names.get(str(w.get('agent_id')), w.get('agent_id'))} — "
+        f"{_DIGEST_WARNING_LABELS.get(w.get('type'), w.get('type'))}"
+        for w in warns_today
+    ]
+
+    attention = []
+    for a in agents:
+        aid = str(a.get("agent_id"))
+        w_count = len(get_warnings(agent_id=aid, days=config.WARNING_WINDOW_DAYS))
+        if w_count >= max(1, config.WARNING_LIMIT - 1):
+            attention.append(
+                f"{a.get('name')} — {w_count}/{config.WARNING_LIMIT} გაფრთხილება "
+                f"({config.WARNING_WINDOW_DAYS} დღეში)"
+            )
+
+    teams = sorted({str(a.get("team", "")).strip() for a in all_agents if a.get("team")}) if team is None else []
+
+    return {
+        "date": today,
+        "came": came,
+        "not_started": not_started,
+        "clients_assigned": clients_assigned,
+        "meetings": meetings_list,
+        "listing_counts": listing_counts,
+        "warnings_today": warnings_today,
+        "attention": attention,
+        "teams": teams,
     }

@@ -27,7 +27,8 @@ const MODE_LABELS = {
   online: "ონლაინ დღე",
   off: "დასვენება",
 };
-const MODE_ICON = { office_morning: "🏢", office_evening: "🏢", online: "💻", off: "🌙" };
+const MODE_ICON = { office_morning: "🌅🏢", office_evening: "🌇🏢", online: "💻", off: "🌙" };
+const MODE_SUBLABEL = { office_morning: "დილა", office_evening: "საღამო", online: "სახლი", off: "" };
 const WEEKDAY_LABELS = { mon: "ორშ", tue: "სამ", wed: "ოთხ", thu: "ხუთ", fri: "პარ", sat: "შაბ", sun: "კვ" };
 const WEEKDAY_KEYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"];
 const WARNING_LABELS = {
@@ -43,6 +44,8 @@ const AGENT_TABS = [
   { id: "today", label: "დღეს", icon: "🏠" },
   { id: "tasks", label: "დავალებები", icon: "📋" },
   { id: "kpi", label: "KPI", icon: "📈" },
+  { id: "taskhistory", label: "ისტორია", icon: "📜", lazy: true },
+  { id: "meetings", label: "შეხვედრები", icon: "🤝", lazy: true },
   { id: "exclusives", label: "ექსკლუზივები", icon: "🏘️", lazy: true },
   { id: "questions", label: "კითხვები", icon: "💬", lazy: true },
 ];
@@ -52,6 +55,9 @@ const ADMIN_TABS = [
   { id: "ranking", label: "რეიტინგი", icon: "🏆" },
   { id: "agentsmgmt", label: "აგენტები", icon: "🗂️", lazy: true, adminOnly: true },
   { id: "admintasks", label: "დავალებები", icon: "📄", lazy: true },
+  { id: "taskhistory", label: "ისტორია", icon: "📜", lazy: true },
+  { id: "meetings", label: "შეხვედრები", icon: "🤝", lazy: true },
+  { id: "digest", label: "დღის ამბები", icon: "🗞️", lazy: true },
   { id: "dayoffs", label: "შვებულებები", icon: "🗓️" },
   { id: "warnings", label: "გაფრთხილებები", icon: "⚠️" },
   { id: "swaps", label: "სმენის გაცვლა", icon: "🔁", lazy: true },
@@ -150,7 +156,7 @@ function toast(msg) {
 /* ---------------------------------------------------- დეტალის მოდალი */
 /* დააწექით ნებისმიერ სიის სტრიქონს და ნახავთ ჩანაწერის ყველა ველს —
    ასე მოკლე ბარათებზეც ხელმისაწვდომია სრული ინფორმაცია. */
-function openDetail(title, fields) {
+function openDetail(title, fields, extraHtml) {
   const backdrop = document.getElementById("modalBackdrop");
   const box = document.getElementById("modalBox");
   const rows = fields
@@ -160,6 +166,7 @@ function openDetail(title, fields) {
   box.innerHTML = `
     <h3>${esc(title)}<button class="close" id="modalClose">✕</button></h3>
     ${rows || `<div class="empty">დამატებითი ინფორმაცია არ არის</div>`}
+    ${extraHtml || ""}
   `;
   backdrop.hidden = false;
   document.getElementById("modalClose").onclick = closeDetail;
@@ -196,6 +203,25 @@ function ring(percent, size = 74, stroke = 8) {
     </svg>
     <div class="pct">${percent}%</div>
   </div>`;
+}
+
+/* კვირის გრაფიკის ზოლი — გამოიყენება როგორც აგენტის საკუთარ "დღეს"
+   ტაბში, ისე ადმინის/მენეჯერის გუნდის დეტალების window-ში (რომ
+   მენეჯერსაც ჰქონდეს იგივე დილა/საღამო/სახლი ინფორმაცია, აგენტს
+   რომ დააწვება). schedule — {mon:"office_morning", ...} ტიპის obj. */
+function weekStripHtml(schedule) {
+  const sch = schedule || {};
+  return `<div class="week-strip">
+      ${WEEKDAY_KEYS.map((k) => {
+        const isToday = k === WEEKDAY_KEYS[(new Date().getDay() + 6) % 7];
+        const m = sch[k] || "off";
+        return `<div class="day ${isToday ? "today" : ""}">
+          <div class="d">${WEEKDAY_LABELS[k]}</div>
+          <div class="m">${MODE_ICON[m] || "🌙"}</div>
+          ${MODE_SUBLABEL[m] ? `<div class="msub">${MODE_SUBLABEL[m]}</div>` : ""}
+        </div>`;
+      }).join("")}
+    </div>`;
 }
 
 function statusBadge(mode, clockedIn, clockOut) {
@@ -258,16 +284,7 @@ function renderToday(d) {
 
   <div class="card">
     <h2>📅 კვირის გრაფიკი</h2>
-    <div class="week-strip">
-      ${WEEKDAY_KEYS.map((k, i) => {
-        const isToday = k === WEEKDAY_KEYS[(new Date().getDay() + 6) % 7];
-        const m = d.schedule[k] || "off";
-        return `<div class="day ${isToday ? "today" : ""}">
-          <div class="d">${WEEKDAY_LABELS[k]}</div>
-          <div class="m">${MODE_ICON[m] || "🌙"}</div>
-        </div>`;
-      }).join("")}
-    </div>
+    ${weekStripHtml(d.schedule)}
   </div>
 
   <div class="card">
@@ -387,6 +404,20 @@ function bindAgentActions(d) {
       if (count === null) return;
       body = { count };
     }
+
+    // სავალდებულო კითხვა — რომ არცერთ აგენტს არ დაავიწყდეს კლიენტის
+    // რეპორტის შევსება დღის დახურვისას.
+    const hadClient = confirm("დღეს რომელიმე კლიენტთან იმუშავეთ?");
+    if (hadClient) {
+      const phone = prompt("კლიენტის ტელეფონის ნომერი?");
+      if (phone === null) return;
+      if (phone.trim()) {
+        const actions = prompt("რა შესრულდა ამ კლიენტთან? (მაგ: დარეკვა, ბინის ჩვენება, გარიგება)") || "";
+        const notes = prompt("შენიშვნა (არასავალდებულო)") || "";
+        body.client_report = { phone: phone.trim(), actions, notes };
+      }
+    }
+
     btnOut.disabled = true;
     try {
       const res = await api("/api/clockout", { method: "POST", body: JSON.stringify(body) });
@@ -419,6 +450,7 @@ function renderOverview(d) {
       <div class="stat"><div class="num">${s.pending_dayoffs}</div><div class="lbl">მოლოდინში (შვებ.)</div></div>
       <div class="stat"><div class="num">${s.active_total}</div><div class="lbl">აქტიური აგენტი</div></div>
       ${s.inactive_total ? `<div class="stat"><div class="num">${s.inactive_total}</div><div class="lbl">გათავისუფლებული</div></div>` : ""}
+      ${s.late_count ? `<div class="stat" style="border-color:var(--red)"><div class="num" style="color:var(--red)">${s.late_count}</div><div class="lbl">🔴 დაგვიანებული დღეს</div></div>` : ""}
     </div>
     ${chart}
   </div>
@@ -467,11 +499,11 @@ function renderTeam(d) {
           <span class="tg-meta">${members.length} წევრი${lead ? " · 👑 " + esc(lead.t.name) : ""}${avgRate != null ? " · საშ. " + avgRate + "%" : ""}</span>
         </div>
         ${members.map(({ t, i }) => `
-          <div class="list-row clickable" data-team-idx="${i}">
+          <div class="list-row clickable" data-team-idx="${i}" ${t.late ? `style="border-left:3px solid var(--red)"` : ""}>
             <div class="avatar">${initials(t.name)}</div>
             <div class="main">
-              <div class="title">${esc(t.name)} ${t.role === "team_lead" ? "👑" : ""}</div>
-              <div class="sub">${MODE_ICON[t.mode] || "🌙"} ${esc(MODE_LABELS[t.mode] || t.mode)}</div>
+              <div class="title">${esc(t.name)} ${t.role === "team_lead" ? "👑" : ""} ${t.late ? "🔴" : ""}</div>
+              <div class="sub">${MODE_ICON[t.mode] || "🌙"} ${esc(MODE_LABELS[t.mode] || t.mode)}${t.late ? " · <span style=\"color:var(--red)\">დაგვიანებულია</span>" : ""}</div>
             </div>
             <div class="side">
               ${statusBadge(t.mode, t.clocked_in, false)}
@@ -501,6 +533,7 @@ function bindTeamActions(d) {
           label,
           value: k === "mode" ? (MODE_LABELS[t.mode] || t.mode) : t[k],
         })).concat([{ label: "შედეგი (30დღე)", value: rateStr }]),
+        `<div class="field"><div class="k">კვირის გრაფიკი</div></div>${weekStripHtml(t.schedule)}`,
       );
     };
   });
@@ -926,6 +959,121 @@ function bindAdminTasksActions() {
   }
 }
 
+/* ------------------------------------------------------ შეხვედრები */
+function renderMeetings(payload) {
+  const rows = (payload && payload.rows) || [];
+  return `<div class="card">
+    ${renderPeriodSwitch()}
+    <h2>🤝 შეხვედრები — ${esc(PERIOD_TITLES[state.period] || "")} <span class="cnt">${rows.length}</span></h2>
+    ${!rows.length ? `<div class="empty">ამ პერიოდში შეხვედრა არ ყოფილა</div>` :
+      rows.map((m) => `
+      <div class="list-row" style="align-items:flex-start">
+        <div class="avatar">🏠</div>
+        <div class="main">
+          <div class="title">${esc(m.address || m.district || "მისამართი უცნობია")}</div>
+          <div class="sub">${esc(m.agent_name || "")}${m.owner_phone ? " · მეპატრონე: " + esc(m.owner_phone) : ""}</div>
+          <div class="sub">${esc(m.meeting_date || "")} ${esc(m.time || "")}${m.price ? " · " + esc(m.price) : ""}</div>
+        </div>
+        <div class="side sub">${esc((m.timestamp || "").split(" ")[0] || "")}</div>
+      </div>`).join("")}
+  </div>`;
+}
+
+/* ------------------------------------------------------ დავალებების ისტორია */
+function renderTaskHistory(payload) {
+  const rows = (payload && payload.rows) || [];
+  const teams = (payload && payload.teams) || [];
+  const agents = (payload && payload.agents) || [];
+  const isAdmin = state.role === "admin" && !(state.data && state.data.is_team_lead);
+  const statusLabel = { New: "ახალი", InProgress: "მუშავდება", Done: "დასრულებული" };
+  const drilldown = (isAdmin || agents.length > 1) ? `
+    <div class="qa-compose" style="margin-bottom:10px">
+      ${isAdmin ? `<select id="histTeamSelect">
+        <option value="">ყველა გუნდი</option>
+        ${teams.map((t) => `<option value="${esc(t)}" ${state.historyTeam === t ? "selected" : ""}>${esc(t)}</option>`).join("")}
+      </select>` : ""}
+      <select id="histAgentSelect">
+        <option value="">ყველა აგენტი</option>
+        ${agents.map((a) => `<option value="${esc(a.agent_id)}" ${state.historyAgent === String(a.agent_id) ? "selected" : ""}>${esc(a.name)}</option>`).join("")}
+      </select>
+    </div>` : "";
+  return `<div class="card">
+    ${renderPeriodSwitch()}
+    <h2>📜 დავალებების ისტორია — ${esc(PERIOD_TITLES[state.period] || "")} <span class="cnt">${rows.length}</span></h2>
+    ${drilldown}
+    ${!rows.length ? `<div class="empty">ამ პერიოდში დავალება არ ყოფილა</div>` :
+      rows.map((t) => `
+      <div class="list-row" style="align-items:flex-start">
+        <div class="avatar">${t.lead_type === "listing" ? "🏠" : "👤"}</div>
+        <div class="main">
+          <div class="title">${esc(t.title || "")}</div>
+          <div class="sub">${esc(t.assigned_to_name || "")}${t.client_phone ? " · " + esc(t.client_phone) : ""}</div>
+          <div class="sub">${esc((t.created_at || "").split(" ")[0] || "")}</div>
+        </div>
+        <div class="side"><span class="badge ${t.status === "Done" ? "green" : "gray"}">${esc(statusLabel[t.status] || t.status || "-")}</span></div>
+      </div>`).join("")}
+  </div>`;
+}
+
+function bindTaskHistoryActions() {
+  const teamSel = document.getElementById("histTeamSelect");
+  if (teamSel) {
+    teamSel.onchange = () => {
+      state.historyTeam = teamSel.value;
+      state.historyAgent = "";
+      delete lazyCache.taskhistory;
+      renderContent();
+    };
+  }
+  const agentSel = document.getElementById("histAgentSelect");
+  if (agentSel) {
+    agentSel.onchange = () => {
+      state.historyAgent = agentSel.value;
+      delete lazyCache.taskhistory;
+      renderContent();
+    };
+  }
+}
+
+/* ------------------------------------------------------ დღის ამბები (digest) */
+function renderDigest(payload) {
+  const d = payload || {};
+  const isAdmin = state.role === "admin" && !(state.data && state.data.is_team_lead);
+  const teams = d.teams || [];
+  const section = (icon, title, items, empty) => `
+    <div class="field"><div class="k">${icon} ${esc(title)}</div></div>
+    ${items && items.length
+      ? items.map((s) => `<div class="list-row"><div class="main"><div class="title">${esc(s)}</div></div></div>`).join("")
+      : `<div class="empty">${esc(empty)}</div>`}`;
+  return `<div class="card">
+    ${isAdmin ? `<div class="qa-compose" style="margin-bottom:10px">
+      <select id="digestTeamSelect">
+        <option value="">მთელი კომპანია</option>
+        ${teams.map((t) => `<option value="${esc(t)}" ${state.digestTeam === t ? "selected" : ""}>${esc(t)}</option>`).join("")}
+      </select>
+    </div>` : ""}
+    <h2>🗞️ დღის ამბები — ${esc(d.date || "")}</h2>
+    ${section("1️⃣", `გამოცხადდა (${(d.came || []).length})`, d.came, "დღეს ჯერ არავინ დაწყებულა")}
+    ${d.not_started && d.not_started.length ? section("🔴", "ჯერ არ დაწყებულა", d.not_started, "") : ""}
+    ${section("2️⃣", "დღეს კლიენტი ჩაბარდა", d.clients_assigned, "დღეს არავის ჩაბარებია")}
+    ${section("3️⃣", "დღეს შეხვედრაზე იყო", d.meetings, "დღეს შეხვედრა არ ყოფილა")}
+    ${section("4️⃣", "დღეს შეყვანილი განცხადებები", d.listing_counts, "ჯერ არავის შეუყვანია")}
+    ${section("5️⃣", "დღეს გაფრთხილება მიიღო", d.warnings_today, "დღეს გაფრთხილება არ ყოფილა")}
+    ${section("6️⃣", "საჭიროებს ყურადღებას", d.attention, "ყველაფერი წესრიგშია 🎉")}
+  </div>`;
+}
+
+function bindDigestActions() {
+  const sel = document.getElementById("digestTeamSelect");
+  if (sel) {
+    sel.onchange = () => {
+      state.digestTeam = sel.value;
+      delete lazyCache.digest;
+      renderContent();
+    };
+  }
+}
+
 function renderSwaps(rows) {
   if (!rows.length) return `<div class="card"><div class="empty">დასადასტურებელი მოთხოვნა არ არის</div></div>`;
   return `<div class="card">
@@ -1092,7 +1240,18 @@ const LAZY_ENDPOINTS = {
   questions: "/api/questions",
   admintasks: "/api/tasks",
   agentsmgmt: "/api/agents",
+  meetings: "/api/meetings",
+  taskhistory: "/api/task-history",
+  digest: "/api/digest",
 };
+/* ტაბები, რომელთა endpoint-საც სჭირდება ?period=day|week|month —
+   period-ის შეცვლისას load() ისედაც წმენდს lazyCache-ს მთლიანად,
+   ასე რომ საკმარისია URL-ში დღევანდელი state.period გადავცეთ. */
+const PERIOD_AWARE_TABS = new Set(["meetings", "taskhistory", "digest"]);
+/* taskhistory-ს დამატებითი დრილდაუნი (ადმინი: გუნდი → აგენტი). */
+if (!state.historyTeam) state.historyTeam = "";
+if (!state.historyAgent) state.historyAgent = "";
+if (!state.digestTeam) state.digestTeam = "";
 
 /* `adminOnly` ტაბები (მაგ. აგენტების/მენეჯერების მართვა) დირექტორის
    დონის მოქმედებაა — თიმლიდერს (რომელიც ტექნიკურად იმავე "admin"
@@ -1131,8 +1290,18 @@ async function renderContent() {
       if (!lazyCache[tab]) {
         content.innerHTML = `<div class="card"><div class="empty">იტვირთება…</div></div>`;
         try {
-          const resp = await api(LAZY_ENDPOINTS[tab]);
-          lazyCache[tab] = (tab === "admintasks" || tab === "agentsmgmt") ? resp : (resp.rows || []);
+          let url = LAZY_ENDPOINTS[tab];
+          const params = [];
+          if (PERIOD_AWARE_TABS.has(tab)) params.push("period=" + encodeURIComponent(state.period));
+          if (tab === "taskhistory") {
+            if (state.historyTeam) params.push("team=" + encodeURIComponent(state.historyTeam));
+            if (state.historyAgent) params.push("agent_id=" + encodeURIComponent(state.historyAgent));
+          }
+          if (tab === "digest" && state.digestTeam) params.push("team=" + encodeURIComponent(state.digestTeam));
+          if (params.length) url += "?" + params.join("&");
+          const resp = await api(url);
+          const wholeObjTabs = ["admintasks", "agentsmgmt", "meetings", "taskhistory", "digest"];
+          lazyCache[tab] = wholeObjTabs.includes(tab) ? resp : (resp.rows || []);
         } catch (e) {
           content.innerHTML = `<div class="card"><div class="empty">⚠️ ${esc(e.message)}</div></div>`;
           return;
@@ -1145,6 +1314,9 @@ async function renderContent() {
       else if (tab === "questions") { content.innerHTML = renderQuestions(rows, state.role); bindQuestionsActions(state.role); }
       else if (tab === "admintasks") { content.innerHTML = renderAdminTasks(rows); bindAdminTasksActions(); }
       else if (tab === "agentsmgmt") { content.innerHTML = renderAgentsMgmt(rows); bindAgentsMgmtActions(); }
+      else if (tab === "meetings") { content.innerHTML = renderMeetings(rows); bindPeriodSwitch(); }
+      else if (tab === "taskhistory") { content.innerHTML = renderTaskHistory(rows); bindTaskHistoryActions(rows); }
+      else if (tab === "digest") { content.innerHTML = renderDigest(rows); bindDigestActions(); }
       return;
     }
 

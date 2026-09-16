@@ -597,6 +597,94 @@ def api_tasks_reassign():
     return jsonify(ok=True, row=row)
 
 
+@app.get("/api/task-history")
+def api_task_history():
+    """დავალებების ისტორია (ღიაც და დახურულიც), დღე/კვირა/თვე ფილტრით
+    (?period=). ადმინს შეუძლია ?team= და შემდეგ ?agent_id= დრილდაუნი
+    (ჯერ ირჩევს გუნდის მენეჯერს, მერე კონკრეტულ აგენტს); თიმლიდერს
+    ავტომატურად საკუთარი გუნდი უფილტრდება, აგენტს კი — მხოლოდ თავისი."""
+    agent, admin, err = _authed_agent()
+    if err:
+        return err
+    days = _period_to_days(request.args.get("period"))
+    team_lead = _is_team_lead(agent)
+
+    if admin or team_lead:
+        team = request.args.get("team") or (None if admin else str(agent.get("team", "")).strip())
+        agent_id = request.args.get("agent_id") or None
+        # თუ კონკრეტული agent_id მოთხოვნილია, ვამოწმებთ, რომ ის
+        # მართლა ამ სქოუფის (გუნდის) წევრია — თიმლიდერს არ შეუძლია სხვა
+        # გუნდის აგენტის ისტორიის ნახვა agent_id-ის პირდაპირ გადაცემით.
+        if agent_id and not admin:
+            target = next((a for a in sheets.get_agents() if str(a.get("agent_id")) == str(agent_id)), None)
+            if not target or str(target.get("team", "")).strip() != team:
+                return jsonify(error="მხოლოდ საკუთარი გუნდის აგენტის ისტორია"), 403
+        rows = sheets.get_task_history(days=days, agent_id=agent_id, team=None if agent_id else team)
+        teams = sorted({str(a.get("team", "")).strip() for a in sheets.get_agents() if a.get("team")}) if admin else []
+        agents_out = sorted(
+            [
+                {"agent_id": a.get("agent_id"), "name": a.get("name")}
+                for a in sheets.get_agents()
+                if (team is None or str(a.get("team", "")).strip() == team)
+            ],
+            key=lambda r: r.get("name") or "",
+        )
+        return jsonify(rows=rows[:200], count=len(rows), teams=teams, agents=agents_out, team=team or "")
+
+    if not agent:
+        return jsonify(error="მხოლოდ დარეგისტრირებული აგენტისთვის"), 403
+    rows = sheets.get_task_history(days=days, agent_id=agent["agent_id"])
+    return jsonify(rows=rows[:200], count=len(rows))
+
+
+@app.get("/api/meetings")
+def api_meetings_history():
+    """შეხვედრების ისტორია დღე/კვირა/თვე ფილტრით — ადმინს ყველა
+    შეხვედრა ჩანს, თიმლიდერს საკუთარი გუნდისა, აგენტს კი მხოლოდ
+    საკუთარი."""
+    agent, admin, err = _authed_agent()
+    if err:
+        return err
+    days = _period_to_days(request.args.get("period"))
+    team_lead = _is_team_lead(agent)
+
+    if admin or team_lead:
+        team_filter = None if admin else str(agent.get("team", "")).strip()
+        rows = sheets.get_meetings(days=days)
+        if team_filter:
+            team_ids = {
+                str(a.get("agent_id")) for a in sheets.get_agents()
+                if str(a.get("team", "")).strip() == team_filter
+            }
+            rows = [r for r in rows if str(r.get("agent_id")) in team_ids]
+        rows.sort(key=lambda r: str(r.get("timestamp", "")), reverse=True)
+        return jsonify(rows=rows[:200], count=len(rows), scope="all" if admin else "team")
+
+    if not agent:
+        return jsonify(error="მხოლოდ დარეგისტრირებული აგენტისთვის"), 403
+    rows = sheets.get_meetings(agent_id=agent["agent_id"], days=days)
+    rows.sort(key=lambda r: str(r.get("timestamp", "")), reverse=True)
+    return jsonify(rows=rows[:200], count=len(rows), scope="own")
+
+
+@app.get("/api/digest")
+def api_digest():
+    """დღის შეჯამება (6 პუნქტიანი) — მხოლოდ ადმინი/თიმლიდერი. ადმინს
+    შეუძლია ?team= აირჩიოს კონკრეტული გუნდი, სხვა შემთხვევაში მთელი
+    კომპანია ეჩვენება. თიმლიდერს ავტომატურად საკუთარი გუნდი უჩანს."""
+    agent, admin, err = _authed_agent()
+    if err:
+        return err
+    if not (admin or _is_team_lead(agent)):
+        return jsonify(error="მხოლოდ მენეჯერისთვის/თიმლიდერისთვის"), 403
+    team = request.args.get("team") or (None if admin else str(agent.get("team", "")).strip())
+    try:
+        return jsonify(sheets.get_daily_digest(team=team))
+    except Exception:
+        log.exception("დღის ამბების აწყობა ჩავარდა")
+        return jsonify(error="მონაცემების ჩატვირთვა ვერ მოხერხდა"), 500
+
+
 @app.post("/api/clockin")
 def api_clockin():
     agent, admin, err = _authed_agent()
@@ -635,7 +723,11 @@ def api_clockout():
 
         if mode in ("office_morning", "office_evening"):
             site, myhome, ssge = _as_int(body.get("site")), _as_int(body.get("myhome")), _as_int(body.get("ssge"))
-            total = site + myhome + ssge
+            # იხ. bot.py-ის იგივე ლოგიკის კომენტარი: ერთი და იგივე
+            # განცხადება ერთდროულად იტვირთება საიტზე და myhome-ზე,
+            # ამიტომ ჯამი = max(site, myhome), ss.ge ჯერჯერობით მხოლოდ
+            # საინფორმაციოდ ინახება.
+            total = max(site, myhome)
             sheets.set_daily_count(agent_id, total, site=site, myhome=myhome, ssge=ssge)
         else:
             total = _as_int(body.get("count"))
@@ -667,6 +759,35 @@ def api_clockout():
                         "ანგარიში დროებით გამოირთო. დაუკავშირდით მენეჯერს."
                     )
                 _send_telegram_message(int(agent["telegram_chat_id"]), agent_text)
+            team_val = str(agent.get("team", "")).strip()
+            if team_val and str(agent.get("role", "")).strip() != "team_lead":
+                lead = next(
+                    (x for x in sheets.get_agents()
+                     if str(x.get("role", "")).strip() == "team_lead"
+                     and str(x.get("team", "")).strip() == team_val),
+                    None,
+                )
+                if lead and lead.get("telegram_chat_id"):
+                    _send_telegram_message(
+                        int(lead["telegram_chat_id"]),
+                        f"⚠️ თქვენი გუნდიდან — {agent['name']}: {label}\n{detail}",
+                    )
+
+        # სავალდებულო "კლიენტი გყავდათ დღეს?" კითხვის პასუხი Mini App-იდან
+        # — თუ agent-მა კი უპასუხა და ტელეფონი მოვიდა, ავტომატურად იქმნება
+        # client report, ისევე როგორც /clientreport-ით (ბოტის მხარეს).
+        cr = body.get("client_report")
+        if result == "ok" and isinstance(cr, dict) and str(cr.get("phone", "")).strip():
+            try:
+                sheets.create_report(
+                    agent_id=agent_id,
+                    client_phone=str(cr.get("phone", "")).strip(),
+                    actions=str(cr.get("actions", "")).strip(),
+                    notes=str(cr.get("notes", "")).strip(),
+                    file_id="",
+                )
+            except Exception:
+                log.exception("Mini App clockout client report ვერ შეიქმნა agent_id=%s", agent_id)
     return jsonify(result=result)
 
 

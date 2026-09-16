@@ -399,6 +399,85 @@ def test_admin_dashboard_excludes_deactivated_agents():
     check(admin["summary"]["inactive_total"] == 1, "inactive_total სწორად ითვლის გათავისუფლებულებს")
 
 
+def test_get_task_history_filters_by_team_and_agent():
+    setup()
+    lead = sp.add_agent("ისტ. ლიდერი", "555021", team="")
+    sp.set_agent_role(lead, "team_lead")
+    sp.set_agent_team(lead, "ისტგუნდი1")
+    a1 = sp.add_agent("ისტ. წევრი1", "555022", team="ისტგუნდი1")
+    a2 = sp.add_agent("ისტ. სხვაგუნდელი", "555023", team="ისტგუნდი2")
+    sp.create_task("t1", "", a1, "მაღალი", "", "admin")
+    sp.create_task("t2", "", a2, "მაღალი", "", "admin")
+
+    team1_hist = sp.get_task_history(team="ისტგუნდი1")
+    ids = {t["assigned_to"] for t in team1_hist}
+    check(a1 in ids and a2 not in ids, "get_task_history(team=) მხოლოდ იმ გუნდის დავალებებს აბრუნებს")
+
+    agent_hist = sp.get_task_history(agent_id=a2)
+    check(len(agent_hist) == 1 and agent_hist[0]["assigned_to"] == a2,
+          "get_task_history(agent_id=) მხოლოდ ერთი აგენტისას აბრუნებს")
+
+    all_hist = sp.get_task_history()
+    check(len(all_hist) == 2, "get_task_history() ფილტრის გარეშე ორივეს აბრუნებს")
+
+
+def test_get_meetings_days_filter():
+    setup()
+    aid = sp.add_agent("შემხვედრელი", "555024")
+    mid_old = sp.create_meeting({"agent_id": aid, "agent_name": "შემხვედრელი", "address": "ძველი მისამართი"})
+    import db
+    db.execute("UPDATE meetings SET timestamp = ? WHERE meeting_id = ?", ("2000-01-01 10:00", mid_old))
+    mid_new = sp.create_meeting({"agent_id": aid, "agent_name": "შემხვედრელი", "address": "ახალი მისამართი"})
+
+    recent = sp.get_meetings(agent_id=aid, days=7)
+    ids = {m["meeting_id"] for m in recent}
+    check(mid_new in ids and mid_old not in ids, "get_meetings(days=) ძველ ჩანაწერს გამორიცხავს")
+
+    all_meetings = sp.get_meetings(agent_id=aid)
+    check(len(all_meetings) == 2, "days-ის გარეშე ორივე ჩანაწერი ბრუნდება")
+
+
+def test_daily_digest_covers_all_six_points():
+    setup()
+    lead = sp.add_agent("დიჯესთის ლიდერი", "555025", team="")
+    sp.set_agent_role(lead, "team_lead")
+    sp.set_agent_team(lead, "დიჯგუნდი")
+    sp.register_agent_chat_id(lead, 1001, "lead")
+    member = sp.add_agent("დიჯწევრი", "555026", team="დიჯგუნდი")
+    sp.set_agent_schedule(member, {k: "office_morning" for k in sp.WEEKDAY_KEYS})
+    sp.clock_in(member)
+    sp.set_daily_count(member, 5, site=5, myhome=5, ssge=0)
+    sp.create_task("კლიენტი დღეს", "", member, "მაღალი", "", "admin")
+    sp.create_meeting({"agent_id": member, "agent_name": "დიჯწევრი", "address": "სადღაცერთი ქუჩა"})
+    sp.add_warning(member, "late_arrival", "ტესტი")
+
+    digest = sp.get_daily_digest(team="დიჯგუნდი")
+    check(any("დიჯწევრი" in s for s in digest["came"]), "digest.came შეიცავს გამოცხადებულ წევრს")
+    check(len(digest["clients_assigned"]) == 1, "digest.clients_assigned ხედავს დღეს მინიჭებულ დავალებას")
+    check(len(digest["meetings"]) == 1, "digest.meetings ხედავს დღეს დარეგისტრირებულ შეხვედრას")
+    check(any("დიჯწევრი: 5" in s for s in digest["listing_counts"]), "digest.listing_counts სწორ რაოდენობას აჩვენებს")
+    check(len(digest["warnings_today"]) == 1, "digest.warnings_today ხედავს დღეს გაცემულ გაფრთხილებას")
+    check(digest["teams"] == [], "კონკრეტული team-ის მოთხოვნისას teams სია ცარიელია")
+
+    company_digest = sp.get_daily_digest(team=None)
+    check("დიჯგუნდი" in company_digest["teams"], "team=None-ზე teams სია ყველა გუნდს შეიცავს")
+
+
+def test_admin_dashboard_late_flag():
+    setup()
+    aid = sp.add_agent("დაგვიანებული", "555027", team="ლეიტგუნდი")
+    sp.set_agent_schedule(aid, {k: "office_morning" for k in sp.WEEKDAY_KEYS})
+    # არ ვუშვებთ clock_in-ს — office_morning იწყება 10:00-ზე; ტესტი
+    # თავად დროზე არ არის დამოკიდებული (late მხოლოდ საათის მიხედვით
+    # გამოითვლება), უბრალოდ ვამოწმებთ, რომ ველი საერთოდ არსებობს და
+    # ბულეანია — ცრუ-პოზიტივი/ნეგატივი დროზეა დამოკიდებული საწარმოო
+    # გარემოში, აქ მხოლოდ ფორმას ვამოწმებთ.
+    admin = sp.get_admin_dashboard()
+    row = next(t for t in admin["team"] if t["agent_id"] == aid)
+    check("late" in row and isinstance(row["late"], bool), "team_rows-ს აქვს ბულეანი 'late' ველი")
+    check("late_count" in admin["summary"], "summary-ს აქვს 'late_count'")
+
+
 # ---------------------------------------------------------------------
 # მარტივი გამშვები (pytest-ის გარეშეც მუშაობს)
 # ---------------------------------------------------------------------

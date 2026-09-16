@@ -63,6 +63,10 @@ SC_AGENT, SC_DAY = range(17, 19)
 (SN_TARGET,) = range(21, 22)
 # ---- /swapshift (agent) — სმენის/ცვლის გაცვლის მოთხოვნა ----
 SW_TYPE, SW_TARGET, SW_DATE, SW_MODE, SW_NOTE = range(22, 27)
+# ---- /clockout-ის დამატებითი ბოლო ნაბიჯი: "კლიენტი გყავდათ?" კითხვა,
+#      რომლის "კი"-ც პირდაპირ გადადის RP_PHONE/RP_ACTIONS/RP_NOTES-ზე
+#      (იგივე state-ები, რასაც /clientreport იყენებს) ----
+(CO_CLIENT,) = range(27, 28)
 
 PRIORITY_LABELS = ("დაბალი", "საშუალო", "მაღალი")
 
@@ -1391,9 +1395,14 @@ async def clockout_count(update: Update, context: ContextTypes.DEFAULT_TYPE):
     sheets.clock_out(agent_id)
     if mode in ("office_morning", "office_evening"):
         site, myhome, ssge = data.get("site", 0), data.get("myhome", 0), data.get("ssge", 0)
-        total = site + myhome + ssge
+        # ერთი და იგივე განცხადება ერთდროულად იტვირთება საიტზე და
+        # myhome-ზე (სარკისებურად) — ამიტომ ჯამი არ არის site+myhome+ssge
+        # (ეს დუბლირებას/ტრიპლირებას იძლევა), არამედ ორივედან უფრო დიდი
+        # რიცხვი (რეალურად ატვირთული უნიკალური განცხადებების რაოდენობა).
+        # ss.ge ამ ეტაპზე ჯამში არ ითვლება, მხოლოდ ინფორმაციულად ინახება.
+        total = max(site, myhome)
         sheets.set_daily_count(agent_id, total, site=site, myhome=myhome, ssge=ssge)
-        count_display = f"საიტი {site} + myhome {myhome} + ss.ge {ssge} = სულ {total}"
+        count_display = f"საიტი {site} / myhome {myhome} / ss.ge {ssge} (ინფო) = ჩაითვალა {total}"
     else:
         total = data.get("total", 0)
         sheets.set_daily_count(agent_id, total)
@@ -1409,7 +1418,30 @@ async def clockout_count(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await _notify_warning(context, agent, "quota_missed", detail, result)
 
     await update.message.reply_text(f"✅ სამუშაო დღე დასრულებულია. შეყვანილია: {count_display}.{note}")
-    return ConversationHandler.END
+
+    # სავალდებულო კითხვა: "დღეს კლიენტი გყავდათ?" — რომ არცერთ აგენტს
+    # არ დაავიწყდეს კლიენტის რეპორტის შევსება, სანამ სამუშაო დღეს
+    # საბოლოოდ არ დახურავს. "კი"-ს შემთხვევაში პირდაპირ გადადის
+    # /clientreport-ის იმავე ნაბიჯებზე (ტელეფონი → მოქმედებები → შენიშვნა).
+    context.user_data["rp_agent_id"] = agent_id
+    keyboard = InlineKeyboardMarkup([[
+        InlineKeyboardButton("კი, იყო კლიენტი", callback_data="coclient:yes"),
+        InlineKeyboardButton("არა, არ ყოფილა", callback_data="coclient:no"),
+    ]])
+    await update.message.reply_text("დღეს რომელიმე კლიენტთან იმუშავეთ?", reply_markup=keyboard)
+    return CO_CLIENT
+
+
+async def clockout_client_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    choice = query.data.split(":", 1)[1]
+    if choice == "no":
+        await query.edit_message_text("კარგი, გისურვებთ კარგ დასვენებას 👋")
+        context.user_data.pop("rp_agent_id", None)
+        return ConversationHandler.END
+    await query.edit_message_text("კლიენტის ტელეფონის ნომერი?")
+    return RP_PHONE
 
 
 async def schedule_today(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1746,6 +1778,97 @@ async def send_daily_report(context: ContextTypes.DEFAULT_TYPE):
             log.exception("დღიური რეპორტის გაგზავნა ვერ მოხერხდა admin=%s", admin_id)
 
 
+def _build_team_digest_text(digest: dict, heading: str) -> str:
+    """sheets.get_daily_digest(...)-ის შედეგს კითხვად ტექსტად აწყობს —
+    იგივე მონაცემები, რასაც Mini App-ის „დღის ამბები“ ტაბიც აჩვენებს."""
+    lines = [heading, f"📅 {digest.get('date', '')}", ""]
+
+    came = digest.get("came", [])
+    lines.append(f"1️⃣ დღეს გამოცხადდა: {len(came)}")
+    if came:
+        lines.extend(f"  • {s}" for s in came)
+    else:
+        lines.append("  (არავინ)")
+    not_started = digest.get("not_started", [])
+    if not_started:
+        lines.append("   🔴 ჯერ არ დაუწყია:")
+        lines.extend(f"  • {s}" for s in not_started)
+    lines.append("")
+
+    lines.append(f"2️⃣ დღეს კლიენტი ჩაბარდა: {len(digest.get('clients_assigned', []))}")
+    lines.extend(f"  • {s}" for s in digest.get("clients_assigned", []))
+    lines.append("")
+
+    lines.append(f"3️⃣ დღეს შეხვედრაზე იყო: {len(digest.get('meetings', []))}")
+    lines.extend(f"  • {s}" for s in digest.get("meetings", []))
+    lines.append("")
+
+    listing_counts = digest.get("listing_counts", [])
+    lines.append("4️⃣ დღეს შეყვანილი განცხადებები:")
+    if listing_counts:
+        lines.extend(f"  • {s}" for s in listing_counts)
+    else:
+        lines.append("  (ჯერ არავის შეუყვანია)")
+    lines.append("")
+
+    lines.append(f"5️⃣ დღეს გაფრთხილება მიიღო: {len(digest.get('warnings_today', []))}")
+    lines.extend(f"  • {s}" for s in digest.get("warnings_today", []))
+    lines.append("")
+
+    lines.append("6️⃣ განსაკუთრებული ყურადღება სჭირდება:")
+    attention = digest.get("attention", [])
+    if attention:
+        lines.extend(f"  • {s}" for s in attention)
+    else:
+        lines.append("  (არავინ)")
+
+    return "\n".join(lines)
+
+
+async def _send_long_message(context: ContextTypes.DEFAULT_TYPE, chat_id: int, text: str):
+    for i in range(0, len(text), 3500):
+        await context.bot.send_message(chat_id=chat_id, text=text[i:i + 3500])
+
+
+async def send_team_digests(context: ContextTypes.DEFAULT_TYPE):
+    """ყოველდღე, REPORT_DEADLINE_HOUR-ის შემდეგ — ადმინს მთელი
+    კომპანიის დღის შეჯამება მიუვა, ხოლო თითოეულ თიმლიდერს — მხოლოდ
+    საკუთარი გუნდის (იგივე მონაცემები, რაც Mini App-ის „დღის ამბები“
+    ტაბშია)."""
+    try:
+        agents = sheets.get_agents()
+    except Exception:
+        log.exception("დღის ამბების job ვერ წამოიწყო")
+        return
+
+    try:
+        company_digest = sheets.get_daily_digest(team=None)
+        text_admin = _build_team_digest_text(company_digest, "📋 დღის შეჯამება — მთელი კომპანია")
+        for admin_id in config.ADMIN_CHAT_IDS:
+            try:
+                await _send_long_message(context, admin_id, text_admin)
+            except Exception:
+                log.exception("დღის ამბები ვერ გაეგზავნა admin=%s", admin_id)
+    except Exception:
+        log.exception("კომპანიის დღის შეჯამება ვერ აიწყო")
+
+    leads = [
+        a for a in agents
+        if str(a.get("role", "")).strip() == "team_lead"
+        and str(a.get("active", "yes")).strip().lower() != "no"
+        and str(a.get("team", "")).strip()
+        and a.get("telegram_chat_id")
+    ]
+    for lead in leads:
+        team = str(lead.get("team", "")).strip()
+        try:
+            team_digest = sheets.get_daily_digest(team=team)
+            text = _build_team_digest_text(team_digest, f"📋 დღის შეჯამება — გუნდი „{team}“")
+            await _send_long_message(context, int(lead["telegram_chat_id"]), text)
+        except Exception:
+            log.exception("დღის ამბები ვერ გაეგზავნა team_lead=%s", lead.get("agent_id"))
+
+
 WARNING_LABELS = {
     "late_report": "დაგვიანებული/გამოტოვებული ანგარიში",
     "late_arrival": "დაგვიანება სამუშაოზე",
@@ -1782,6 +1905,191 @@ async def _notify_warning(context: ContextTypes.DEFAULT_TYPE, agent: dict, w_typ
             await context.bot.send_message(chat_id=int(agent["telegram_chat_id"]), text=agent_text)
         except Exception:
             log.exception("გაფრთხილება ვერ გაეგზავნა აგენტს agent_id=%s", agent.get("agent_id"))
+
+    # პირამიდის პრინციპით — თუ ამ აგენტს ჰყავს თიმლიდერი, მასაც მიუვა
+    # იგივე გაფრთხილება (admin-ისგან დამოუკიდებლად), რომ თავისი გუნდის
+    # წევრზე ინფორმაცია ხელთ ჰქონდეს.
+    try:
+        team_val = str(agent.get("team", "")).strip()
+        if team_val and str(agent.get("role", "")).strip() != "team_lead":
+            lead = next(
+                (x for x in sheets.get_agents()
+                 if str(x.get("role", "")).strip() == "team_lead"
+                 and str(x.get("team", "")).strip() == team_val),
+                None,
+            )
+            if lead and lead.get("telegram_chat_id"):
+                await context.bot.send_message(
+                    chat_id=int(lead["telegram_chat_id"]),
+                    text=f"⚠️ თქვენი გუნდიდან — {agent['name']}: {label}\n{detail}",
+                )
+    except Exception:
+        log.exception("გაფრთხილება ვერ გაეგზავნა თიმლიდერს agent_id=%s", agent.get("agent_id"))
+
+
+# in-memory dedup ცვლის დაწყების/დასრულების შეხსენებებისთვის (item 7)
+# და მენეჯერის შეტყობინებებისთვის (item 8) — მიზანმიმართულად არ არის
+# ბაზაში, ეს "keep in mind"-ის ტიპის მსუბუქი შეხსენებაა და არა
+# გაფრთხილება/quota — restart-ზე უბრალოდ ისევ დაითვლება საჭიროებისამებრ.
+_shift_reminder_sent: set[tuple] = set()
+_manager_notified: set[tuple] = set()
+
+
+async def remind_before_shift_edge(context: ContextTypes.DEFAULT_TYPE):
+    """5 წუთში ერთხელ — ოფისის ცვლაზე მყოფ აგენტს შეახსენებს ცვლის
+    დაწყებამდე/დამთავრებამდე ~10 წუთით ადრე (თუ ჯერ არ დაუწყია ან არ
+    დაუხურავს), რომ /clockin-/clockout არ დაავიწყდეს. online (სახლიდან)
+    რეჟიმს ფიქსირებული დაწყების საათი არა აქვს, ამიტომ მისთვის მხოლოდ
+    დღის ბოლოს (REPORT_DEADLINE_HOUR) ვაფრთხილებთ დასრულებაზე."""
+    try:
+        now = datetime.datetime.now(ZoneInfo(config.TIMEZONE))
+        weekday_key = sheets.WEEKDAY_KEYS[now.weekday()]
+        agents = sheets.get_agents()
+    except Exception:
+        log.exception("ცვლის შეხსენების job ვერ გაეშვა")
+        return
+    today = now.strftime("%Y-%m-%d")
+
+    for a in agents:
+        if str(a.get("active", "yes")).strip().lower() == "no":
+            continue
+        agent_id = a["agent_id"]
+        chat_id = a.get("telegram_chat_id")
+        if not chat_id:
+            continue
+        sched = sheets.get_agent_schedule(agent_id)
+        if not sched:
+            continue
+        mode = str(sched.get(weekday_key) or "off")
+        if mode == "off":
+            continue
+
+        att = sheets.get_today_attendance(agent_id)
+        if mode in ("office_morning", "office_evening"):
+            start_hour = 10 if mode == "office_morning" else 16
+            end_hour = 16 if mode == "office_morning" else 22
+        else:
+            start_hour = None
+            end_hour = config.REPORT_DEADLINE_HOUR
+
+        if start_hour is not None:
+            start_dt = now.replace(hour=start_hour, minute=0, second=0, microsecond=0)
+            key_start = (str(agent_id), today, "start")
+            if (
+                now < start_dt
+                and (start_dt - now) <= datetime.timedelta(minutes=10)
+                and key_start not in _shift_reminder_sent
+                and not (att and att.get("clock_in"))
+            ):
+                _shift_reminder_sent.add(key_start)
+                try:
+                    await context.bot.send_message(
+                        chat_id=int(chat_id),
+                        text=(
+                            f"⏰ 10 წუთში იწყება თქვენი ცვლა ({start_hour}:00). "
+                            f"არ დაგავიწყდეთ /clockin — თორემ დაგვიანების გაფრთხილება დაგერიცხებათ."
+                        ),
+                    )
+                except Exception:
+                    log.exception("ცვლის დაწყების შეხსენება ვერ გაეგზავნა agent_id=%s", agent_id)
+
+        end_dt = now.replace(hour=end_hour, minute=0, second=0, microsecond=0)
+        key_end = (str(agent_id), today, "end")
+        if (
+            now < end_dt
+            and (end_dt - now) <= datetime.timedelta(minutes=10)
+            and key_end not in _shift_reminder_sent
+            and att and att.get("clock_in") and not att.get("clock_out")
+        ):
+            _shift_reminder_sent.add(key_end)
+            try:
+                await context.bot.send_message(
+                    chat_id=int(chat_id),
+                    text=(
+                        f"⏰ 10 წუთში მთავრდება თქვენი ცვლა ({end_hour}:00). "
+                        f"არ დაგავიწყდეთ /clockout დღის დასახურად."
+                    ),
+                )
+            except Exception:
+                log.exception("ცვლის დასრულების შეხსენება ვერ გაეგზავნა agent_id=%s", agent_id)
+
+
+async def check_manager_notifications(context: ContextTypes.DEFAULT_TYPE):
+    """5 წუთში ერთხელ — ადმინისგან დამოუკიდებლად, კონკრეტულ თიმლიდერს
+    ატყობინებს, თუ მისი გუნდის წევრს ცვლის დაწყებიდან 30 წუთში ჯერ არ
+    დაუწყია, ან დასრულებიდან 30 წუთში ჯერ არ დაუხურავს დღე."""
+    try:
+        now = datetime.datetime.now(ZoneInfo(config.TIMEZONE))
+        weekday_key = sheets.WEEKDAY_KEYS[now.weekday()]
+        agents = sheets.get_agents()
+    except Exception:
+        log.exception("მენეჯერის შეტყობინების job ვერ გაეშვა")
+        return
+    today = now.strftime("%Y-%m-%d")
+
+    leads_by_team: dict[str, list] = {}
+    for a in agents:
+        if (
+            str(a.get("role", "")).strip() == "team_lead"
+            and str(a.get("active", "yes")).strip().lower() != "no"
+            and a.get("telegram_chat_id")
+        ):
+            team = str(a.get("team", "")).strip()
+            if team:
+                leads_by_team.setdefault(team, []).append(a)
+
+    for a in agents:
+        if str(a.get("active", "yes")).strip().lower() == "no":
+            continue
+        if str(a.get("role", "")).strip() == "team_lead":
+            continue
+        team = str(a.get("team", "")).strip()
+        leads = leads_by_team.get(team, [])
+        if not leads:
+            continue
+        agent_id = a["agent_id"]
+        sched = sheets.get_agent_schedule(agent_id)
+        if not sched:
+            continue
+        mode = str(sched.get(weekday_key) or "off")
+        if mode not in ("office_morning", "office_evening"):
+            continue
+        start_hour = 10 if mode == "office_morning" else 16
+        end_hour = 16 if mode == "office_morning" else 22
+        att = sheets.get_today_attendance(agent_id)
+
+        start_deadline = now.replace(hour=start_hour, minute=30, second=0, microsecond=0)
+        if now >= start_deadline and not (att and att.get("clock_in")):
+            for lead in leads:
+                key = (lead["agent_id"], str(agent_id), today, "start")
+                if key in _manager_notified:
+                    continue
+                _manager_notified.add(key)
+                try:
+                    await context.bot.send_message(
+                        chat_id=int(lead["telegram_chat_id"]),
+                        text=f"🔴 {a['name']} — ცვლა {start_hour}:00-ზე იწყებოდა, 30 წუთია ჯერ არ დაუწყია.",
+                    )
+                except Exception:
+                    log.exception("მენეჯერისთვის დაგვიანების შეტყობინება ვერ გაეგზავნა lead=%s", lead.get("agent_id"))
+
+        end_deadline = now.replace(hour=end_hour, minute=30, second=0, microsecond=0)
+        if now >= end_deadline and att and att.get("clock_in") and not att.get("clock_out"):
+            for lead in leads:
+                key = (lead["agent_id"], str(agent_id), today, "end")
+                if key in _manager_notified:
+                    continue
+                _manager_notified.add(key)
+                try:
+                    await context.bot.send_message(
+                        chat_id=int(lead["telegram_chat_id"]),
+                        text=(
+                            f"🔴 {a['name']} — ცვლა {end_hour}:00-ზე მთავრდებოდა, "
+                            f"30 წუთია ჯერ არ დაუხურავს დღე (/clockout)."
+                        ),
+                    )
+                except Exception:
+                    log.exception("მენეჯერისთვის დასრულების შეტყობინება ვერ გაეგზავნა lead=%s", lead.get("agent_id"))
 
 
 async def check_late_arrivals(context: ContextTypes.DEFAULT_TYPE):
@@ -2027,6 +2335,18 @@ def main():
         entry_points=[CommandHandler("clockout", clockout_cmd)],
         states={
             CO_COUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, clockout_count)],
+            CO_CLIENT: [CallbackQueryHandler(clockout_client_choice, pattern=r"^coclient:(yes|no)$")],
+            # კლიენტი=კი-ს შემდეგ იმავე ნაბიჯებს იყენებს, რასაც /clientreport:
+            RP_PHONE: [MessageHandler(filters.TEXT & ~filters.COMMAND, clientreport_phone)],
+            RP_ACTIONS: [
+                CallbackQueryHandler(clientreport_toggle, pattern=r"^rpact:\d+$"),
+                CallbackQueryHandler(clientreport_actions_done, pattern=r"^rpact_done$"),
+            ],
+            RP_NOTES: [
+                CommandHandler("skip", clientreport_skip),
+                MessageHandler(filters.PHOTO | filters.Document.ALL, clientreport_file),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, clientreport_notes_text),
+            ],
         },
         fallbacks=[CommandHandler("cancel", cancel), MessageHandler(filters.COMMAND, busy_fallback)],
     ))
@@ -2095,6 +2415,12 @@ def main():
             check_daily_compliance,
             time=datetime.time(hour=config.REPORT_DEADLINE_HOUR, minute=5, tzinfo=ZoneInfo(config.TIMEZONE)),
         )
+        app.job_queue.run_daily(
+            send_team_digests,
+            time=datetime.time(hour=config.REPORT_DEADLINE_HOUR, minute=10, tzinfo=ZoneInfo(config.TIMEZONE)),
+        )
+        app.job_queue.run_repeating(remind_before_shift_edge, interval=300, first=60)
+        app.job_queue.run_repeating(check_manager_notifications, interval=300, first=90)
 
     log.info("ბოტი გაშვებულია...")
     # drop_pending_updates=True: სტარტზე ასუფთავებს დაგროვილ ძველ/გაფუჭებულ

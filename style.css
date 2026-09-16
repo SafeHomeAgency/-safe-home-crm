@@ -342,7 +342,8 @@ body {
   transition: transform .15s ease;
 }
 .week-strip .day .d { font-size: 10px; color: var(--hint); font-weight: 700; letter-spacing: .3px; }
-.week-strip .day .m { font-size: 16px; margin-top: 4px; }
+.week-strip .day .m { font-size: 14px; margin-top: 4px; white-space: nowrap; }
+.week-strip .day .msub { font-size: 8px; color: var(--hint); margin-top: 2px; letter-spacing: .2px; }
 .week-strip .day.today {
   background: rgba(201, 162, 39, .12);
   border: 1px solid var(--gold);
