@@ -80,6 +80,11 @@ EXCLUSIVE_SHARES_HEADERS = [
     "share_id", "exclusive_id", "from_agent_id", "from_agent_name",
     "to_agent_id", "to_agent_name", "note", "created_at",
 ]
+AGENT_REQUESTS_HEADERS = [
+    "request_id", "kind", "requested_by", "requested_by_name", "team",
+    "target_agent_id", "name", "phone", "reason", "status",
+    "created_at", "decided_at", "decided_by",
+]
 
 
 # --------------------------------------------------------------- helpers
@@ -484,6 +489,80 @@ def decide_dayoff(request_id: str, status: str) -> dict | None:
             return None
         row = db.query_one("SELECT * FROM dayoff WHERE request_id = %s", (request_id,))
     _audit("decide_dayoff", "dayoff", request_id, new_value={"status": status})
+    return row
+
+
+def get_dayoff_request(request_id: str) -> dict | None:
+    with _lock:
+        return db.query_one("SELECT * FROM dayoff WHERE request_id = %s", (request_id,))
+
+
+def approved_dayoffs_count_this_month(agent_id: str, date: str) -> int:
+    """რამდენი "approved" Day off აქვს ამ აგენტს იმავე კალენდარულ თვეში,
+    რასაც `date` (YYYY-MM-DD) ეკუთვნის — თვის ჭერის (DAYOFF_MONTHLY_LIMIT)
+    შემოწმებისთვის დამტკიცების წინ."""
+    month_key = str(date or "").strip()[:7]
+    if not month_key:
+        return 0
+    rows = get_dayoff_requests(status="approved")
+    return sum(
+        1 for r in rows
+        if str(r.get("agent_id")) == str(agent_id)
+        and str(r.get("date", "")).strip()[:7] == month_key
+    )
+
+
+# ---------- აგენტის დამატების/გათავისუფლების მოთხოვნები (მენეჯერი
+# ითხოვს, ადმინი ამტკიცებს/უარყოფს) ----------
+
+def create_agent_request(kind: str, requested_by: str, team: str = "",
+                          name: str = "", phone: str = "",
+                          target_agent_id: str = "", reason: str = "") -> str:
+    with _lock:
+        request_id = uuid.uuid4().hex[:8]
+        _insert("agent_requests", AGENT_REQUESTS_HEADERS, [
+            request_id, kind, requested_by, agent_name_by_id(requested_by), team,
+            target_agent_id, name, phone, reason, "pending", _now(), "", "",
+        ])
+        return request_id
+
+
+def get_agent_requests(status: str | None = None, team: str | None = None) -> list[dict]:
+    with _lock:
+        rows = db.query_all("SELECT * FROM agent_requests")
+    if status:
+        rows = [r for r in rows if str(r.get("status")) == status]
+    if team:
+        rows = [r for r in rows if str(r.get("team", "")).strip() == team.strip()]
+    return sorted(rows, key=lambda r: str(r.get("created_at", "")), reverse=True)
+
+
+def decide_agent_request(request_id: str, status: str, decided_by: str = "") -> dict | None:
+    """დამტკიცებისას ("approved") რეალურადაც ასრულებს მოქმედებას:
+    kind="add" -> add_agent(...), kind="remove" -> დეაქტივაცია
+    (set_agent_active "no") — არასდროს ნამდვილი წაშლა, არსებული
+    "გათავისუფლების" პრინციპის მსგავსად, რომ ისტორია არ დაიკარგოს."""
+    with _lock:
+        req = db.query_one("SELECT * FROM agent_requests WHERE request_id = %s", (request_id,))
+    if not req or str(req.get("status")) != "pending":
+        return None
+
+    new_agent_id = ""
+    if status == "approved":
+        if req.get("kind") == "add":
+            new_agent_id = add_agent(req.get("name", ""), req.get("phone", ""), team=req.get("team", ""))
+        elif req.get("kind") == "remove" and req.get("target_agent_id"):
+            set_agent_active(req.get("target_agent_id"), "no")
+
+    with _lock:
+        db.execute(
+            "UPDATE agent_requests SET status = %s, decided_at = %s, decided_by = %s, "
+            "target_agent_id = %s WHERE request_id = %s",
+            (status, _now(), decided_by, new_agent_id or req.get("target_agent_id", ""), request_id),
+        )
+        row = db.query_one("SELECT * FROM agent_requests WHERE request_id = %s", (request_id,))
+    _audit("decide_agent_request", "agent_request", request_id, actor_agent_id=decided_by,
+           new_value={"status": status, "kind": req.get("kind")})
     return row
 
 

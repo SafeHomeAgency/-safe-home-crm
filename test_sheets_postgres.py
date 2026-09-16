@@ -117,6 +117,13 @@ CREATE TABLE audit_log (
     entity_type TEXT DEFAULT '', entity_id TEXT DEFAULT '', old_value TEXT,
     new_value TEXT, source TEXT DEFAULT 'bot'
 );
+CREATE TABLE agent_requests (
+    request_id TEXT PRIMARY KEY, kind TEXT DEFAULT 'add', requested_by TEXT DEFAULT '',
+    requested_by_name TEXT DEFAULT '', team TEXT DEFAULT '', target_agent_id TEXT DEFAULT '',
+    name TEXT DEFAULT '', phone TEXT DEFAULT '', reason TEXT DEFAULT '',
+    status TEXT DEFAULT 'pending', created_at TEXT DEFAULT '', decided_at TEXT DEFAULT '',
+    decided_by TEXT DEFAULT ''
+);
 """
 
 
@@ -128,7 +135,7 @@ def _reset_db():
         DROP TABLE IF EXISTS attendance; DROP TABLE IF EXISTS warnings;
         DROP TABLE IF EXISTS shift_swaps; DROP TABLE IF EXISTS exclusives;
         DROP TABLE IF EXISTS questions; DROP TABLE IF EXISTS exclusive_shares;
-        DROP TABLE IF EXISTS audit_log;
+        DROP TABLE IF EXISTS audit_log; DROP TABLE IF EXISTS agent_requests;
     """)
     _conn.executescript(_TEST_SCHEMA)
     _conn.commit()
@@ -316,8 +323,65 @@ def test_dayoff_flow():
     req_id = sp.create_dayoff_request(aid, "2026-10-01", "ოჯახური მიზეზი")
     pending = sp.get_dayoff_requests(status="pending")
     check(len(pending) == 1, "ახალი მოთხოვნა 'pending'-ია")
+    fetched = sp.get_dayoff_request(req_id)
+    check(fetched is not None and fetched["status"] == "pending", "get_dayoff_request პოულობს pending ჩანაწერს")
     decided = sp.decide_dayoff(req_id, "approved")
     check(decided["status"] == "approved", "დამტკიცების შემდეგ სტატუსი 'approved'")
+
+
+def test_dayoff_monthly_cap_counter():
+    setup()
+    aid = sp.add_agent("ხშირი დამსვენებელი", "555013")
+    # იმავე თვეში (2026-10) 2 უკვე დამტკიცებული + 1 უარყოფილი (არ
+    # უნდა ჩაითვალოს ჭერში) + 1 სხვა თვის (არ უნდა ჩაითვალოს).
+    for d in ("2026-10-01", "2026-10-08"):
+        rid = sp.create_dayoff_request(aid, d, "")
+        sp.decide_dayoff(rid, "approved")
+    rid_rejected = sp.create_dayoff_request(aid, "2026-10-15", "")
+    sp.decide_dayoff(rid_rejected, "rejected")
+    rid_other_month = sp.create_dayoff_request(aid, "2026-11-01", "")
+    sp.decide_dayoff(rid_other_month, "approved")
+
+    count_oct = sp.approved_dayoffs_count_this_month(aid, "2026-10-20")
+    check(count_oct == 2, f"ოქტომბერში 2 დამტკიცებული უნდა ითვლებოდეს, მივიღეთ {count_oct}")
+    count_nov = sp.approved_dayoffs_count_this_month(aid, "2026-11-15")
+    check(count_nov == 1, f"ნოემბერში 1 დამტკიცებული უნდა ითვლებოდეს, მივიღეთ {count_nov}")
+
+
+def test_agent_request_add_flow_creates_real_agent_on_approval():
+    setup()
+    lead_id = sp.add_agent("გუნდის ლიდერი", "555014", team="TeamX")
+    sp.set_agent_role(lead_id, "team_lead")
+    req_id = sp.create_agent_request("add", lead_id, team="TeamX", name="ახალი აგენტი", phone="555015")
+    pending = sp.get_agent_requests(status="pending", team="TeamX")
+    check(len(pending) == 1, "ახალი agent_request 'pending'-ია და თიმით ფილტრდება")
+
+    before = len(sp.get_agents())
+    decided = sp.decide_agent_request(req_id, "approved", decided_by="admin")
+    check(decided["status"] == "approved", "დამტკიცების შემდეგ სტატუსი 'approved'")
+    after = sp.get_agents()
+    check(len(after) == before + 1, "დამტკიცებამ რეალურად დაამატა ახალი აგენტი")
+    new_agent = next((a for a in after if a["name"] == "ახალი აგენტი"), None)
+    check(new_agent is not None and str(new_agent.get("team", "")) == "TeamX",
+          "ახალი აგენტი სწორ გუნდშია დამატებული")
+
+    # უკვე გადაწყვეტილი მოთხოვნის მეორედ გადაწყვეტა არ სრულდება.
+    again = sp.decide_agent_request(req_id, "rejected", decided_by="admin")
+    check(again is None, "უკვე გადაწყვეტილი მოთხოვნა მეორედ არ სრულდება")
+
+
+def test_agent_request_remove_flow_deactivates_not_deletes():
+    setup()
+    target_id = sp.add_agent("გასათავისუფლებელი", "555016", team="TeamY")
+    req_id = sp.create_agent_request("remove", "", team="TeamY", target_agent_id=target_id, reason="დატოვა კომპანია")
+    decided = sp.decide_agent_request(req_id, "approved", decided_by="admin")
+    check(decided["status"] == "approved", "გათავისუფლების მოთხოვნაც მტკიცდება")
+    # `get_agents()` ნაგულისხმევად მხოლოდ აქტიურებს აბრუნებს — პირდაპირ
+    # ბაზიდან ვამოწმებთ, რომ ჩანაწერი დარჩა (არ წაშლილა), უბრალოდ
+    # გაითიშა.
+    row = sp.db.query_one("SELECT * FROM agents WHERE agent_id = %s", (target_id,))
+    check(row is not None, "აგენტი არ წაშლილა ბაზიდან — მხოლოდ გაითიშა")
+    check(str(row.get("active")) == "no", "გათავისუფლების დამტკიცების შემდეგ active='no'")
 
 
 def test_questions_ask_and_answer():

@@ -196,6 +196,14 @@ EXCLUSIVE_SHARES_HEADERS = [
     "to_agent_id", "to_agent_name", "note", "created_at",
 ]
 
+# მენეჯერის მოთხოვნა ახალი აგენტის დამატებაზე/გათავისუფლებაზე —
+# ადმინის დამტკიცებამდე მხოლოდ "pending"-ია.
+AGENT_REQUESTS_HEADERS = [
+    "request_id", "kind", "requested_by", "requested_by_name", "team",
+    "target_agent_id", "name", "phone", "reason", "status",
+    "created_at", "decided_at", "decided_by",
+]
+
 
 def _get_client():
     """
@@ -263,6 +271,7 @@ def ensure_sheets():
         (config.EXCLUSIVES_SHEET_NAME, EXCLUSIVES_HEADERS, 1000),
         (config.QUESTIONS_SHEET_NAME, QUESTIONS_HEADERS, 1000),
         (config.EXCLUSIVE_SHARES_SHEET_NAME, EXCLUSIVE_SHARES_HEADERS, 2000),
+        (config.AGENT_REQUESTS_SHEET_NAME, AGENT_REQUESTS_HEADERS, 500),
     ]
     for name, headers, rows in sheets_to_ensure:
         try:
@@ -319,6 +328,10 @@ def _questions_ws():
 
 def _exclusive_shares_ws():
     return _worksheet(config.EXCLUSIVE_SHARES_SHEET_NAME)
+
+
+def _agent_requests_ws():
+    return _worksheet(config.AGENT_REQUESTS_SHEET_NAME)
 
 
 def _now():
@@ -748,6 +761,86 @@ def decide_dayoff(request_id: str, status: str) -> dict | None:
         row = ws.row_values(cell.row)
         _invalidate(config.DAYOFF_SHEET_NAME)
         return dict(zip(DAYOFF_HEADERS, row))
+
+
+def get_dayoff_request(request_id: str) -> dict | None:
+    with _lock:
+        rows = _cached_records(config.DAYOFF_SHEET_NAME)
+    return next((r for r in rows if str(r.get("request_id")) == str(request_id)), None)
+
+
+def approved_dayoffs_count_this_month(agent_id: str, date: str) -> int:
+    """რამდენი "approved" Day off აქვს ამ აგენტს იმავე კალენდარულ თვეში,
+    რასაც `date` (YYYY-MM-DD) ეკუთვნის — თვის ჭერის (DAYOFF_MONTHLY_LIMIT)
+    შემოწმებისთვის დამტკიცების წინ."""
+    month_key = str(date or "").strip()[:7]
+    if not month_key:
+        return 0
+    rows = get_dayoff_requests(status="approved")
+    return sum(
+        1 for r in rows
+        if str(r.get("agent_id")) == str(agent_id)
+        and str(r.get("date", "")).strip()[:7] == month_key
+    )
+
+
+# ---------- აგენტის დამატების/გათავისუფლების მოთხოვნები (მენეჯერი
+# ითხოვს, ადმინი ამტკიცებს/უარყოფს) ----------
+
+def create_agent_request(kind: str, requested_by: str, team: str = "",
+                          name: str = "", phone: str = "",
+                          target_agent_id: str = "", reason: str = "") -> str:
+    with _lock:
+        request_id = uuid.uuid4().hex[:8]
+        _agent_requests_ws().append_row([
+            request_id, kind, requested_by, agent_name_by_id(requested_by), team,
+            target_agent_id, name, phone, reason, "pending", _now(), "", "",
+        ])
+        _invalidate(config.AGENT_REQUESTS_SHEET_NAME)
+        return request_id
+
+
+def get_agent_requests(status: str | None = None, team: str | None = None) -> list[dict]:
+    with _lock:
+        rows = _cached_records(config.AGENT_REQUESTS_SHEET_NAME)
+    if status:
+        rows = [r for r in rows if str(r.get("status")) == status]
+    if team:
+        rows = [r for r in rows if str(r.get("team", "")).strip() == team.strip()]
+    return sorted(rows, key=lambda r: str(r.get("created_at", "")), reverse=True)
+
+
+def decide_agent_request(request_id: str, status: str, decided_by: str = "") -> dict | None:
+    """დამტკიცებისას ("approved") რეალურადაც ასრულებს მოქმედებას:
+    kind="add" -> add_agent(...), kind="remove" -> დეაქტივაცია
+    (set_agent_active "no") — არასდროს ნამდვილი წაშლა, არსებული
+    "გათავისუფლების" პრინციპის მსგავსად, რომ ისტორია არ დაიკარგოს."""
+    with _lock:
+        ws = _agent_requests_ws()
+        cell = ws.find(request_id, in_column=1)
+        if not cell:
+            return None
+        row_vals = ws.row_values(cell.row)
+        req = dict(zip(AGENT_REQUESTS_HEADERS, row_vals))
+        if str(req.get("status")) != "pending":
+            return None
+
+    new_agent_id = ""
+    if status == "approved":
+        if req.get("kind") == "add":
+            new_agent_id = add_agent(req.get("name", ""), req.get("phone", ""), team=req.get("team", ""))
+        elif req.get("kind") == "remove" and req.get("target_agent_id"):
+            set_agent_active(req.get("target_agent_id"), "no")
+
+    with _lock:
+        ws.update_cell(cell.row, AGENT_REQUESTS_HEADERS.index("status") + 1, status)
+        ws.update_cell(cell.row, AGENT_REQUESTS_HEADERS.index("decided_at") + 1, _now())
+        ws.update_cell(cell.row, AGENT_REQUESTS_HEADERS.index("decided_by") + 1, decided_by)
+        if new_agent_id:
+            ws.update_cell(cell.row, AGENT_REQUESTS_HEADERS.index("target_agent_id") + 1, new_agent_id)
+        row = ws.row_values(cell.row)
+        _invalidate(config.AGENT_REQUESTS_SHEET_NAME)
+        return dict(zip(AGENT_REQUESTS_HEADERS, row))
 
 
 # ---------- შეხვედრები (ყოფილი "შეხვედრები" Google Form) ----------

@@ -669,6 +669,20 @@ async def dayoff_decide(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     action, request_id = query.data.split(":", 1)
     status = "approved" if action == "do_ok" else "rejected"
+
+    pending = sheets.get_dayoff_request(request_id)
+    if not pending or str(pending.get("status")) != "pending":
+        await query.answer("ეს მოთხოვნა ვერ მოიძებნა (შეიძლება უკვე გადაწყვეტილია).", show_alert=True)
+        return
+    if status == "approved":
+        already = sheets.approved_dayoffs_count_this_month(pending.get("agent_id"), pending.get("date", ""))
+        if already >= config.DAYOFF_MONTHLY_LIMIT:
+            await query.answer(
+                f"ამ აგენტს ამ თვეში უკვე დამტკიცებული აქვს {config.DAYOFF_MONTHLY_LIMIT} დღეოფი — მეტის დამტკიცება არ შეიძლება.",
+                show_alert=True,
+            )
+            return
+
     row = sheets.decide_dayoff(request_id, status)
     if not row:
         await query.answer("ეს მოთხოვნა ვერ მოიძებნა (შეიძლება უკვე გადაწყვეტილია).", show_alert=True)

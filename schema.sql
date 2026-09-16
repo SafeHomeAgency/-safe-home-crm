@@ -216,6 +216,26 @@ CREATE TABLE IF NOT EXISTS exclusive_shares (
 );
 CREATE INDEX IF NOT EXISTS idx_exclusive_shares_exclusive_id ON exclusive_shares (exclusive_id);
 
+-- მენეჯერის (თიმლიდერის) მოთხოვნა ახალი აგენტის დამატებაზე ან
+-- არსებულის გათავისუფლებაზე — თავად არ ასრულებს მოქმედებას, ადმინის
+-- დამტკიცებამდე (decide_agent_request) მხოლოდ "pending"-ია.
+CREATE TABLE IF NOT EXISTS agent_requests (
+    request_id          TEXT PRIMARY KEY,
+    kind                TEXT NOT NULL DEFAULT 'add',
+    requested_by        TEXT NOT NULL DEFAULT '',
+    requested_by_name   TEXT NOT NULL DEFAULT '',
+    team                TEXT NOT NULL DEFAULT '',
+    target_agent_id     TEXT NOT NULL DEFAULT '',
+    name                TEXT NOT NULL DEFAULT '',
+    phone               TEXT NOT NULL DEFAULT '',
+    reason              TEXT NOT NULL DEFAULT '',
+    status              TEXT NOT NULL DEFAULT 'pending',
+    created_at          TEXT NOT NULL DEFAULT '',
+    decided_at          TEXT NOT NULL DEFAULT '',
+    decided_by          TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_agent_requests_status ON agent_requests (status);
+
 -- =====================================================================
 -- Phase 1 დამატება: RBAC + Audit Log საფუძველი.
 --

@@ -27,7 +27,10 @@ const MODE_LABELS = {
   online: "ონლაინ დღე",
   off: "დასვენება",
 };
-const MODE_ICON = { office_morning: "🌅🏢", office_evening: "🌇🏢", online: "💻", off: "🌙" };
+/* ერთი, ცალსახა ემოჯი თითო რეჟიმზე (არა კომბინაცია) — ოფისის დილის
+   ცვლა = მზე, ოფისის საღამოს ცვლა = მზის ჩასვლა, სახლიდან (online) =
+   სახლი, დასვენება = მთვარე. */
+const MODE_ICON = { office_morning: "☀️", office_evening: "🌇", online: "🏠", off: "🌙" };
 const MODE_SUBLABEL = { office_morning: "დილა", office_evening: "საღამო", online: "სახლი", off: "" };
 const WEEKDAY_LABELS = { mon: "ორშ", tue: "სამ", wed: "ოთხ", thu: "ხუთ", fri: "პარ", sat: "შაბ", sun: "კვ" };
 const WEEKDAY_KEYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"];
@@ -48,22 +51,25 @@ const AGENT_TABS = [
   { id: "meetings", label: "შეხვედრები", icon: "🤝", lazy: true },
   { id: "exclusives", label: "ექსკლუზივები", icon: "🏘️", lazy: true },
   { id: "questions", label: "კითხვები", icon: "💬", lazy: true },
+  { id: "regulations", label: "ინსტრუქცია", icon: "📘" },
 ];
 const ADMIN_TABS = [
   { id: "overview", label: "მიმოხილვა", icon: "📊" },
   { id: "team", label: "გუნდი", icon: "🧑‍🤝‍🧑" },
   { id: "ranking", label: "რეიტინგი", icon: "🏆" },
   { id: "agentsmgmt", label: "აგენტები", icon: "🗂️", lazy: true, adminOnly: true },
+  { id: "agentrequests", label: "მოთხოვნები", icon: "📥", lazy: true },
   { id: "admintasks", label: "დავალებები", icon: "📄", lazy: true },
   { id: "taskhistory", label: "ისტორია", icon: "📜", lazy: true },
   { id: "meetings", label: "შეხვედრები", icon: "🤝", lazy: true },
   { id: "digest", label: "დღის ამბები", icon: "🗞️", lazy: true },
-  { id: "dayoffs", label: "შვებულებები", icon: "🗓️" },
+  { id: "dayoffs", label: "შვებულებები", icon: "🗓️", lazy: true },
   { id: "warnings", label: "გაფრთხილებები", icon: "⚠️" },
   { id: "swaps", label: "სმენის გაცვლა", icon: "🔁", lazy: true },
   { id: "reports", label: "რეპორტები", icon: "📝", lazy: true },
   { id: "exclusives", label: "ექსკლუზივები", icon: "🏘️", lazy: true },
   { id: "questions", label: "კითხვები", icon: "💬", lazy: true },
+  { id: "regulations", label: "ინსტრუქცია/წესები", icon: "📘" },
 ];
 
 const PERIODS = [
@@ -562,24 +568,57 @@ function renderRanking(d) {
   </div>`;
 }
 
-function renderDayoffs(d) {
-  const rows = d.pending_dayoffs || [];
-  return `<div class="card">
-    <h2>🗓️ შვებულების მოთხოვნები <span class="cnt">${rows.length}</span></h2>
-    ${rows.length === 0 ? `<div class="empty">მოლოდინში აღარაფერია</div>` :
-      rows.map((r) => `
+/* Day off ისტორია — სამ ცალკე კატეგორიად: მომლოდინე (გადაწყვეტილების
+   ღილაკებით), დამტკიცებული და უარყოფილი (ორივე მხოლოდ ისტორიისთვის).
+   თვის ჭერი (მაქს. N დღეოფი თვეში ერთ აგენტზე) ვიზუალურადაც ჩანს. */
+function renderDayoffs(payload) {
+  const p = payload || {};
+  const pending = p.pending || [];
+  const approved = p.approved || [];
+  const rejected = p.rejected || [];
+  const row = (r, withActions) => `
       <div class="list-row" data-id="${esc(r.request_id)}">
         <div class="avatar">${initials(r.agent_name)}</div>
         <div class="main">
           <div class="title">${esc(r.agent_name)} — ${esc(r.date)}</div>
           <div class="sub">${esc(r.reason || "")}</div>
+          <div class="sub">${esc((r.decided_at || r.created_at || "").split(" ")[0] || "")}</div>
         </div>
       </div>
-      <div class="actions" style="margin:-2px 0 12px">
+      ${withActions ? `<div class="actions" style="margin:-2px 0 12px">
         <button class="btn" data-act="approved" data-id="${esc(r.request_id)}">✅ დამტკიცება</button>
         <button class="btn danger" data-act="rejected" data-id="${esc(r.request_id)}">✖️ უარყოფა</button>
-      </div>`).join("")}
+      </div>` : ""}`;
+  return `<div class="card">
+    <h2>⏳ მომლოდინე მოთხოვნები <span class="cnt">${pending.length}</span></h2>
+    <div class="sub" style="margin-bottom:8px">მაქსიმუმ ${esc(p.monthly_limit || 3)} დღეოფი, ერთ აგენტზე, კალენდარულ თვეში</div>
+    ${pending.length === 0 ? `<div class="empty">მოლოდინში აღარაფერია</div>` : pending.map((r) => row(r, true)).join("")}
+  </div>
+  <div class="card">
+    <h2>✅ დამტკიცებული <span class="cnt">${approved.length}</span></h2>
+    ${approved.length === 0 ? `<div class="empty">ჯერ არაფერია</div>` : approved.map((r) => row(r, false)).join("")}
+  </div>
+  <div class="card">
+    <h2>❌ უარყოფილი <span class="cnt">${rejected.length}</span></h2>
+    ${rejected.length === 0 ? `<div class="empty">ჯერ არაფერია</div>` : rejected.map((r) => row(r, false)).join("")}
   </div>`;
+}
+
+function bindDayoffsActions() {
+  document.querySelectorAll("[data-act]").forEach((btn) => {
+    btn.onclick = async () => {
+      btn.disabled = true;
+      try {
+        await api("/api/dayoff/decide", {
+          method: "POST",
+          body: JSON.stringify({ request_id: btn.dataset.id, status: btn.dataset.act }),
+        });
+        tg && tg.HapticFeedback && tg.HapticFeedback.notificationOccurred("success");
+        toast(btn.dataset.act === "approved" ? "დამტკიცდა ✅" : "უარყოფილია");
+        await load();
+      } catch (e) { toast(e.message); btn.disabled = false; }
+    };
+  });
 }
 
 function renderWarnings(d) {
@@ -597,23 +636,6 @@ function renderWarnings(d) {
           <div class="side sub">${esc((w.created_at || "").split(" ")[0] || "")}</div>
         </div>`).join("")}
   </div>`;
-}
-
-function bindAdminActions() {
-  document.querySelectorAll("[data-act]").forEach((btn) => {
-    btn.onclick = async () => {
-      btn.disabled = true;
-      try {
-        await api("/api/dayoff/decide", {
-          method: "POST",
-          body: JSON.stringify({ request_id: btn.dataset.id, status: btn.dataset.act }),
-        });
-        tg && tg.HapticFeedback && tg.HapticFeedback.notificationOccurred("success");
-        toast(btn.dataset.act === "approved" ? "დამტკიცდა ✅" : "უარყოფილია");
-        await load();
-      } catch (e) { toast(e.message); btn.disabled = false; }
-    };
-  });
 }
 
 const EXCLUSIVE_FIELD_LABELS = [
@@ -719,11 +741,36 @@ const REPORT_FIELD_LABELS = [
   ["rated_by", "შეაფასა"],
 ];
 
-function renderReports(rows) {
-  if (!rows.length) return `<div class="card"><div class="empty">რეპორტი ჯერ არ არის</div></div>`;
+/* რეპორტების ისტორია — დღე/კვირა/თვე (renderPeriodSwitch) პლიუს
+   კონკრეტული თარიღის picker (state.reportsDate, ორივეს ერთად ვერ
+   ვიყენებთ — თარიღი თუ არჩეულია, ის ჭარბობს) და (ადმინისთვის) გუნდი
+   → აგენტი დრილდაუნი, task-history-ის იგივე პრინციპით. */
+function renderReports(payload) {
+  const rows = (payload && payload.rows) || [];
+  const teams = (payload && payload.teams) || [];
+  const agents = (payload && payload.agents) || [];
+  const isAdmin = state.role === "admin" && !(state.data && state.data.is_team_lead);
+  const drilldown = (isAdmin || agents.length > 1) ? `
+    <div class="qa-compose" style="margin-bottom:10px">
+      ${isAdmin ? `<select id="repTeamSelect">
+        <option value="">ყველა გუნდი</option>
+        ${teams.map((t) => `<option value="${esc(t)}" ${state.reportsTeam === t ? "selected" : ""}>${esc(t)}</option>`).join("")}
+      </select>` : ""}
+      <select id="repAgentSelect">
+        <option value="">ყველა აგენტი</option>
+        ${agents.map((a) => `<option value="${esc(a.agent_id)}" ${state.reportsAgent === String(a.agent_id) ? "selected" : ""}>${esc(a.name)}</option>`).join("")}
+      </select>
+    </div>` : "";
   return `<div class="card">
-    <h2>📝 ბოლო რეპორტები</h2>
-    ${rows.map((r, i) => `
+    ${renderPeriodSwitch()}
+    <div class="qa-compose" style="margin-top:10px">
+      <input type="date" id="repDateInput" value="${esc(state.reportsDate || "")}" />
+      ${state.reportsDate ? `<button class="btn secondary" id="repDateClear" style="padding:9px 12px">✕ თარიღის გასუფთავება</button>` : ""}
+    </div>
+    <h2 style="margin-top:10px">📝 რეპორტების ისტორია ${state.reportsDate ? "— " + esc(state.reportsDate) : "— " + esc(PERIOD_TITLES[state.period] || "")} <span class="cnt">${rows.length}</span></h2>
+    ${drilldown}
+    ${!rows.length ? `<div class="empty">ამ პერიოდში რეპორტი არ არის</div>` :
+      rows.map((r, i) => `
       <div class="list-row clickable" data-report="${esc(r.report_id)}" data-report-idx="${i}">
         <div class="avatar">${initials(r.agent_name)}</div>
         <div class="main">
@@ -1094,7 +1141,8 @@ function renderSwaps(rows) {
   </div>`;
 }
 
-function bindReportsActions(rows) {
+function bindReportsActions(payload) {
+  const rows = (payload && payload.rows) || [];
   document.querySelectorAll("[data-rate]").forEach((btn) => {
     btn.onclick = async (e) => {
       e.stopPropagation();
@@ -1120,6 +1168,39 @@ function bindReportsActions(rows) {
       );
     };
   });
+  const dateInput = document.getElementById("repDateInput");
+  if (dateInput) {
+    dateInput.onchange = () => {
+      state.reportsDate = dateInput.value || "";
+      delete lazyCache.reports;
+      renderContent();
+    };
+  }
+  const dateClear = document.getElementById("repDateClear");
+  if (dateClear) {
+    dateClear.onclick = () => {
+      state.reportsDate = "";
+      delete lazyCache.reports;
+      renderContent();
+    };
+  }
+  const teamSel = document.getElementById("repTeamSelect");
+  if (teamSel) {
+    teamSel.onchange = () => {
+      state.reportsTeam = teamSel.value;
+      state.reportsAgent = "";
+      delete lazyCache.reports;
+      renderContent();
+    };
+  }
+  const agentSel = document.getElementById("repAgentSelect");
+  if (agentSel) {
+    agentSel.onchange = () => {
+      state.reportsAgent = agentSel.value;
+      delete lazyCache.reports;
+      renderContent();
+    };
+  }
 }
 
 function bindSwapsActions() {
@@ -1231,6 +1312,188 @@ function bindQuestionsActions(role) {
   });
 }
 
+/* ------------------------------------------------ აგენტის დამატება/
+   გათავისუფლების მოთხოვნები (მენეჯერი ითხოვს, ადმინი ამტკიცებს) */
+const AGENT_REQUEST_STATUS_LABEL = { pending: "⏳ მოლოდინში", approved: "✅ დამტკიცებული", rejected: "❌ უარყოფილი" };
+const AGENT_REQUEST_KIND_LABEL = { add: "➕ დამატება", remove: "➖ გათავისუფლება" };
+let arKind = "add";
+
+function renderAgentRequests(payload) {
+  const rows = (payload && payload.rows) || [];
+  const isTeamLead = state.role === "admin" && state.data && state.data.is_team_lead;
+  const isAdmin = state.role === "admin" && !isTeamLead;
+  const teamAgents = ((isTeamLead && state.data.admin && state.data.admin.team) || [])
+    .filter((a) => a.role !== "team_lead");
+
+  const form = isTeamLead ? `<div class="card">
+    <h2>📥 ახალი მოთხოვნა ადმინთან</h2>
+    <div class="period-switch" id="arKindSwitch">
+      <button data-kind="add" class="${arKind === "add" ? "active" : ""}">აგენტის მოწვევა</button>
+      <button data-kind="remove" class="${arKind === "remove" ? "active" : ""}">აგენტის გათავისუფლება</button>
+    </div>
+    <div class="qa-compose" data-ar-fields="add" ${arKind === "add" ? "" : "hidden"} style="margin-top:10px">
+      <input id="arName" placeholder="ახალი აგენტის სახელი" />
+      <input id="arPhone" placeholder="ტელეფონის ნომერი" />
+    </div>
+    <div class="qa-compose" data-ar-fields="remove" ${arKind === "remove" ? "" : "hidden"} style="margin-top:10px">
+      <select id="arTargetAgent">
+        <option value="">აირჩიეთ აგენტი…</option>
+        ${teamAgents.map((a) => `<option value="${esc(a.agent_id)}">${esc(a.name)}</option>`).join("")}
+      </select>
+    </div>
+    <div class="qa-compose" style="margin-top:8px">
+      <textarea id="arReason" placeholder="მიზეზი (არასავალდებულო)"></textarea>
+    </div>
+    <button class="btn" id="arSubmit" style="margin-top:8px">გაგზავნა</button>
+  </div>` : "";
+
+  const listHtml = `<div class="card">
+    <h2>📋 მოთხოვნების ისტორია <span class="cnt">${rows.length}</span></h2>
+    ${!rows.length ? `<div class="empty">მოთხოვნა ჯერ არ არის</div>` :
+      rows.map((r) => `
+      <div class="list-row">
+        <div class="avatar">${r.kind === "add" ? "➕" : "➖"}</div>
+        <div class="main">
+          <div class="title">${esc(AGENT_REQUEST_KIND_LABEL[r.kind] || r.kind)} — ${esc(r.name || r.target_agent_id || "")}</div>
+          <div class="sub">მოითხოვა: ${esc(r.requested_by_name || "")}${r.team ? " · " + esc(r.team) : ""}</div>
+          ${r.reason ? `<div class="sub">${esc(r.reason)}</div>` : ""}
+          <div class="sub">${esc((r.created_at || "").split(" ")[0] || "")} · ${esc(AGENT_REQUEST_STATUS_LABEL[r.status] || r.status)}</div>
+        </div>
+      </div>
+      ${r.status === "pending" && isAdmin ? `<div class="actions" style="margin:-2px 0 12px">
+        <button class="btn" data-reqact="approved" data-id="${esc(r.request_id)}">✅ დამტკიცება</button>
+        <button class="btn danger" data-reqact="rejected" data-id="${esc(r.request_id)}">✖️ უარყოფა</button>
+      </div>` : ""}`).join("")}
+  </div>`;
+
+  return form + listHtml;
+}
+
+function bindAgentRequestsActions() {
+  const kindSwitch = document.getElementById("arKindSwitch");
+  if (kindSwitch) {
+    kindSwitch.querySelectorAll("button").forEach((b) => {
+      b.onclick = () => {
+        arKind = b.dataset.kind;
+        kindSwitch.querySelectorAll("button").forEach((x) => x.classList.toggle("active", x === b));
+        document.querySelectorAll("[data-ar-fields]").forEach((el) => {
+          el.hidden = el.dataset.arFields !== arKind;
+        });
+      };
+    });
+  }
+  const submitBtn = document.getElementById("arSubmit");
+  if (submitBtn) {
+    submitBtn.onclick = async () => {
+      const body = { kind: arKind, reason: (document.getElementById("arReason").value || "").trim() };
+      if (arKind === "add") {
+        const name = (document.getElementById("arName").value || "").trim();
+        if (!name) { toast("შეიყვანეთ სახელი"); return; }
+        body.name = name;
+        body.phone = (document.getElementById("arPhone").value || "").trim();
+      } else {
+        const targetId = document.getElementById("arTargetAgent").value;
+        if (!targetId) { toast("აირჩიეთ აგენტი"); return; }
+        body.target_agent_id = targetId;
+      }
+      submitBtn.disabled = true;
+      try {
+        await api("/api/agent-requests", { method: "POST", body: JSON.stringify(body) });
+        tg && tg.HapticFeedback && tg.HapticFeedback.notificationOccurred("success");
+        toast("მოთხოვნა გაგზავნილია ✅");
+        delete lazyCache.agentrequests;
+        await renderContent();
+      } catch (e) { toast(e.message); submitBtn.disabled = false; }
+    };
+  }
+  document.querySelectorAll("[data-reqact]").forEach((btn) => {
+    btn.onclick = async () => {
+      btn.disabled = true;
+      try {
+        await api("/api/agent-requests/decide", {
+          method: "POST",
+          body: JSON.stringify({ request_id: btn.dataset.id, status: btn.dataset.reqact }),
+        });
+        tg && tg.HapticFeedback && tg.HapticFeedback.notificationOccurred("success");
+        toast(btn.dataset.reqact === "approved" ? "დამტკიცდა ✅" : "უარყოფილია");
+        delete lazyCache.agentrequests;
+        await renderContent();
+      } catch (e) { toast(e.message); btn.disabled = false; }
+    };
+  });
+}
+
+/* ------------------------------------------------ რეგულაციები/ინსტრუქცია
+   (item 3) — კომპანიის რეგულაციები (თავდაპირველი, ადმინის მიერ
+   მომავალში დასარედაქტირებელი ვერსია — საიტზე ცალკე გამოქვეყნებული
+   ტექსტი ვერ მოიძებნა ავტომატურად) + ბოტის გამოყენების ინსტრუქცია,
+   ცალ-ცალკე აგენტისთვის და მენეჯერისთვის (ბოტის რეალურ ბრძანებებზე
+   დაყრდნობით). */
+const COMPANY_REGULATIONS_ITEMS = [
+  "კლიენტთან კომუნიკაცია ყოველთვის თავაზიანი და პროფესიულია.",
+  "განცხადებების დღიური გეგმა (საიტი/myhome/ss.ge ან ონლაინ რეჟიმზე საერთო რაოდენობა) სავალდებულოა და ივსება იმავე დღეს, /clockout-ისას.",
+  "სამუშაო დღის დაწყება/დასრულება ბოტში (/clockin, /clockout) ან Mini App-ის „დღეს“ ტაბიდან აღინიშნება.",
+  "კლიენტთან შეხვედრის/მუშაობის შემდეგ რეპორტი ივსება იმავე დღეს (/clientreport ან /clockout-ის დროს).",
+  "დასვენების დღე წინასწარ, /dayoff ბრძანებით ან Mini App-იდან, მოთხოვნილია — დამტკიცებამდე დასვენება არ ითვლება ოფიციალურად.",
+  "ერთ აგენტს კალენდარულ თვეში მაქსიმუმ 3 დღეოფის დამტკიცება შეუძლია.",
+  "ექსკლუზივის ინფორმაცია კონფიდენციალურია — კოლეგისთვის მხოლოდ Mini App-ის „გაზიარების“ ფუნქციით ნაწილდება.",
+  "განმეორებითი გაფრთხილება (დაგვიანება, გამოტოვებული რეპორტი, შეუსრულებელი გეგმა) დისციპლინურ ზომებს იწვევს.",
+];
+
+const AGENT_BOT_COMMANDS = [
+  ["/start", "რეგისტრაცია ბოტში"],
+  ["/app", "Mini App-ის (ვიზუალური დაშბორდის) გახსნა"],
+  ["/mytasks", "ჩემი მიმდინარე დავალებების ნახვა"],
+  ["/done (task_id)", "დავალების დასრულებულად მონიშვნა"],
+  ["/myschedule", "საკუთარი კვირის გრაფიკის ნახვა"],
+  ["/clockin", "სამუშაო დღის დაწყება"],
+  ["/clockout", "სამუშაო დღის დასრულება — განცხადებების რაოდენობა + კლიენტის რეპორტი"],
+  ["/clientreport", "კლიენტთან მუშაობის რეპორტის ცალკე შევსება"],
+  ["/dayoff", "დასვენების დღის მოთხოვნა"],
+  ["/meeting", "შეხვედრის დაფიქსირება"],
+  ["/addexclusive", "ახალი ექსკლუზივის დამატება"],
+  ["/exclusives", "აქტიური ექსკლუზივების სია"],
+  ["/swapnumber", "შიდა სამუშაო ნომრის გაცვლა კოლეგასთან"],
+  ["/swapshift", "სამუშაო ცვლის გაცვლის მოთხოვნა (თვეში შეზღუდული რაოდენობა)"],
+  ["/cancel", "მიმდინარე ნაბიჯოვანი ბრძანების გაუქმება"],
+];
+
+const MANAGER_MINIAPP_TABS = [
+  ["გუნდი", "საკუთარი გუნდის დღევანდელი მდგომარეობა, ვინ დაგვიანდა/არ დაუწყია"],
+  ["მიმოხილვა / რეიტინგი", "გუნდის შედეგები დღე/კვირა/თვის ჭრილში"],
+  ["მოთხოვნები", "ახალი აგენტის მოწვევის ან არსებულის გათავისუფლების მოთხოვნა — საბოლოო დამტკიცება ადმინთანაა"],
+  ["რეპორტები", "გუნდის რეპორტების ისტორია + ხარისხის შეფასება (1-5), თარიღით/პერიოდით ფილტრი"],
+  ["შვებულებები", "გუნდის დღეოფის მოთხოვნების დამტკიცება/უარყოფა (მაქს. 3/თვე თითო აგენტზე)"],
+  ["სმენის გაცვლა", "გუნდის წევრებს შორის ცვლის გაცვლის მოთხოვნების გადაწყვეტა"],
+  ["დავალებები", "ახალი კლიენტის დამატება და დავალების გუნდში გადაბარება"],
+  ["დღის ამბები", "6 პუნქტიანი დღიური შეჯამება გუნდზე"],
+  ["კითხვები", "აგენტების კითხვებზე პასუხის გაცემა"],
+];
+
+function renderRegulations() {
+  const isTeamLead = state.role === "admin" && state.data && state.data.is_team_lead;
+  const isAdminOnly = state.role === "admin" && !isTeamLead;
+  const guideSection = isAdminOnly
+    ? `<div class="card">
+        <h2>📘 ბოტის სრული ინსტრუქცია — ადმინი</h2>
+        <div class="sub" style="margin-bottom:8px">ადმინს ბოტში ყველა ბრძანება აქვს ხელმისაწვდომი (/agents, /addagent, /setteam, /setrole, /report და სხვ.) — /start გზავნის მათ სრულ სიას. Mini App-ში კი ყველა ტაბი ჩანს, მენეჯერის ტაბების ჩათვლით.</div>
+      </div>`
+    : `<div class="card">
+        <h2>📘 ბოტის ინსტრუქცია — ${isTeamLead ? "მენეჯერი" : "აგენტი"}</h2>
+        ${isTeamLead ? `<div class="sub" style="margin-bottom:8px">მენეჯერული მოქმედებები (გუნდის მართვა, რეპორტების შეფასება, შვებულებების/მოთხოვნების დამტკიცება) — მხოლოდ Mini App-იდან (/app):</div>
+        ${MANAGER_MINIAPP_TABS.map(([t, d]) => `<div class="list-row"><div class="main"><div class="title">${esc(t)}</div><div class="sub">${esc(d)}</div></div></div>`).join("")}
+        <div class="sub" style="margin:10px 0 8px">საკუთარი, პირადი სამუშაო დღისთვის იგივე ბრძანებები გაქვთ, რაც აგენტებს:</div>` : ""}
+        ${AGENT_BOT_COMMANDS.map(([c, d]) => `<div class="list-row"><div class="main"><div class="title">${esc(c)}</div><div class="sub">${esc(d)}</div></div></div>`).join("")}
+      </div>`;
+  return `<div class="card">
+    <h2>📄 კომპანიის რეგულაციები</h2>
+    <ul style="margin:0;padding-left:18px;line-height:1.7">
+      ${COMPANY_REGULATIONS_ITEMS.map((t) => `<li>${esc(t)}</li>`).join("")}
+    </ul>
+  </div>
+  ${guideSection}`;
+}
+
 /* ---------------------------------------------------------- shell */
 
 const LAZY_ENDPOINTS = {
@@ -1243,15 +1506,21 @@ const LAZY_ENDPOINTS = {
   meetings: "/api/meetings",
   taskhistory: "/api/task-history",
   digest: "/api/digest",
+  dayoffs: "/api/dayoffs",
+  agentrequests: "/api/agent-requests",
 };
 /* ტაბები, რომელთა endpoint-საც სჭირდება ?period=day|week|month —
    period-ის შეცვლისას load() ისედაც წმენდს lazyCache-ს მთლიანად,
    ასე რომ საკმარისია URL-ში დღევანდელი state.period გადავცეთ. */
-const PERIOD_AWARE_TABS = new Set(["meetings", "taskhistory", "digest"]);
+const PERIOD_AWARE_TABS = new Set(["meetings", "taskhistory", "digest", "reports"]);
 /* taskhistory-ს დამატებითი დრილდაუნი (ადმინი: გუნდი → აგენტი). */
 if (!state.historyTeam) state.historyTeam = "";
 if (!state.historyAgent) state.historyAgent = "";
 if (!state.digestTeam) state.digestTeam = "";
+/* რეპორტების ისტორიის დრილდაუნი + კონკრეტული თარიღი. */
+if (!state.reportsTeam) state.reportsTeam = "";
+if (!state.reportsAgent) state.reportsAgent = "";
+if (!state.reportsDate) state.reportsDate = "";
 
 /* `adminOnly` ტაბები (მაგ. აგენტების/მენეჯერების მართვა) დირექტორის
    დონის მოქმედებაა — თიმლიდერს (რომელიც ტექნიკურად იმავე "admin"
@@ -1297,10 +1566,15 @@ async function renderContent() {
             if (state.historyTeam) params.push("team=" + encodeURIComponent(state.historyTeam));
             if (state.historyAgent) params.push("agent_id=" + encodeURIComponent(state.historyAgent));
           }
+          if (tab === "reports") {
+            if (state.reportsTeam) params.push("team=" + encodeURIComponent(state.reportsTeam));
+            if (state.reportsAgent) params.push("agent_id=" + encodeURIComponent(state.reportsAgent));
+            if (state.reportsDate) params.push("date=" + encodeURIComponent(state.reportsDate));
+          }
           if (tab === "digest" && state.digestTeam) params.push("team=" + encodeURIComponent(state.digestTeam));
           if (params.length) url += "?" + params.join("&");
           const resp = await api(url);
-          const wholeObjTabs = ["admintasks", "agentsmgmt", "meetings", "taskhistory", "digest"];
+          const wholeObjTabs = ["admintasks", "agentsmgmt", "meetings", "taskhistory", "digest", "reports", "dayoffs"];
           lazyCache[tab] = wholeObjTabs.includes(tab) ? resp : (resp.rows || []);
         } catch (e) {
           content.innerHTML = `<div class="card"><div class="empty">⚠️ ${esc(e.message)}</div></div>`;
@@ -1317,6 +1591,13 @@ async function renderContent() {
       else if (tab === "meetings") { content.innerHTML = renderMeetings(rows); bindPeriodSwitch(); }
       else if (tab === "taskhistory") { content.innerHTML = renderTaskHistory(rows); bindTaskHistoryActions(rows); }
       else if (tab === "digest") { content.innerHTML = renderDigest(rows); bindDigestActions(); }
+      else if (tab === "dayoffs") { content.innerHTML = renderDayoffs(rows); bindDayoffsActions(); }
+      else if (tab === "agentrequests") { content.innerHTML = renderAgentRequests(rows); bindAgentRequestsActions(); }
+      return;
+    }
+
+    if (tab === "regulations") {
+      content.innerHTML = renderRegulations();
       return;
     }
 
@@ -1331,14 +1612,12 @@ async function renderContent() {
       if (tab === "overview") html = renderOverview(admin);
       else if (tab === "team") html = renderTeam(admin);
       else if (tab === "ranking") html = renderRanking(admin);
-      else if (tab === "dayoffs") html = renderDayoffs(admin);
       else if (tab === "warnings") html = renderWarnings(admin);
     }
     content.innerHTML = html;
     if (state.role === "agent" && tab === "today") bindAgentActions(d.agent);
     if (state.role === "agent" && tab === "tasks") bindTasksActions(d.agent);
     if (state.role === "agent" && tab === "kpi") bindPeriodSwitch();
-    if (state.role === "admin" && tab === "dayoffs") bindAdminActions();
     if (state.role === "admin" && tab === "team") bindTeamActions(d.admin);
     if (state.role === "admin" && (tab === "overview" || tab === "ranking")) bindPeriodSwitch();
   } catch (e) {

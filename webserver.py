@@ -260,20 +260,61 @@ def api_reports_rate():
 
 @app.get("/api/reports")
 def api_reports():
+    """რეპორტების ისტორია დღე/კვირა/თვე ფილტრით (?period=), ან
+    კონკრეტული თარიღით (?date=YYYY-MM-DD, უპირატესობა აქვს period-ზე) —
+    პლიუს (ადმინისთვის) ?team= -> ?agent_id= დრილდაუნი, task-history-ის
+    იგივე პრინციპით."""
     agent, admin, err = _authed_agent()
     if err:
         return err
     if not (admin or _is_team_lead(agent)):
         return jsonify(error="მხოლოდ მენეჯერისთვის/თიმლიდერისთვის"), 403
+
+    team = request.args.get("team") or (None if admin else str(agent.get("team", "")).strip())
+    agent_id = request.args.get("agent_id") or None
+    date_filter = (request.args.get("date") or "").strip()
+
+    if agent_id and not admin:
+        target = next((a for a in sheets.get_agents() if str(a.get("agent_id")) == str(agent_id)), None)
+        if not target or str(target.get("team", "")).strip() != team:
+            return jsonify(error="მხოლოდ საკუთარი გუნდის აგენტის რეპორტი"), 403
+
     rows = sheets.get_reports()
-    if not admin and agent:
+    if agent_id:
+        rows = [r for r in rows if str(r.get("agent_id")) == str(agent_id)]
+    elif team:
         team_ids = {
             str(a.get("agent_id")) for a in sheets.get_agents()
-            if str(a.get("team", "")).strip() == str(agent.get("team", "")).strip()
+            if str(a.get("team", "")).strip() == team
         }
         rows = [r for r in rows if str(r.get("agent_id")) in team_ids]
-    rows = sorted(rows, key=lambda r: str(r.get("created_at", "")), reverse=True)[:30]
-    return jsonify(rows=rows)
+
+    if date_filter:
+        rows = [r for r in rows if str(r.get("created_at", "")).strip()[:10] == date_filter]
+    else:
+        days = _period_to_days(request.args.get("period"))
+        cutoff = datetime.datetime.now() - datetime.timedelta(days=days)
+
+        def _within(r):
+            try:
+                dt = datetime.datetime.fromisoformat(str(r.get("created_at", "")).strip())
+            except Exception:
+                return True
+            return dt >= cutoff
+
+        rows = [r for r in rows if _within(r)]
+
+    rows = sorted(rows, key=lambda r: str(r.get("created_at", "")), reverse=True)
+    teams = sorted({str(a.get("team", "")).strip() for a in sheets.get_agents() if a.get("team")}) if admin else []
+    agents_out = sorted(
+        [
+            {"agent_id": a.get("agent_id"), "name": a.get("name")}
+            for a in sheets.get_agents()
+            if (team is None or str(a.get("team", "")).strip() == team)
+        ],
+        key=lambda r: r.get("name") or "",
+    )
+    return jsonify(rows=rows[:200], count=len(rows), teams=teams, agents=agents_out, team=team or "")
 
 
 @app.get("/api/swaps")
@@ -452,6 +493,107 @@ def api_agents_active():
     if not ok:
         return jsonify(error="აგენტი ვერ მოიძებნა"), 404
     return jsonify(ok=True)
+
+
+# --------------------------------------------------- agent add/remove
+# მოთხოვნები (მენეჯერი ითხოვს, ადმინი ამტკიცებს/უარყოფს)
+
+@app.post("/api/agent-requests")
+def api_agent_requests_create():
+    """მენეჯერის (თიმლიდერის) მოთხოვნა ახალი აგენტის დამატებაზე ან
+    არსებულის გათავისუფლებაზე — მხოლოდ "pending" ჩანაწერი იქმნება,
+    რეალურად არაფერი იცვლება ადმინის დამტკიცებამდე (იხ.
+    /api/agent-requests/decide)."""
+    agent, admin, err = _authed_agent()
+    if err:
+        return err
+    if not (admin or _is_team_lead(agent)):
+        return jsonify(error="მხოლოდ მენეჯერისთვის/თიმლიდერისთვის"), 403
+    body = request.get_json(silent=True) or {}
+    kind = body.get("kind")
+    if kind not in ("add", "remove"):
+        return jsonify(error="არასწორი მოთხოვნა"), 400
+
+    team = (body.get("team") or "").strip() if admin else str(agent.get("team", "")).strip()
+    name = (body.get("name") or "").strip()
+    phone = (body.get("phone") or "").strip()
+    target_agent_id = body.get("target_agent_id") or ""
+    reason = (body.get("reason") or "").strip()
+    target = None
+
+    if kind == "add" and not name:
+        return jsonify(error="შეიყვანეთ აგენტის სახელი"), 400
+    if kind == "remove":
+        if not target_agent_id:
+            return jsonify(error="აირჩიეთ აგენტი"), 400
+        target = next((a for a in sheets.get_agents() if str(a.get("agent_id")) == str(target_agent_id)), None)
+        if not target:
+            return jsonify(error="აგენტი ვერ მოიძებნა"), 404
+        if not admin and str(target.get("team", "")).strip() != team:
+            return jsonify(error="მხოლოდ საკუთარი გუნდის აგენტზე"), 403
+
+    requested_by = agent.get("agent_id") if agent else ""
+    request_id = sheets.create_agent_request(
+        kind, requested_by, team=team, name=name, phone=phone,
+        target_agent_id=target_agent_id, reason=reason,
+    )
+
+    label = "➕ ახალი აგენტის მოთხოვნა" if kind == "add" else "➖ აგენტის გათავისუფლების მოთხოვნა"
+    who = agent.get("name") if agent else "ადმინი"
+    detail = name or (target.get("name") if kind == "remove" and target else "")
+    notify_text = f"📋 {label}\nმენეჯერი: {who}\n{detail}"
+    if reason:
+        notify_text += f"\nმიზეზი: {reason}"
+    for admin_id in config.ADMIN_CHAT_IDS:
+        _send_telegram_message(admin_id, notify_text)
+    return jsonify(ok=True, request_id=request_id)
+
+
+@app.get("/api/agent-requests")
+def api_agent_requests_list():
+    """მოთხოვნების სია — ადმინს ყველა ჩანს (?status= ფილტრით),
+    თიმლიდერს მხოლოდ საკუთარი გუნდიდან გაგზავნილები."""
+    agent, admin, err = _authed_agent()
+    if err:
+        return err
+    if not (admin or _is_team_lead(agent)):
+        return jsonify(error="მხოლოდ მენეჯერისთვის/თიმლიდერისთვის"), 403
+    status = request.args.get("status") or None
+    team = None if admin else str(agent.get("team", "")).strip()
+    rows = sheets.get_agent_requests(status=status, team=team)
+    return jsonify(rows=rows)
+
+
+@app.post("/api/agent-requests/decide")
+def api_agent_requests_decide():
+    """მოთხოვნის დამტკიცება/უარყოფა — მხოლოდ ადმინისთვის. დამტკიცებისას
+    რეალურადაც სრულდება მოქმედება (ახალი აგენტის დამატება ან არსებულის
+    გათიშვა) — იხ. sheets.decide_agent_request."""
+    _, admin, err = _authed_agent()
+    if err:
+        return err
+    if not admin:
+        return jsonify(error="მხოლოდ ადმინისთვის"), 403
+    body = request.get_json(silent=True) or {}
+    request_id = body.get("request_id")
+    status = body.get("status")
+    if status not in ("approved", "rejected") or not request_id:
+        return jsonify(error="არასწორი მოთხოვნა"), 400
+    row = sheets.decide_agent_request(request_id, status, decided_by="admin")
+    if not row:
+        return jsonify(error="ვერ მოიძებნა ან უკვე გადაწყვეტილია"), 404
+
+    label = "✅ დამტკიცებულია" if status == "approved" else "❌ უარყოფილია"
+    kind_label = "ახალი აგენტის დამატება" if row.get("kind") == "add" else "აგენტის გათავისუფლება"
+    requester = next(
+        (a for a in sheets.get_agents() if str(a.get("agent_id")) == str(row.get("requested_by"))), None
+    )
+    if requester and requester.get("telegram_chat_id"):
+        _send_telegram_message(
+            int(requester["telegram_chat_id"]),
+            f"თქვენი მოთხოვნა ({kind_label}: {row.get('name') or row.get('target_agent_id')}) — {label}",
+        )
+    return jsonify(ok=True, row=row)
 
 
 @app.post("/api/tasks/new")
@@ -879,27 +1021,85 @@ def api_questions_answer():
     return jsonify(ok=True, row=row)
 
 
-@app.post("/api/dayoff/decide")
-def api_dayoff_decide():
-    _, admin, err = _authed_agent()
+@app.get("/api/dayoffs")
+def api_dayoffs():
+    """Day off ისტორია, სამ ცალკე კატეგორიად გაყოფილი: მომლოდინე /
+    დადასტურებული / უარყოფილი — ადმინს ყველა (ან ?team=), თიმლიდერს
+    მხოლოდ საკუთარი გუნდისა."""
+    agent, admin, err = _authed_agent()
     if err:
         return err
-    if not admin:
-        return jsonify(error="მხოლოდ ადმინისთვის"), 403
+    if not (admin or _is_team_lead(agent)):
+        return jsonify(error="მხოლოდ მენეჯერისთვის/თიმლიდერისთვის"), 403
+    team = request.args.get("team") if admin else str(agent.get("team", "")).strip()
+    rows = sheets.get_dayoff_requests()
+    if team:
+        team_ids = {
+            str(a.get("agent_id")) for a in sheets.get_agents()
+            if str(a.get("team", "")).strip() == team
+        }
+        rows = [r for r in rows if str(r.get("agent_id")) in team_ids]
+    by_status = {"pending": [], "approved": [], "rejected": []}
+    for r in rows:
+        by_status.setdefault(str(r.get("status", "")), []).append(r)
+    for k in by_status:
+        by_status[k].sort(key=lambda r: str(r.get("created_at", "")), reverse=True)
+    return jsonify(
+        pending=by_status["pending"],
+        approved=by_status["approved"],
+        rejected=by_status["rejected"],
+        monthly_limit=config.DAYOFF_MONTHLY_LIMIT,
+    )
+
+
+@app.post("/api/dayoff/decide")
+def api_dayoff_decide():
+    """დღეს ეს ხელმისაწვდომია ადმინისთვისაც და თიმლიდერისთვისაც
+    (საკუთარი გუნდის მოთხოვნებზე) — role_permissions-ში ეს უფლება
+    თავიდანვე იყო გათვალისწინებული (decide_dayoff), უბრალოდ ეს
+    endpoint აქამდე მხოლოდ ადმინზე იყო შეზღუდული. დამტკიცებამდე
+    მოწმდება თვის ჭერიც (DAYOFF_MONTHLY_LIMIT)."""
+    agent, admin, err = _authed_agent()
+    if err:
+        return err
+    if not (admin or _is_team_lead(agent)):
+        return jsonify(error="მხოლოდ ადმინისთვის/თიმლიდერისთვის"), 403
     body = request.get_json(silent=True) or {}
     request_id = body.get("request_id")
     status = body.get("status")
     if status not in ("approved", "rejected") or not request_id:
         return jsonify(error="არასწორი მოთხოვნა"), 400
+
+    pending = sheets.get_dayoff_request(request_id)
+    if not pending:
+        return jsonify(error="ვერ მოიძებნა"), 404
+    if str(pending.get("status")) != "pending":
+        return jsonify(error="ეს მოთხოვნა უკვე გადაწყვეტილია"), 400
+
+    if not admin:
+        team = str(agent.get("team", "")).strip()
+        target = next(
+            (a for a in sheets.get_agents() if str(a.get("agent_id")) == str(pending.get("agent_id"))), None
+        )
+        if not target or str(target.get("team", "")).strip() != team:
+            return jsonify(error="მხოლოდ საკუთარი გუნდის მოთხოვნის გადაწყვეტა შეიძლება"), 403
+
+    if status == "approved":
+        already = sheets.approved_dayoffs_count_this_month(pending.get("agent_id"), pending.get("date", ""))
+        if already >= config.DAYOFF_MONTHLY_LIMIT:
+            return jsonify(
+                error=f"ამ აგენტს ამ თვეში უკვე დამტკიცებული აქვს {config.DAYOFF_MONTHLY_LIMIT} დღეოფი — მეტის დამტკიცება არ შეიძლება"
+            ), 400
+
     row = sheets.decide_dayoff(request_id, status)
     if not row:
         return jsonify(error="ვერ მოიძებნა"), 404
 
     label = "✅ დამტკიცებულია" if status == "approved" else "❌ უარყოფილია"
-    agent = next((a for a in sheets.get_agents() if str(a.get("agent_id")) == str(row.get("agent_id"))), None)
-    if agent and agent.get("telegram_chat_id"):
+    a2 = next((a for a in sheets.get_agents() if str(a.get("agent_id")) == str(row.get("agent_id"))), None)
+    if a2 and a2.get("telegram_chat_id"):
         _send_telegram_message(
-            int(agent["telegram_chat_id"]),
+            int(a2["telegram_chat_id"]),
             f"თქვენი Day off მოთხოვნა ({row.get('date')}) — {label}",
         )
     return jsonify(ok=True, row=row)

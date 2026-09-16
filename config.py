@@ -44,9 +44,14 @@ SHIFT_SWAPS_SHEET_NAME = "ShiftSwaps"
 EXCLUSIVES_SHEET_NAME = "Exclusives"
 QUESTIONS_SHEET_NAME = "Questions"
 EXCLUSIVE_SHARES_SHEET_NAME = "ExclusiveShares"
+AGENT_REQUESTS_SHEET_NAME = "AgentRequests"
 
 # თვეში მაქსიმუმ რამდენჯერ შეუძლია აგენტს სმენის გაცვლის მოთხოვნა
 SHIFT_SWAP_MONTHLY_LIMIT = int(os.environ.get("SHIFT_SWAP_MONTHLY_LIMIT", "2"))
+
+# თვეში მაქსიმუმ რამდენი "approved" Day off შეიძლება ჰქონდეს ერთ
+# აგენტს (კალენდარული თვის მიხედვით, ყოველ თვე თავიდან ითვლება)
+DAYOFF_MONTHLY_LIMIT = int(os.environ.get("DAYOFF_MONTHLY_LIMIT", "3"))
 
 # რამდენი გაფრთხილების მერე ითიშება აგენტი ავტომატურად (30-დღიან ფანჯარაში)
 WARNING_LIMIT = int(os.environ.get("WARNING_LIMIT", "4"))
