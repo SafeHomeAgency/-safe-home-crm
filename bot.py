@@ -965,6 +965,14 @@ async def swapnumber_response(update: Update, context: ContextTypes.DEFAULT_TYPE
     if not requester or not target:
         await query.edit_message_text("ვეღარ მოიძებნა — შესაძლოა უკვე შეცვლილია.")
         return
+    # უსაფრთხოება: callback_data-ში ჩაწერილი target_id არ არის საკმარისი
+    # საბუთი — ვამოწმებთ, რომ ღილაკზე რეალურად თავად target-მა დააჭირა
+    # (მისი chat_id-დან), წინააღმდეგ შემთხვევაში ნებისმიერს, ვინც ეს
+    # callback მიიღებდა, შეეძლებოდა სხვისი სახელით ნომრის გაცვლის
+    # დადასტურება/უარყოფა.
+    if str(update.effective_chat.id) != str(target.get("telegram_chat_id")):
+        await query.edit_message_text("⛔️ ეს მოთხოვნა თქვენთვის არაა განკუთვნილი.")
+        return
     if answer != "yes":
         await query.edit_message_text("❌ უარყოფილია.")
         try:

@@ -314,6 +314,16 @@ def api_reports_rate():
         return jsonify(error="არასწორი შეფასება"), 400
     if not report_id or not (1 <= score <= 5):
         return jsonify(error="არასწორი მოთხოვნა"), 400
+
+    if not admin:
+        my_team = str(agent.get("team", "")).strip()
+        target = next((r for r in sheets.get_reports() if str(r.get("report_id")) == str(report_id)), None)
+        target_agent = next(
+            (a for a in sheets.get_agents() if str(a.get("agent_id")) == str((target or {}).get("agent_id"))), None,
+        )
+        if not target or not target_agent or str(target_agent.get("team", "")).strip() != my_team:
+            return jsonify(error="მხოლოდ საკუთარი გუნდის რეპორტის შეფასება შეიძლება"), 403
+
     rated_by = "admin" if admin else (agent.get("name") if agent else "")
     ok = sheets.set_report_quality(report_id, score, rated_by)
     if not ok:
@@ -333,7 +343,7 @@ def api_reports():
     if not (admin or _is_team_lead(agent)):
         return jsonify(error="მხოლოდ მენეჯერისთვის/თიმლიდერისთვის"), 403
 
-    team = request.args.get("team") or (None if admin else str(agent.get("team", "")).strip())
+    team = request.args.get("team") if admin else str(agent.get("team", "")).strip()
     agent_id = request.args.get("agent_id") or None
     date_filter = (request.args.get("date") or "").strip()
 
@@ -416,6 +426,16 @@ def api_swaps_decide():
     status = body.get("status")
     if status not in ("approved", "rejected") or not swap_id:
         return jsonify(error="არასწორი მოთხოვნა"), 400
+
+    if not admin:
+        my_team = str(agent.get("team", "")).strip()
+        target = next((s for s in sheets.get_shift_swaps() if str(s.get("swap_id")) == str(swap_id)), None)
+        target_agent = next(
+            (a for a in sheets.get_agents() if str(a.get("agent_id")) == str((target or {}).get("agent_id"))), None,
+        )
+        if not target or not target_agent or str(target_agent.get("team", "")).strip() != my_team:
+            return jsonify(error="მხოლოდ საკუთარი გუნდის მოთხოვნის გადაწყვეტა შეიძლება"), 403
+
     decided_by = "admin" if admin else (agent.get("name") if agent else "")
     row = sheets.decide_shift_swap(swap_id, status, decided_by=decided_by)
     if not row:
@@ -1052,7 +1072,7 @@ def api_task_history():
     team_lead = _is_team_lead(agent)
 
     if admin or team_lead:
-        team = request.args.get("team") or (None if admin else str(agent.get("team", "")).strip())
+        team = request.args.get("team") if admin else str(agent.get("team", "")).strip()
         agent_id = request.args.get("agent_id") or None
         # თუ კონკრეტული agent_id მოთხოვნილია, ვამოწმებთ, რომ ის
         # მართლა ამ სქოუფის (გუნდის) წევრია — თიმლიდერს არ შეუძლია სხვა
@@ -1173,7 +1193,7 @@ def api_digest():
         return err
     if not (admin or _is_team_lead(agent)):
         return jsonify(error="მხოლოდ მენეჯერისთვის/თიმლიდერისთვის"), 403
-    team = request.args.get("team") or (None if admin else str(agent.get("team", "")).strip())
+    team = request.args.get("team") if admin else str(agent.get("team", "")).strip()
     try:
         return jsonify(sheets.get_daily_digest(team=team))
     except Exception:
@@ -1379,6 +1399,13 @@ def api_questions_answer():
     answer = (body.get("answer") or "").strip()
     if not question_id or not answer:
         return jsonify(error="არასწორი მოთხოვნა"), 400
+
+    if not admin:
+        my_team = str(agent.get("team", "")).strip()
+        target = next((q for q in sheets.get_questions() if str(q.get("question_id")) == str(question_id)), None)
+        if not target or str(target.get("team", "")).strip() != my_team:
+            return jsonify(error="მხოლოდ საკუთარი გუნდის კითხვაზე პასუხის გაცემა შეიძლება"), 403
+
     answered_by = "მენეჯერი" if admin else (agent.get("name") if agent else "თიმლიდერი")
     row = sheets.answer_question(question_id, answer, answered_by)
     if not row:
