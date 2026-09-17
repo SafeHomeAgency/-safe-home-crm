@@ -715,7 +715,7 @@ function renderDayoffs(payload) {
   const approved = p.approved || [];
   const rejected = p.rejected || [];
   const row = (r, withActions) => `
-      <div class="list-row" data-id="${esc(r.request_id)}">
+      <div class="list-row clickable" data-detail-id="${esc(r.request_id)}">
         <div class="avatar">${initials(r.agent_name)}</div>
         <div class="main">
           <div class="title">${esc(r.agent_name)} — ${esc(r.date)}</div>
@@ -742,9 +742,28 @@ function renderDayoffs(payload) {
   </div>`;
 }
 
-function bindDayoffsActions() {
+const DAYOFF_STATUS_LABEL = { pending: "⏳ მომლოდინე", approved: "✅ დამტკიცებული", rejected: "❌ უარყოფილი" };
+const DAYOFF_FIELD_LABELS = [
+  ["agent_name", "აგენტი"], ["date", "თარიღი"], ["reason", "მიზეზი"],
+  ["status", "სტატუსი"], ["created_at", "მოთხოვნის თარიღი"], ["decided_at", "გადაწყვეტილების თარიღი"],
+];
+
+function bindDayoffsActions(payload) {
+  const p = payload || {};
+  const allRows = [...(p.pending || []), ...(p.approved || []), ...(p.rejected || [])];
+  document.querySelectorAll("[data-detail-id]").forEach((el) => {
+    el.onclick = () => {
+      const r = allRows.find((x) => String(x.request_id) === el.dataset.detailId);
+      if (!r) return;
+      const fields = DAYOFF_FIELD_LABELS.map(([k, label]) => ({
+        label, value: k === "status" ? (DAYOFF_STATUS_LABEL[r.status] || r.status) : r[k],
+      }));
+      openDetail(`${r.agent_name} — დასვენების მოთხოვნა`, fields);
+    };
+  });
   document.querySelectorAll("[data-act]").forEach((btn) => {
-    btn.onclick = async () => {
+    btn.onclick = async (e) => {
+      e.stopPropagation();
       btn.disabled = true;
       try {
         await api("/api/dayoff/decide", {
@@ -754,7 +773,7 @@ function bindDayoffsActions() {
         tg && tg.HapticFeedback && tg.HapticFeedback.notificationOccurred("success");
         toast(btn.dataset.act === "approved" ? "დამტკიცდა ✅" : "უარყოფილია");
         await load();
-      } catch (e) { toast(e.message); btn.disabled = false; }
+      } catch (e2) { toast(e2.message); btn.disabled = false; }
     };
   });
 }
@@ -772,26 +791,129 @@ const WARNING_FIELD_LABELS = [
 function renderWarnings(rows) {
   rows = rows || [];
   if (!rows.length) return `<div class="card"><div class="empty">გაფრთხილება არ არის ✅</div></div>`;
-  return `<div class="card">
-    <h2>⚠️ გაფრთხილებები <span class="cnt">${rows.length}</span></h2>
-    ${rows.map((w, i) => {
-      const statusLabel = WARNING_STATUS_LABEL[w.status] || "";
-      return `
-        <div class="list-row clickable" data-warn-idx="${i}">
-          <div class="avatar" style="background:linear-gradient(135deg,#f59e0b,#ef4444)">⚠️</div>
-          <div class="main">
-            <div class="title">${esc(w.agent_name)} — ${esc(WARNING_LABELS[w.type] || w.type)}</div>
-            <div class="sub">${esc(w.detail || "")}${statusLabel ? " · " + statusLabel : ""}</div>
-          </div>
-          <div class="side sub">${esc((w.created_at || "").split(" ")[0] || "")}</div>
-        </div>`;
-    }).join("")}
+
+  const agentOptions = [];
+  const seenAgents = new Set();
+  rows.forEach((w) => {
+    const id = String(w.agent_id || "");
+    if (id && !seenAgents.has(id)) { seenAgents.add(id); agentOptions.push({ id, name: w.agent_name || id }); }
+  });
+  agentOptions.sort((a, b) => (a.name || "").localeCompare(b.name || "", "ka"));
+  const managerNames = [...new Set(rows.map((w) => w.dismiss_requested_by_name).filter(Boolean))]
+    .sort((a, b) => a.localeCompare(b, "ka"));
+
+  const filtered = rows.filter((w) => {
+    if (state.warningsAgentFilter && String(w.agent_id) !== state.warningsAgentFilter) return false;
+    if (state.warningsManagerFilter && w.dismiss_requested_by_name !== state.warningsManagerFilter) return false;
+    return true;
+  });
+
+  const byAgent = {};
+  filtered.forEach((w) => {
+    const id = String(w.agent_id || "");
+    if (!id) return;
+    if (!byAgent[id]) byAgent[id] = { agent_id: id, agent_name: w.agent_name, count: 0 };
+    if ((w.status || "active") !== "dismissed") byAgent[id].count += 1;
+  });
+  const agentCards = Object.values(byAgent).sort((a, b) => b.count - a.count);
+
+  const buckets = { pending: [], dismissed: [], rejected: [], active: [] };
+  filtered.forEach((w) => buckets[_warningBucket(w)].push(w));
+
+  const filterBar = `<div class="card">
+    <h2>🔍 ფილტრი</h2>
+    <div class="qa-compose">
+      <select id="warnAgentFilter">
+        <option value="">ყველა აგენტი</option>
+        ${agentOptions.map((a) => `<option value="${esc(a.id)}" ${state.warningsAgentFilter === a.id ? "selected" : ""}>${esc(a.name)}</option>`).join("")}
+      </select>
+      ${managerNames.length ? `<select id="warnManagerFilter">
+        <option value="">ყველა მენეჯერი</option>
+        ${managerNames.map((m) => `<option value="${esc(m)}" ${state.warningsManagerFilter === m ? "selected" : ""}>${esc(m)}</option>`).join("")}
+      </select>` : ""}
+    </div>
   </div>`;
+
+  const agentCardsHtml = `<div class="card">
+    <h2>👤 აგენტების მიხედვით</h2>
+    ${agentCards.length === 0 ? `<div class="empty">ვერაფერი მოიძებნა</div>` : agentCards.map((a) => `
+      <div class="list-row clickable" data-agent-warn="${esc(a.agent_id)}">
+        <div class="avatar">${initials(a.agent_name)}</div>
+        <div class="main"><div class="title">${esc(a.agent_name)}</div></div>
+        <div class="side"><span class="badge ${a.count > 0 ? "red" : "gray"}">${a.count}</span></div>
+      </div>`).join("")}
+  </div>`;
+
+  const warnRowHtml = (w) => {
+    const statusLabel = WARNING_STATUS_LABEL[w.status] || "";
+    return `
+      <div class="list-row clickable" data-warn-idx="${rows.indexOf(w)}">
+        <div class="avatar" style="background:linear-gradient(135deg,#f59e0b,#ef4444)">⚠️</div>
+        <div class="main">
+          <div class="title">${esc(w.agent_name)} — ${esc(WARNING_LABELS[w.type] || w.type)}</div>
+          <div class="sub">${esc(w.detail || "")}${statusLabel ? " · " + statusLabel : ""}</div>
+        </div>
+        <div class="side sub">${esc((w.created_at || "").split(" ")[0] || "")}</div>
+      </div>`;
+  };
+  const section = (icon, title, list) => `<div class="card">
+    <h2>${icon} ${title} <span class="cnt">${list.length}</span></h2>
+    ${list.length === 0 ? `<div class="empty">ცარიელია</div>` : list.map(warnRowHtml).join("")}
+  </div>`;
+
+  return filterBar + agentCardsHtml
+    + section("🕐", "დასადასტურებელი", buckets.pending)
+    + section("✅", "დადასტურებული (გაუქმებულია)", buckets.dismissed)
+    + section("❌", "უარყოფილი (აქტიურად რჩება)", buckets.rejected)
+    + section("⚠️", "აქტიური", buckets.active);
+}
+
+function _warningBucket(w) {
+  const status = w.status || "active";
+  if (status === "dismiss_pending") return "pending";
+  if (status === "dismissed") return "dismissed";
+  if (status === "active" && w.dismiss_decided_by) return "rejected";
+  return "active";
 }
 
 function bindWarningsActions(rows) {
   const isTeamLead = state.role === "admin" && state.data && state.data.is_team_lead;
   const isAdmin = state.role === "admin" && !isTeamLead;
+
+  const agentFilterSel = document.getElementById("warnAgentFilter");
+  if (agentFilterSel) {
+    agentFilterSel.onchange = () => {
+      state.warningsAgentFilter = agentFilterSel.value;
+      renderContent();
+    };
+  }
+  const managerFilterSel = document.getElementById("warnManagerFilter");
+  if (managerFilterSel) {
+    managerFilterSel.onchange = () => {
+      state.warningsManagerFilter = managerFilterSel.value;
+      renderContent();
+    };
+  }
+
+  document.querySelectorAll("[data-agent-warn]").forEach((el) => {
+    el.onclick = () => {
+      const aid = el.dataset.agentWarn;
+      const agentWarnings = rows.filter((w) => String(w.agent_id) === aid);
+      if (!agentWarnings.length) return;
+      const agentName = agentWarnings[0].agent_name || "";
+      const listHtml = agentWarnings.map((w) => `
+        <div class="list-row">
+          <div class="avatar" style="background:linear-gradient(135deg,#f59e0b,#ef4444)">⚠️</div>
+          <div class="main">
+            <div class="title">${esc(WARNING_LABELS[w.type] || w.type)}</div>
+            <div class="sub">${esc(w.detail || "")}</div>
+            <div class="sub">${esc((w.created_at || "").split(" ")[0] || "")} · ${esc(WARNING_STATUS_LABEL[w.status] || "აქტიური")}</div>
+          </div>
+        </div>`).join("");
+      openDetail(`${agentName} — ${agentWarnings.length} გაფრთხილება`, [], listHtml);
+    };
+  });
+
   document.querySelectorAll("[data-warn-idx]").forEach((el) => {
     el.onclick = () => {
       const w = rows[parseInt(el.dataset.warnIdx, 10)];
@@ -1499,30 +1621,36 @@ function renderDigest(payload) {
   const d = payload || {};
   const isAdmin = state.role === "admin" && !(state.data && state.data.is_team_lead);
   const teams = d.teams || [];
+  const DIGEST_TITLE_WORD = { day: "დღის", week: "კვირის", month: "თვის" };
+  const titleWord = DIGEST_TITLE_WORD[state.period] || "დღის";
+  const isDay = (d.days || 1) <= 1;
+  const periodWord = isDay ? "დღეს" : (PERIOD_TITLES[state.period] || "") + "ში";
   const section = (icon, title, items, empty) => `
     <div class="field"><div class="k">${icon} ${esc(title)}</div></div>
     ${items && items.length
       ? items.map((s) => `<div class="list-row"><div class="main"><div class="title">${esc(s)}</div></div></div>`).join("")
       : `<div class="empty">${esc(empty)}</div>`}`;
   return `<div class="card">
+    ${renderPeriodSwitch()}
     ${isAdmin ? `<div class="qa-compose" style="margin-bottom:10px">
       <select id="digestTeamSelect">
         <option value="">მთელი კომპანია</option>
         ${teams.map((t) => `<option value="${esc(t.team)}" ${state.digestTeam === t.team ? "selected" : ""}>${esc(t.name)}-ის გუნდი</option>`).join("")}
       </select>
     </div>` : ""}
-    <h2>🗞️ დღის ამბები — ${isAdmin ? (state.digestTeam ? esc((teams.find((t) => t.team === state.digestTeam) || {}).name || "") + "-ის გუნდი — " : "მთელი კომპანია — ") : "ჩემი გუნდი — "}${esc(d.date || "")}</h2>
-    ${section("1️⃣", `გამოცხადდა (${(d.came || []).length})`, d.came, "დღეს ჯერ არავინ დაწყებულა")}
-    ${d.not_started && d.not_started.length ? section("🔴", "ჯერ არ დაწყებულა", d.not_started, "") : ""}
-    ${section("2️⃣", "დღეს კლიენტი ჩაბარდა", d.clients_assigned, "დღეს არავის ჩაბარებია")}
-    ${section("3️⃣", "დღეს შეხვედრაზე იყო", d.meetings, "დღეს შეხვედრა არ ყოფილა")}
+    <h2>🗞️ ${esc(titleWord)} ამბები — ${isAdmin ? (state.digestTeam ? esc((teams.find((t) => t.team === state.digestTeam) || {}).name || "") + "-ის გუნდი — " : "მთელი კომპანია — ") : "ჩემი გუნდი — "}${esc(d.date || "")}</h2>
+    ${section("1️⃣", `დღეს გამოცხადდა (${(d.came || []).length})`, d.came, "დღეს ჯერ არავინ დაწყებულა")}
+    ${d.not_started && d.not_started.length ? section("🔴", "დღეს ჯერ არ დაწყებულა", d.not_started, "") : ""}
+    ${section("2️⃣", `${periodWord} კლიენტი ჩაბარდა`, d.clients_assigned, `${periodWord} არავის ჩაბარებია`)}
+    ${section("3️⃣", `${periodWord} შეხვედრაზე იყო`, d.meetings, `${periodWord} შეხვედრა არ ყოფილა`)}
     ${section("4️⃣", "დღეს შეყვანილი განცხადებები", d.listing_counts, "ჯერ არავის შეუყვანია")}
-    ${section("5️⃣", "დღეს გაფრთხილება მიიღო", d.warnings_today, "დღეს გაფრთხილება არ ყოფილა")}
+    ${section("5️⃣", `${periodWord} გაფრთხილება მიიღო`, d.warnings_today, `${periodWord} გაფრთხილება არ ყოფილა`)}
     ${section("6️⃣", "საჭიროებს ყურადღებას", d.attention, "ყველაფერი წესრიგშია 🎉")}
   </div>`;
 }
 
 function bindDigestActions() {
+  bindPeriodSwitch();
   const sel = document.getElementById("digestTeamSelect");
   if (sel) {
     sel.onchange = () => {
@@ -2102,6 +2230,9 @@ if (!state.reportsAgent) state.reportsAgent = "";
 if (!state.reportsDate) state.reportsDate = "";
 /* თიმლიდერისთვის: შეხვედრების ჩვენება „გუნდის" ან „საკუთარი" ჭრილში. */
 if (!state.meetingsScope) state.meetingsScope = "team";
+/* გაფრთხილებების ტაბის ფილტრები (აგენტი/მენეჯერი) — client-side. */
+if (!state.warningsAgentFilter) state.warningsAgentFilter = "";
+if (!state.warningsManagerFilter) state.warningsManagerFilter = "";
 
 /* `adminOnly` ტაბები (მაგ. აგენტების/მენეჯერების მართვა) დირექტორის
    დონის მოქმედებაა — თიმლიდერს (რომელიც ტექნიკურად იმავე "admin"
@@ -2173,7 +2304,7 @@ async function renderContent() {
       else if (tab === "meetings") { content.innerHTML = renderMeetings(rows); bindPeriodSwitch(); bindMeetingsActions(rows); }
       else if (tab === "taskhistory") { content.innerHTML = renderTaskHistory(rows); bindTaskHistoryActions(rows); }
       else if (tab === "digest") { content.innerHTML = renderDigest(rows); bindDigestActions(); }
-      else if (tab === "dayoffs") { content.innerHTML = renderDayoffs(rows); bindDayoffsActions(); }
+      else if (tab === "dayoffs") { content.innerHTML = renderDayoffs(rows); bindDayoffsActions(rows); }
       else if (tab === "agentrequests") { content.innerHTML = renderAgentRequests(rows); bindAgentRequestsActions(); }
       else if (tab === "regulations") { content.innerHTML = renderRegulations(rows); bindRegulationsActions(); }
       else if (tab === "warnings") { content.innerHTML = renderWarnings(rows); bindWarningsActions(rows); }

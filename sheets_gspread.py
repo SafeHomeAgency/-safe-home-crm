@@ -1731,12 +1731,20 @@ _DIGEST_WARNING_LABELS = {
 }
 
 
-def get_daily_digest(team: str | None = None) -> dict:
+def get_daily_digest(team: str | None = None, days: int = 1) -> dict:
     """დღის შეჯამება (6 პუნქტი) — ერთი საერთო წყარო, რომელსაც იყენებს
     ორივე: ბოტის ყოველდღიური ტექსტური შეტყობინება ადმინისთვის/
     თიმლიდერისთვის და Mini App-ის „დღის ამბები“ ტაბი. `team=None` —
-    მთელი კომპანია (ადმინი), კონკრეტული `team` — მხოლოდ ის გუნდი."""
+    მთელი კომპანია (ადმინი), კონკრეტული `team` — მხოლოდ ის გუნდი.
+    `days` — 1 (დღეს, ნაგულისხმევი, ძველი ქცევა უცვლელია), 7 (კვირა)
+    ან 30 (თვე): პუნქტები 2-3-5 (კლიენტები/შეხვედრები/გაფრთხილებები)
+    ამ ფანჯარაში ჯამდება. პუნქტი 1 (გამოცხადება) და 4 (განცხადებების
+    დღიური რაოდენობა) მუდამ მხოლოდ დღევანდელს აჩვენებს — დასწრება
+    დღიური სნეპშოტია, კვირაში/თვეში „ჯამურად გამოცხადებული“ არაფერს
+    ნიშნავს ისე, როგორც დღეს."""
     today = _today_str()
+    days = max(1, int(days or 1))
+    cutoff = (datetime.datetime.now() - datetime.timedelta(days=days - 1)).strftime("%Y-%m-%d")
     all_agents = get_agents()
     agents = [
         a for a in all_agents
@@ -1761,22 +1769,22 @@ def get_daily_digest(team: str | None = None) -> dict:
         else:
             not_started.append(f"{a.get('name')} — {mode_label}")
 
-    tasks_today = [
+    tasks_period = [
         t for t in get_tasks()
-        if str(t.get("assigned_to")) in agent_ids and str(t.get("created_at", "")).startswith(today)
+        if str(t.get("assigned_to")) in agent_ids and str(t.get("created_at", ""))[:10] >= cutoff
     ]
     clients_assigned = [
         f"{names.get(str(t.get('assigned_to')), t.get('assigned_to'))} — {t.get('title', '')}"
-        for t in tasks_today
+        for t in tasks_period
     ]
 
-    meetings_today = [
+    meetings_period = [
         m for m in get_meetings()
-        if str(m.get("agent_id")) in agent_ids and str(m.get("timestamp", "")).startswith(today)
+        if str(m.get("agent_id")) in agent_ids and str(m.get("timestamp", ""))[:10] >= cutoff
     ]
     meetings_list = [
         f"{m.get('agent_name') or names.get(str(m.get('agent_id')), '')} — {m.get('address') or m.get('district') or ''}"
-        for m in meetings_today
+        for m in meetings_period
     ]
 
     listing_counts = [
@@ -1786,14 +1794,14 @@ def get_daily_digest(team: str | None = None) -> dict:
         and att_all[str(a.get("agent_id"))].get("count_submitted") not in (None, "")
     ]
 
-    warns_today = [
+    warns_period = [
         w for w in get_warnings()
-        if str(w.get("agent_id")) in agent_ids and str(w.get("created_at", "")).startswith(today)
+        if str(w.get("agent_id")) in agent_ids and str(w.get("created_at", ""))[:10] >= cutoff
     ]
     warnings_today = [
         f"{names.get(str(w.get('agent_id')), w.get('agent_id'))} — "
         f"{_DIGEST_WARNING_LABELS.get(w.get('type'), w.get('type'))}"
-        for w in warns_today
+        for w in warns_period
     ]
 
     attention = []
@@ -1813,6 +1821,7 @@ def get_daily_digest(team: str | None = None) -> dict:
 
     return {
         "date": today,
+        "days": days,
         "came": came,
         "not_started": not_started,
         "clients_assigned": clients_assigned,

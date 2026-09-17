@@ -1194,8 +1194,9 @@ def api_digest():
     if not (admin or _is_team_lead(agent)):
         return jsonify(error="მხოლოდ მენეჯერისთვის/თიმლიდერისთვის"), 403
     team = request.args.get("team") if admin else str(agent.get("team", "")).strip()
+    days = _period_to_days(request.args.get("period"))
     try:
-        return jsonify(sheets.get_daily_digest(team=team))
+        return jsonify(sheets.get_daily_digest(team=team, days=days))
     except Exception:
         log.exception("დღის ამბების აწყობა ჩავარდა")
         return jsonify(error="მონაცემების ჩატვირთვა ვერ მოხერხდა"), 500
