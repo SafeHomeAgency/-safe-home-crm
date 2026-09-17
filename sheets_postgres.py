@@ -37,7 +37,7 @@ TASKS_HEADERS = [
     "task_id", "title", "description", "assigned_to", "status",
     "priority", "due_date", "created_by", "created_at", "updated_at",
     "notified", "lead_type", "client_phone", "deal_type", "listing_id",
-    "viewing_time", "assigned_to_name",
+    "viewing_time", "assigned_to_name", "seen", "seen_at",
 ]
 REPORTS_HEADERS = [
     "report_id", "agent_id", "client_phone", "actions", "notes",
@@ -59,7 +59,11 @@ ATTENDANCE_HEADERS = [
     "attendance_id", "agent_id", "date", "mode", "clock_in", "clock_out",
     "count_submitted", "agent_name", "site_count", "myhome_count", "ssge_count",
 ]
-WARNINGS_HEADERS = ["warning_id", "agent_id", "type", "detail", "created_at", "agent_name"]
+WARNINGS_HEADERS = [
+    "warning_id", "agent_id", "type", "detail", "created_at", "agent_name",
+    "status", "dismiss_reason", "dismiss_requested_by", "dismiss_requested_by_name",
+    "dismiss_requested_at", "dismiss_decided_by", "dismiss_decided_at",
+]
 SHIFT_SWAPS_HEADERS = [
     "swap_id", "agent_id", "agent_name", "request_type", "from_mode", "to_mode",
     "target_agent_id", "target_agent_name", "swap_date", "note", "status",
@@ -210,6 +214,26 @@ def set_agent_active(agent_id: str, value: str) -> bool:
     return ok
 
 
+def delete_agent(agent_id: str) -> bool:
+    """აგენტის ჩანაწერის სრული, შეუქცევადი წაშლა (არა უბრალო
+    დეაქტივაცია) — აღარსად ჩანს, "აგენტების მართვა" ტაბშიც კი. მხოლოდ
+    agents/schedule ცხრილებიდან შლის; ისტორიული ჩანაწერები (tasks/
+    reports/meetings/warnings/attendance/shift_swaps) უცვლელად რჩება —
+    მათში აგენტის სახელი ცალკეა შენახული (agent_name/assigned_to_name),
+    ასე რომ KPI/ისტორია არ ზიანდება, თუმცა agent_id-ით ცოცხალ
+    ჩანაწერზე მიბმა (მაგ. "მენეჯერის" ბმული) მას შემდეგ ვეღარ
+    გაიმართება."""
+    with _lock:
+        row = db.query_one("SELECT * FROM agents WHERE agent_id = %s", (agent_id,))
+        if not row:
+            return False
+        db.execute("DELETE FROM schedule WHERE agent_id = %s", (agent_id,))
+        rc = db.execute("DELETE FROM agents WHERE agent_id = %s", (agent_id,))
+    if rc:
+        _audit("delete_agent", "agent", agent_id, old_value={"name": row.get("name")})
+    return bool(rc)
+
+
 def set_agent_role(agent_id: str, role: str) -> bool:
     with _lock:
         ok = _update_field("agents", "agent_id", agent_id, "role", role)
@@ -348,9 +372,24 @@ def create_task(title: str, description: str, assigned_to: str,
             task_id, title, description, assigned_to, "New",
             priority, due_date, created_by, now, now, "no",
             lead_type, client_phone, deal_type, listing_id, viewing_time,
-            agent_name_by_id(assigned_to),
+            agent_name_by_id(assigned_to), "no", "",
         ])
         return task_id
+
+
+def mark_task_seen(task_id: str, agent_id: str) -> dict | None:
+    """აგენტი ადასტურებს კონკრეტული კლიენტის/დავალების მიღებას —
+    მენეჯერს/ადმინს რომ სჩანდეს, ნახა თუ არა აგენტმა უკვე. მხოლოდ
+    თავად მინიჭებულ აგენტს შეუძლია საკუთარი დავალების დადასტურება."""
+    with _lock:
+        row = db.query_one("SELECT * FROM tasks WHERE task_id = %s", (task_id,))
+        if not row or str(row.get("assigned_to")) != str(agent_id):
+            return None
+        db.execute(
+            "UPDATE tasks SET seen = %s, seen_at = %s WHERE task_id = %s",
+            ("yes", _now(), task_id),
+        )
+        return db.query_one("SELECT * FROM tasks WHERE task_id = %s", (task_id,))
 
 
 def mark_task_done(task_id: str) -> bool:
@@ -378,8 +417,8 @@ def reassign_task(task_id: str, new_agent_id: str, actor_agent_id: str = "") -> 
             return None
         db.execute(
             "UPDATE tasks SET assigned_to = %s, assigned_to_name = %s, updated_at = %s, "
-            "notified = %s WHERE task_id = %s",
-            (new_agent_id, agent_name_by_id(new_agent_id), _now(), "no", task_id),
+            "notified = %s, seen = %s, seen_at = %s WHERE task_id = %s",
+            (new_agent_id, agent_name_by_id(new_agent_id), _now(), "no", "no", "", task_id),
         )
         row = db.query_one("SELECT * FROM tasks WHERE task_id = %s", (task_id,))
     _audit(
@@ -516,6 +555,47 @@ def get_client_history(client_phone: str) -> dict:
     reports = get_reports(client_phone=client_phone)
     meetings = get_meetings(client_phone=client_phone)
     return {"tasks": tasks, "reports": reports, "meetings": meetings}
+
+
+def get_all_clients(team: str | None = None) -> list[dict]:
+    """ერთი სტრიქონი თითო უნიკალურ კლიენტის ტელეფონზე (ყველა
+    დავალების/ლიდის მიხედვით, ოდესმე შექმნილი) — მიმოხილვისთვის
+    "კლიენტები" ტაბში. `team` მითითებისას რჩება მხოლოდ ის კლიენტები,
+    რომელთა რომელიმე დავალება ოდესმე ამ გუნდის (მიმდინარე წევრობით)
+    აგენტზე ყოფილა მინიჭებული — მენეჯერს რომ არც ის კლიენტი წაერთვას
+    ხედვიდან, რომელიც შემდეგ სხვა გუნდზე გადაბარდა."""
+    tasks = get_tasks()
+    agents_by_id = {str(a.get("agent_id")): a for a in get_agents()}
+    by_phone: dict[str, list[dict]] = {}
+    for t in tasks:
+        phone = str(t.get("client_phone", "")).strip()
+        if not phone:
+            continue
+        by_phone.setdefault(phone, []).append(t)
+
+    out = []
+    for phone, trows in by_phone.items():
+        trows_sorted = sorted(trows, key=lambda t: str(t.get("created_at", "")))
+        latest = trows_sorted[-1]
+        if team is not None:
+            team_keys = {
+                str(agents_by_id.get(str(t.get("assigned_to")), {}).get("team", "")).strip()
+                for t in trows
+            }
+            if team not in team_keys:
+                continue
+        out.append({
+            "client_phone": phone,
+            "current_agent_id": latest.get("assigned_to"),
+            "current_agent_name": latest.get("assigned_to_name") or agent_name_by_id(latest.get("assigned_to")),
+            "status": latest.get("status"),
+            "deal_type": latest.get("deal_type") or latest.get("lead_type"),
+            "task_count": len(trows),
+            "first_seen": trows_sorted[0].get("created_at", ""),
+            "last_activity": latest.get("updated_at") or latest.get("created_at", ""),
+        })
+    out.sort(key=lambda c: str(c.get("last_activity") or ""), reverse=True)
+    return out
 
 
 # ---------- Day off ----------
@@ -809,9 +889,13 @@ def add_warning(agent_id: str, type_: str, detail: str = "") -> dict:
     with _lock:
         warning_id = uuid.uuid4().hex[:8]
         _insert("warnings", WARNINGS_HEADERS,
-                [warning_id, agent_id, type_, detail, _now(), agent_name_by_id(agent_id)])
+                [warning_id, agent_id, type_, detail, _now(), agent_name_by_id(agent_id),
+                 "active", "", "", "", "", "", ""])
 
-    count = len(get_warnings(agent_id=agent_id, days=config.WARNING_WINDOW_DAYS))
+    count = len([
+        w for w in get_warnings(agent_id=agent_id, days=config.WARNING_WINDOW_DAYS)
+        if str(w.get("status") or "active") != "dismissed"
+    ])
     deactivated = False
     if count >= config.WARNING_LIMIT:
         set_agent_active(agent_id, "no")
@@ -819,6 +903,44 @@ def add_warning(agent_id: str, type_: str, detail: str = "") -> dict:
         _audit("auto_deactivate_on_warnings", "agent", agent_id,
                new_value={"warning_count": count, "type": type_})
     return {"warning_id": warning_id, "count": count, "deactivated": deactivated}
+
+
+def request_warning_dismissal(warning_id: str, requested_by: str, reason: str) -> dict | None:
+    """მენეჯერი ითხოვს კონკრეტული გაფრთხილების გაუქმებას (მაგ. აგენტი
+    შეხვედრაზე იყო სმენის დროს) — მიზეზის მითითებით. მოთხოვნა
+    "pending"-ია სანამ დირექტორი არ გადაწყვეტს (decide_warning_dismissal);
+    თავად აღარ აქვეითებს გაფრთხილებას/მის ჩათვლას ჭერში."""
+    with _lock:
+        row = db.query_one("SELECT * FROM warnings WHERE warning_id = %s", (warning_id,))
+        if not row or str(row.get("status") or "active") not in ("active",):
+            return None
+        db.execute(
+            "UPDATE warnings SET status = %s, dismiss_reason = %s, dismiss_requested_by = %s, "
+            "dismiss_requested_by_name = %s, dismiss_requested_at = %s WHERE warning_id = %s",
+            ("dismiss_pending", reason, requested_by, agent_name_by_id(requested_by), _now(), warning_id),
+        )
+        return db.query_one("SELECT * FROM warnings WHERE warning_id = %s", (warning_id,))
+
+
+def decide_warning_dismissal(warning_id: str, approve: bool, decided_by: str) -> dict | None:
+    """დირექტორის საბოლოო გადაწყვეტილება მენეჯერის მოთხოვნაზე.
+    დამტკიცებისას (approve=True) გაფრთხილება status='dismissed'-ზე
+    გადადის და აღარ ითვლება WARNING_LIMIT-ის ჭერში; უარყოფისას
+    ისევ 'active'-ზე ბრუნდება (განგრძობით ითვლება)."""
+    with _lock:
+        row = db.query_one("SELECT * FROM warnings WHERE warning_id = %s", (warning_id,))
+        if not row or str(row.get("status") or "active") != "dismiss_pending":
+            return None
+        new_status = "dismissed" if approve else "active"
+        db.execute(
+            "UPDATE warnings SET status = %s, dismiss_decided_by = %s, dismiss_decided_at = %s "
+            "WHERE warning_id = %s",
+            (new_status, decided_by, _now(), warning_id),
+        )
+        row = db.query_one("SELECT * FROM warnings WHERE warning_id = %s", (warning_id,))
+    _audit("decide_warning_dismissal", "warning", warning_id,
+           new_value={"status": new_status, "decided_by": decided_by})
+    return row
 
 
 # ---------- სმენების/ნომრის გაცვლა ----------
@@ -1050,6 +1172,26 @@ def client_counts(agent_id: str) -> dict:
     return {"today": today_count, "total": len(agent_tasks)}
 
 
+def get_today_client_phones(agent_id: str) -> list[str]:
+    """დღეს ამ აგენტზე მინიჭებული კლიენტების ტელეფონები (უნიკალური,
+    გამეორების გარეშე) — რომ დღის დახურვისას აგენტს არ მოეთხოვოს იმ
+    ნომრის ხელახლა ხელით აკრეფა, რაც სისტემას უკვე აქვს (მენეჯერმა
+    კლიენტის გადაბარებისას უკვე შეიყვანა)."""
+    today_str = _today_str()
+    tasks = [
+        t for t in get_tasks()
+        if str(t.get("assigned_to")) == str(agent_id)
+        and str(t.get("created_at", "")).startswith(today_str)
+        and str(t.get("client_phone", "")).strip()
+    ]
+    out = []
+    for t in tasks:
+        phone = str(t.get("client_phone")).strip()
+        if phone not in out:
+            out.append(phone)
+    return out
+
+
 def get_agent_dashboard(agent_id: str, days: int = 30) -> dict | None:
     all_agents = get_agents()
     agent = next((a for a in all_agents if str(a.get("agent_id")) == str(agent_id)), None)
@@ -1098,6 +1240,7 @@ def get_agent_dashboard(agent_id: str, days: int = 30) -> dict | None:
             "myhome_count": att.get("myhome_count", ""),
             "ssge_count": att.get("ssge_count", ""),
             "quota": quota_for_mode(mode),
+            "client_phones": get_today_client_phones(agent_id),
         },
         "clients": clients,
         "schedule": {k: str(sched.get(k) or "off") for k in WEEKDAY_KEYS},
@@ -1107,7 +1250,7 @@ def get_agent_dashboard(agent_id: str, days: int = 30) -> dict | None:
             "rate": perf.get("rate"),
         },
         "warnings": {
-            "count": len(warns),
+            "count": len([w for w in warns if str(w.get("status") or "active") != "dismissed"]),
             "limit": config.WARNING_LIMIT,
             "recent": warns[-5:][::-1],
         },
@@ -1163,7 +1306,10 @@ def get_admin_dashboard(team: str | None = None, days: int = 30) -> dict:
             if _now_dt >= _deadline:
                 late = True
                 late_count += 1
-        w = len(get_warnings(agent_id=aid, days=config.WARNING_WINDOW_DAYS))
+        w = len([
+            x for x in get_warnings(agent_id=aid, days=config.WARNING_WINDOW_DAYS)
+            if str(x.get("status") or "active") != "dismissed"
+        ])
         p = perf.get(str(aid), {})
         c = client_counts(aid)
         clients_today_total += c["today"]
@@ -1307,7 +1453,10 @@ def get_daily_digest(team: str | None = None) -> dict:
     attention = []
     for a in agents:
         aid = str(a.get("agent_id"))
-        w_count = len(get_warnings(agent_id=aid, days=config.WARNING_WINDOW_DAYS))
+        w_count = len([
+            x for x in get_warnings(agent_id=aid, days=config.WARNING_WINDOW_DAYS)
+            if str(x.get("status") or "active") != "dismissed"
+        ])
         if w_count >= max(1, config.WARNING_LIMIT - 1):
             attention.append(
                 f"{a.get('name')} — {w_count}/{config.WARNING_LIMIT} გაფრთხილება "

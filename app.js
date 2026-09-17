@@ -64,9 +64,10 @@ const ADMIN_TABS = [
   { id: "meetings", label: "შეხვედრები", icon: "🤝", lazy: true },
   { id: "digest", label: "დღის ამბები", icon: "🗞️", lazy: true },
   { id: "dayoffs", label: "შვებულებები", icon: "🗓️", lazy: true },
-  { id: "warnings", label: "გაფრთხილებები", icon: "⚠️" },
+  { id: "warnings", label: "გაფრთხილებები", icon: "⚠️", lazy: true },
   { id: "swaps", label: "სმენის გაცვლა", icon: "🔁", lazy: true },
   { id: "reports", label: "რეპორტები", icon: "📝", lazy: true },
+  { id: "clients", label: "კლიენტები", icon: "👥", lazy: true },
   { id: "exclusives", label: "ექსკლუზივები", icon: "🏘️", lazy: true },
   { id: "questions", label: "კითხვები", icon: "💬", lazy: true },
   { id: "regulations", label: "ინსტრუქცია/წესები", icon: "📘", lazy: true },
@@ -180,6 +181,91 @@ function openDetail(title, fields, extraHtml) {
 }
 function closeDetail() {
   document.getElementById("modalBackdrop").hidden = true;
+}
+
+/* კლიენტის ანგარიშის ფორმა (დღის დახურვისას) — REPORT_ACTIONS იგივეა,
+   რაც ბოტის /clientreport-ში (bot.py). თუ დღეს ამ აგენტს კონკრეტული
+   კლიენტი ჰქონდა მინიჭებული, ტელეფონს აღარ ვთხოვთ ხელახლა (სისტემას
+   უკვე აქვს მენეჯერისგან) — პირდაპირ ვაჩვენებთ/ვარჩევინებთ, და
+   ყურადღებას ვამახვილებთ დეტალებზე (მოქმედება+შენიშვნა+ფოტო). */
+const REPORT_ACTIONS = [
+  "დარეკვა", "ბინის ჩვენება/ნახვა", "წინადადება გაიგზავნა",
+  "მოლაპარაკება", "გარიგება დაიხურა", "არ პასუხობს", "არ არის დაინტერესებული",
+];
+
+function _filesToBase64(fileList) {
+  const files = Array.from(fileList || []).slice(0, 5);
+  return Promise.all(files.map((f) => new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = reject;
+    reader.readAsDataURL(f);
+  })));
+}
+
+function openClientReportModal({ phones, mandatory, onSubmit }) {
+  const backdrop = document.getElementById("modalBackdrop");
+  const box = document.getElementById("modalBox");
+  const phoneList = phones || [];
+  const phoneHtml = phoneList.length === 1
+    ? `<div class="field"><div class="k">კლიენტი</div><div class="v">${esc(phoneList[0])}</div></div>`
+    : phoneList.length > 1
+      ? `<select id="crPhone">${phoneList.map((p) => `<option value="${esc(p)}">${esc(p)}</option>`).join("")}</select>`
+      : `<input id="crPhoneFree" placeholder="კლიენტის ტელეფონი (არასავალდებულო)" />`;
+  const actionsHtml = REPORT_ACTIONS.map((a, i) => `
+    <label style="display:flex;align-items:center;gap:8px;padding:6px 0;font-size:13.5px">
+      <input type="checkbox" data-cract="${i}" style="width:17px;height:17px" /> ${esc(a)}
+    </label>`).join("");
+
+  box.innerHTML = `
+    <h3>📋 კლიენტის ანგარიში
+      ${mandatory ? "" : `<button class="close" id="modalClose">✕</button>`}
+    </h3>
+    ${mandatory ? `<div class="field"><div class="k">⚠️ სავალდებულოა</div><div class="v">დღეს კლიენტი გქონდათ მინიჭებული — დღის დასახურად ანგარიშის შევსება საჭიროა.</div></div>` : ""}
+    <div class="qa-compose">
+      ${phoneHtml}
+      <div class="field" style="border:none;padding-bottom:0"><div class="k">რა შესრულდა? (მინიმუმ ერთი)</div></div>
+      ${actionsHtml}
+      <textarea id="crNotes" placeholder="შენიშვნა/დეტალები (რაც მნიშვნელოვანია KPI-სთვის)"></textarea>
+      <input type="file" id="crPhotos" accept="image/*" multiple />
+      <button class="btn" id="crSubmit" style="margin-top:4px">✅ დასრულება</button>
+    </div>
+  `;
+  backdrop.hidden = false;
+  if (!mandatory) {
+    document.getElementById("modalClose").onclick = closeDetail;
+    backdrop.onclick = (e) => { if (e.target === backdrop) closeDetail(); };
+  } else {
+    backdrop.onclick = null;
+  }
+  document.getElementById("crSubmit").onclick = async () => {
+    const submitBtn = document.getElementById("crSubmit");
+    const phone = phoneList.length === 1
+      ? phoneList[0]
+      : phoneList.length > 1
+        ? document.getElementById("crPhone").value
+        : (document.getElementById("crPhoneFree").value || "").trim();
+    const actions = REPORT_ACTIONS.filter((_, i) =>
+      document.querySelector(`[data-cract="${i}"]`).checked);
+    if (mandatory && !actions.length) { toast("აირჩიეთ მინიმუმ ერთი მოქმედება"); return; }
+    if (mandatory && !phone) { toast("კლიენტის ტელეფონი ვერ დადგინდა"); return; }
+    submitBtn.disabled = true;
+    submitBtn.textContent = "იგზავნება…";
+    try {
+      const photos = await _filesToBase64(document.getElementById("crPhotos").files);
+      await onSubmit({
+        phone,
+        actions: actions.join(", "),
+        notes: (document.getElementById("crNotes").value || "").trim(),
+        photos,
+      });
+      closeDetail();
+    } catch (e) {
+      toast(e.message || "შეცდომა");
+      submitBtn.disabled = false;
+      submitBtn.textContent = "✅ დასრულება";
+    }
+  };
 }
 
 async function api(path, opts) {
@@ -336,11 +422,14 @@ function renderTasks(d) {
   return `<div class="card">
     <h2>📋 ჩემი დავალებები <span class="cnt">${d.tasks.length}</span></h2>
     ${d.tasks.map((t, i) => `
-      <div class="list-row clickable" data-task-idx="${i}">
+      <div class="list-row clickable" style="align-items:flex-start" data-task-idx="${i}">
         <div class="avatar">${t.lead_type === "listing" ? "🏠" : "👤"}</div>
         <div class="main">
           <div class="title">${esc(t.title || "")}</div>
           <div class="sub">${esc(t.client_phone || t.description || "")}</div>
+          ${t.seen === "yes"
+            ? `<div class="sub">✅ მიღებულია</div>`
+            : `<button class="btn secondary" data-ack-btn="${esc(t.task_id)}" style="margin-top:6px;padding:7px 10px">✅ მივიღე კლიენტი</button>`}
         </div>
         <div class="side"><span class="badge ${priColor[t.priority] || "gray"}">${esc(t.priority || "-")}</span></div>
       </div>`).join("")}
@@ -353,6 +442,18 @@ function bindTasksActions(d) {
       const t = d.tasks[parseInt(el.dataset.taskIdx, 10)];
       if (!t) return;
       openDetail(t.title || "დავალება", TASK_FIELD_LABELS.map(([k, label]) => ({ label, value: t[k] })));
+    };
+  });
+  document.querySelectorAll("[data-ack-btn]").forEach((btn) => {
+    btn.onclick = async (e) => {
+      e.stopPropagation();
+      btn.disabled = true;
+      try {
+        await api("/api/tasks/ack", { method: "POST", body: JSON.stringify({ task_id: btn.dataset.ackBtn }) });
+        tg && tg.HapticFeedback && tg.HapticFeedback.notificationOccurred("success");
+        toast("დადასტურდა ✅");
+        await load();
+      } catch (e2) { toast(e2.message); btn.disabled = false; }
     };
   });
 }
@@ -423,27 +524,45 @@ function bindAgentActions(d) {
       body = { count };
     }
 
-    // სავალდებულო კითხვა — რომ არცერთ აგენტს არ დაავიწყდეს კლიენტის
-    // რეპორტის შევსება დღის დახურვისას.
-    const hadClient = confirm("დღეს რომელიმე კლიენტთან იმუშავეთ?");
-    if (hadClient) {
-      const phone = prompt("კლიენტის ტელეფონის ნომერი?");
-      if (phone === null) return;
-      if (phone.trim()) {
-        const actions = prompt("რა შესრულდა ამ კლიენტთან? (მაგ: დარეკვა, ბინის ჩვენება, გარიგება)") || "";
-        const notes = prompt("შენიშვნა (არასავალდებულო)") || "";
-        body.client_report = { phone: phone.trim(), actions, notes };
+    const doClockout = async (finalBody) => {
+      btnOut.disabled = true;
+      try {
+        const res = await api("/api/clockout", { method: "POST", body: JSON.stringify(finalBody) });
+        if (res.result === "not_in") { toast("ჯერ არ დაგიწყიათ დღე"); btnOut.disabled = false; return; }
+        tg && tg.HapticFeedback && tg.HapticFeedback.notificationOccurred("success");
+        toast("დღე დასრულდა ✅");
+        await load();
+      } catch (e) {
+        toast(e.message);
+        btnOut.disabled = false;
+        throw e;
       }
+    };
+
+    // მკაცრი წესი: თუ დღეს კონკრეტული კლიენტი ჰქონდა მინიჭებული,
+    // ანგარიშის შევსება სავალდებულოა და "გამოტოვება" აღარ შეიძლება
+    // (ტელეფონსაც აღარ ვთხოვთ ხელახლა — სისტემას უკვე აქვს).
+    const clientPhones = d.today.client_phones || [];
+    if (clientPhones.length > 0) {
+      openClientReportModal({
+        phones: clientPhones,
+        mandatory: true,
+        onSubmit: async (cr) => doClockout(Object.assign({}, body, { client_report: cr })),
+      });
+      return;
     }
 
-    btnOut.disabled = true;
-    try {
-      const res = await api("/api/clockout", { method: "POST", body: JSON.stringify(body) });
-      if (res.result === "not_in") { toast("ჯერ არ დაგიწყიათ დღე"); btnOut.disabled = false; return; }
-      tg && tg.HapticFeedback && tg.HapticFeedback.notificationOccurred("success");
-      toast("დღე დასრულდა ✅");
-      await load();
-    } catch (e) { toast(e.message); btnOut.disabled = false; }
+    const wantsReport = confirm("დღეს რომელიმე კლიენტთან იმუშავეთ? (არასავალდებულო ჩანაწერისთვის)");
+    if (wantsReport) {
+      openClientReportModal({
+        phones: [],
+        mandatory: false,
+        onSubmit: async (cr) => doClockout(cr.phone ? Object.assign({}, body, { client_report: cr }) : body),
+      });
+      return;
+    }
+
+    await doClockout(body);
   };
 }
 
@@ -640,21 +759,196 @@ function bindDayoffsActions() {
   });
 }
 
-function renderWarnings(d) {
-  const rows = d.recent_warnings || [];
+const WARNING_STATUS_LABEL = {
+  active: "", dismiss_pending: "⏳ მოთხოვნილია გაუქმება", dismissed: "✅ გაუქმებულია",
+};
+const WARNING_FIELD_LABELS = [
+  ["agent_name", "აგენტი"], ["type", "ტიპი"], ["detail", "დეტალი"], ["created_at", "თარიღი"],
+  ["dismiss_reason", "გაუქმების მოთხოვნის მიზეზი"], ["dismiss_requested_by_name", "მოითხოვა"],
+  ["dismiss_requested_at", "მოთხოვნის თარიღი"], ["dismiss_decided_by", "გადაწყვიტა"],
+  ["dismiss_decided_at", "გადაწყვეტილების თარიღი"],
+];
+
+function renderWarnings(rows) {
+  rows = rows || [];
+  if (!rows.length) return `<div class="card"><div class="empty">გაფრთხილება არ არის ✅</div></div>`;
   return `<div class="card">
-    <h2>⚠️ ბოლო გაფრთხილებები</h2>
-    ${rows.length === 0 ? `<div class="empty">ცარიელია</div>` :
-      rows.map((w) => `
-        <div class="list-row">
+    <h2>⚠️ გაფრთხილებები <span class="cnt">${rows.length}</span></h2>
+    ${rows.map((w, i) => {
+      const statusLabel = WARNING_STATUS_LABEL[w.status] || "";
+      return `
+        <div class="list-row clickable" data-warn-idx="${i}">
           <div class="avatar" style="background:linear-gradient(135deg,#f59e0b,#ef4444)">⚠️</div>
           <div class="main">
             <div class="title">${esc(w.agent_name)} — ${esc(WARNING_LABELS[w.type] || w.type)}</div>
-            <div class="sub">${esc(w.detail || "")}</div>
+            <div class="sub">${esc(w.detail || "")}${statusLabel ? " · " + statusLabel : ""}</div>
           </div>
           <div class="side sub">${esc((w.created_at || "").split(" ")[0] || "")}</div>
-        </div>`).join("")}
+        </div>`;
+    }).join("")}
   </div>`;
+}
+
+function bindWarningsActions(rows) {
+  const isTeamLead = state.role === "admin" && state.data && state.data.is_team_lead;
+  const isAdmin = state.role === "admin" && !isTeamLead;
+  document.querySelectorAll("[data-warn-idx]").forEach((el) => {
+    el.onclick = () => {
+      const w = rows[parseInt(el.dataset.warnIdx, 10)];
+      if (!w) return;
+      const fields = WARNING_FIELD_LABELS.map(([k, label]) => ({
+        label, value: k === "type" ? (WARNING_LABELS[w.type] || w.type) : w[k],
+      }));
+      let extraHtml = "";
+      if (w.status === "active" || !w.status) {
+        extraHtml = `<button class="btn" id="wReqDismiss" style="margin-top:10px;width:100%">📝 მოთხოვნა გაუქმებაზე</button>`;
+      } else if (w.status === "dismiss_pending" && isAdmin) {
+        extraHtml = `<div class="actions">
+          <button class="btn" id="wApprove">✅ დამტკიცება</button>
+          <button class="btn danger" id="wReject">❌ უარყოფა</button>
+        </div>`;
+      }
+      openDetail(`${w.agent_name} — გაფრთხილება`, fields, extraHtml);
+
+      const reqBtn = document.getElementById("wReqDismiss");
+      if (reqBtn && (isTeamLead || isAdmin)) {
+        reqBtn.onclick = async () => {
+          const reason = prompt("რატომ ითხოვთ ამ გაფრთხილების გაუქმებას? (მაგ: ამ დროს შეხვედრაზე იყო)");
+          if (!reason || !reason.trim()) return;
+          reqBtn.disabled = true;
+          try {
+            await api("/api/warnings/request-dismiss", {
+              method: "POST",
+              body: JSON.stringify({ warning_id: w.warning_id, reason: reason.trim() }),
+            });
+            toast("მოთხოვნა გაიგზავნა ✅");
+            closeDetail();
+            delete lazyCache.warnings;
+            await renderContent();
+          } catch (e) { toast(e.message); reqBtn.disabled = false; }
+        };
+      }
+      const approveBtn = document.getElementById("wApprove");
+      const rejectBtn = document.getElementById("wReject");
+      const decide = async (approve) => {
+        try {
+          await api("/api/warnings/decide-dismiss", {
+            method: "POST",
+            body: JSON.stringify({ warning_id: w.warning_id, approve }),
+          });
+          toast("გადაწყვეტილება შენახულია ✅");
+          closeDetail();
+          delete lazyCache.warnings;
+          await renderContent();
+        } catch (e) { toast(e.message); }
+      };
+      if (approveBtn) approveBtn.onclick = () => decide(true);
+      if (rejectBtn) rejectBtn.onclick = () => decide(false);
+    };
+  });
+}
+
+/* ---------------------------------------------------------- კლიენტები */
+
+function _clientRowsHtml(rows) {
+  if (!rows.length) return `<div class="empty">კლიენტი არ არის</div>`;
+  return rows.map((c, i) => `
+    <div class="list-row clickable" data-client-idx="${i}">
+      <div class="avatar">👤</div>
+      <div class="main">
+        <div class="title">${esc(c.client_phone)}</div>
+        <div class="sub">${esc(c.current_agent_name || "—")} · ${esc(c.status || "-")}${c.deal_type ? " · " + esc(c.deal_type) : ""}</div>
+      </div>
+      <div class="side sub">${esc((c.last_activity || "").split(" ")[0] || "")}</div>
+    </div>`).join("");
+}
+
+function renderClients(rows) {
+  rows = rows || [];
+  return `<div class="card">
+    <h2>👥 კლიენტები <span class="cnt">${rows.length}</span></h2>
+    <div class="qa-compose">
+      <input id="clientSearch" placeholder="ძებნა — ტელეფონი ან აგენტის სახელი" />
+    </div>
+    <div id="clientsList">${_clientRowsHtml(rows)}</div>
+  </div>`;
+}
+
+function _clientTimelineItemHtml(entry) {
+  const d = entry.data;
+  if (entry.kind === "task") {
+    return `<div class="list-row">
+      <div class="avatar">${d.lead_type === "listing" ? "🏠" : "👤"}</div>
+      <div class="main">
+        <div class="title">📋 ${esc(d.title || "დავალება")}</div>
+        <div class="sub">შემსრულებელი: ${esc(d.assigned_to_name || "-")} · სტატუსი: ${esc(d.status || "-")}</div>
+        <div class="sub">${esc(d.created_at || "")}${d.updated_at && d.updated_at !== d.created_at ? " → " + esc(d.updated_at) : ""}</div>
+      </div>
+    </div>`;
+  }
+  if (entry.kind === "report") {
+    const photos = String(d.file_id || "").split(",").map((s) => s.trim()).filter((s) => s.startsWith("uploads/"));
+    return `<div class="list-row">
+      <div class="avatar">📝</div>
+      <div class="main">
+        <div class="title">რეპორტი — ${esc(d.agent_name || "-")}</div>
+        <div class="sub">${esc(d.actions || "-")}</div>
+        ${d.notes ? `<div class="sub">${esc(d.notes)}</div>` : ""}
+        <div class="sub">${esc(d.created_at || "")}</div>
+        ${photos.length ? `<div style="display:flex;gap:6px;margin-top:6px;flex-wrap:wrap">${photos.map((p) => `<img src="/${esc(p)}" style="width:56px;height:56px;object-fit:cover;border-radius:8px" />`).join("")}</div>` : ""}
+      </div>
+    </div>`;
+  }
+  return `<div class="list-row">
+    <div class="avatar">📍</div>
+    <div class="main">
+      <div class="title">შეხვედრა — ${esc(d.agent_name || "-")}</div>
+      <div class="sub">${esc(d.address || d.district || "-")}${d.price ? " · " + esc(d.price) : ""}</div>
+      <div class="sub">${esc(d.meeting_date || "")} ${esc(d.time || "")}</div>
+    </div>
+  </div>`;
+}
+
+function bindClientsActions(rows) {
+  rows = rows || [];
+  const searchInput = document.getElementById("clientSearch");
+  if (searchInput) {
+    searchInput.oninput = () => {
+      const q = searchInput.value.trim().toLowerCase();
+      const filtered = !q ? rows : rows.filter((c) =>
+        String(c.client_phone || "").toLowerCase().includes(q)
+        || String(c.current_agent_name || "").toLowerCase().includes(q));
+      document.getElementById("clientsList").innerHTML = _clientRowsHtml(filtered);
+      bindClientRowClicks(filtered);
+    };
+  }
+  bindClientRowClicks(rows);
+}
+
+function bindClientRowClicks(rows) {
+  document.querySelectorAll("[data-client-idx]").forEach((el) => {
+    el.onclick = async () => {
+      const c = rows[parseInt(el.dataset.clientIdx, 10)];
+      if (!c) return;
+      const backdrop = document.getElementById("modalBackdrop");
+      const box = document.getElementById("modalBox");
+      box.innerHTML = `<h3>${esc(c.client_phone)}<button class="close" id="modalClose">✕</button></h3><div class="empty">იტვირთება…</div>`;
+      backdrop.hidden = false;
+      document.getElementById("modalClose").onclick = closeDetail;
+      backdrop.onclick = (e) => { if (e.target === backdrop) closeDetail(); };
+      try {
+        const res = await api(`/api/clients/${encodeURIComponent(c.client_phone)}`);
+        const timeline = res.timeline || [];
+        box.innerHTML = `
+          <h3>${esc(c.client_phone)}<button class="close" id="modalClose">✕</button></h3>
+          ${timeline.length === 0 ? `<div class="empty">ისტორია არ არის</div>` : timeline.map(_clientTimelineItemHtml).join("")}
+        `;
+        document.getElementById("modalClose").onclick = closeDetail;
+      } catch (e) {
+        box.innerHTML += `<div class="empty">⚠️ ${esc(e.message)}</div>`;
+      }
+    };
+  });
 }
 
 const EXCLUSIVE_FIELD_LABELS = [
@@ -810,6 +1104,42 @@ function renderReports(payload) {
    თიმლიდერი (საკუთარი გუნდი) / კონკრეტული თიმლიდერის გუნდის წევრი.
    მენეჯერს ავტომატურად მიდის შეტყობინება ახალი წევრის შესახებ, და
    აგენტსაც — თავისი მენეჯერის შესახებ. */
+function _agentsMgmtRowsHtml(rows, managers) {
+  if (!rows.length) return `<div class="empty">ვერაფერი მოიძებნა</div>`;
+  return rows.map((r) => {
+    const sel = r.role === "team_lead" ? "lead" : (r.manager ? "member:" + r.manager.agent_id : "independent");
+    const roleBadge = r.role === "team_lead"
+      ? `<span class="badge amber">👑 თიმლიდერი</span>`
+      : (r.manager ? `<span class="badge gray">აგენტი</span>` : `<span class="badge gray">დამოუკიდებელი</span>`);
+    const options = [
+      `<option value="independent" ${sel === "independent" ? "selected" : ""}>დამოუკიდებელი აგენტი</option>`,
+      `<option value="lead" ${sel === "lead" ? "selected" : ""}>თიმლიდერი (საკუთარი გუნდი)</option>`,
+      ...managers
+        .filter((m) => String(m.agent_id) !== String(r.agent_id))
+        .map((m) => `<option value="member:${esc(m.agent_id)}" ${sel === "member:" + m.agent_id ? "selected" : ""}>${esc(m.name)}-ის გუნდის წევრი</option>`),
+    ].join("");
+    return `
+    <div class="list-row" style="align-items:flex-start">
+      <div class="avatar">${initials(r.name)}</div>
+      <div class="main">
+        <div class="title">${esc(r.name)} ${r.active === "no" ? "🚫" : ""} ${roleBadge}</div>
+        <div class="sub">${esc(r.phone || "")} · ${r.registered ? "✅ დარეგისტრირებული" : "⏳ ელოდება რეგისტრაციას"}</div>
+        ${r.manager ? `<div class="sub">მენეჯერი: ${esc(r.manager.name)}</div>` : ""}
+        <div class="qa-compose" style="margin-top:8px">
+          <select data-assign-select="${esc(r.agent_id)}">${options}</select>
+          <button class="btn" data-assign-btn="${esc(r.agent_id)}" style="padding:9px 12px">შენახვა</button>
+        </div>
+        <div class="actions" style="margin-top:8px">
+          ${r.active === "no"
+            ? `<button class="btn secondary" data-active-btn="${esc(r.agent_id)}" data-active-val="yes" style="padding:9px 12px">✅ გააქტიურება</button>`
+            : `<button class="btn danger" data-active-btn="${esc(r.agent_id)}" data-active-val="no" style="padding:9px 12px">🚫 გათავისუფლება</button>`}
+          <button class="btn danger" data-delete-btn="${esc(r.agent_id)}" data-delete-name="${esc(r.name)}" style="padding:9px 12px">🗑️ სამუდამო წაშლა</button>
+        </div>
+      </div>
+    </div>`;
+  }).join("");
+}
+
 function renderAgentsMgmt(payload) {
   const rows = (payload && payload.rows) || [];
   const managers = (payload && payload.managers) || [];
@@ -826,41 +1156,41 @@ function renderAgentsMgmt(payload) {
   </div>` : "";
   return warningHtml + `<div class="card">
     <h2>🗂️ აგენტების მართვა <span class="cnt">${rows.length}</span></h2>
-    ${rows.map((r) => {
-      const sel = r.role === "team_lead" ? "lead" : (r.manager ? "member:" + r.manager.agent_id : "independent");
-      const roleBadge = r.role === "team_lead"
-        ? `<span class="badge amber">👑 თიმლიდერი</span>`
-        : (r.manager ? `<span class="badge gray">აგენტი</span>` : `<span class="badge gray">დამოუკიდებელი</span>`);
-      const options = [
-        `<option value="independent" ${sel === "independent" ? "selected" : ""}>დამოუკიდებელი აგენტი</option>`,
-        `<option value="lead" ${sel === "lead" ? "selected" : ""}>თიმლიდერი (საკუთარი გუნდი)</option>`,
-        ...managers
-          .filter((m) => String(m.agent_id) !== String(r.agent_id))
-          .map((m) => `<option value="member:${esc(m.agent_id)}" ${sel === "member:" + m.agent_id ? "selected" : ""}>${esc(m.name)}-ის გუნდის წევრი</option>`),
-      ].join("");
-      return `
-      <div class="list-row" style="align-items:flex-start">
-        <div class="avatar">${initials(r.name)}</div>
-        <div class="main">
-          <div class="title">${esc(r.name)} ${r.active === "no" ? "🚫" : ""} ${roleBadge}</div>
-          <div class="sub">${esc(r.phone || "")} · ${r.registered ? "✅ დარეგისტრირებული" : "⏳ ელოდება რეგისტრაციას"}</div>
-          ${r.manager ? `<div class="sub">მენეჯერი: ${esc(r.manager.name)}</div>` : ""}
-          <div class="qa-compose" style="margin-top:8px">
-            <select data-assign-select="${esc(r.agent_id)}">${options}</select>
-            <button class="btn" data-assign-btn="${esc(r.agent_id)}" style="padding:9px 12px">შენახვა</button>
-          </div>
-          <div class="actions" style="margin-top:8px">
-            ${r.active === "no"
-              ? `<button class="btn secondary" data-active-btn="${esc(r.agent_id)}" data-active-val="yes" style="padding:9px 12px">✅ გააქტიურება</button>`
-              : `<button class="btn danger" data-active-btn="${esc(r.agent_id)}" data-active-val="no" style="padding:9px 12px">🚫 გათავისუფლება</button>`}
-          </div>
-        </div>
-      </div>`;
-    }).join("")}
+    <input id="agentsMgmtSearch" placeholder="🔍 ძებნა სახელით/გვარით…" style="width:100%;margin-bottom:10px" />
+    <div id="agentsMgmtList">${_agentsMgmtRowsHtml(rows, managers)}</div>
   </div>`;
 }
 
 function bindAgentsMgmtActions() {
+  const payload = lazyCache.agentsmgmt || {};
+  const allRows = payload.rows || [];
+  const managers = payload.managers || [];
+  const searchInput = document.getElementById("agentsMgmtSearch");
+  if (searchInput) {
+    searchInput.oninput = () => {
+      const q = searchInput.value.trim().toLowerCase();
+      const filtered = !q ? allRows : allRows.filter((r) => String(r.name || "").toLowerCase().includes(q));
+      document.getElementById("agentsMgmtList").innerHTML = _agentsMgmtRowsHtml(filtered, managers);
+      bindAgentsMgmtRowActions();
+    };
+  }
+  bindAgentsMgmtRowActions();
+}
+
+function bindAgentsMgmtRowActions() {
+  document.querySelectorAll("[data-delete-btn]").forEach((btn) => {
+    btn.onclick = async () => {
+      const name = btn.dataset.deleteName || "";
+      if (!confirm(`ნამდვილად გსურთ „${name}"-ის სამუდამო წაშლა? ეს ვეღარ დაბრუნდება — ისტორია (დავალებები/რეპორტები) უცვლელი დარჩება, მაგრამ თავად აგენტი აღარსად გამოჩნდება.`)) return;
+      btn.disabled = true;
+      try {
+        await api("/api/agents/delete", { method: "POST", body: JSON.stringify({ agent_id: btn.dataset.deleteBtn }) });
+        toast("წაიშალა");
+        delete lazyCache.agentsmgmt;
+        await renderContent();
+      } catch (e) { toast(e.message); btn.disabled = false; }
+    };
+  });
   document.querySelectorAll("[data-assign-btn]").forEach((btn) => {
     btn.onclick = async () => {
       const agentId = btn.dataset.assignBtn;
@@ -937,6 +1267,10 @@ function renderNewTaskForm(agents) {
         <option value="საშუალო">პრიორიტეტი: საშუალო (ყველაზე სუსტს ერგება)</option>
         <option value="დაბალი">პრიორიტეტი: დაბალი (შემთხვევით ერგება)</option>
       </select>
+      <label class="check-row" style="display:flex;align-items:center;gap:8px;margin-top:4px">
+        <input type="checkbox" id="ntAssignSelf" />
+        <span class="sub" style="margin:0">საკუთარ თავზე დავარეგისტრირო (ავტომატური აგენტის არჩევის გარეშე)</span>
+      </label>
     </div>
     <div class="qa-compose" data-kind-fields="listing" ${newTaskKind === "listing" ? "" : "hidden"}>
       <select id="ntAgent">${agentOptions || `<option value="">აგენტი არ არის</option>`}</select>
@@ -1014,11 +1348,13 @@ function bindAdminTasksActions() {
       if (newTaskKind === "general") {
         const phone = (document.getElementById("ntPhone").value || "").trim();
         if (!phone) { toast("შეიყვანეთ ტელეფონის ნომერი"); return; }
+        const assignSelf = document.getElementById("ntAssignSelf");
         body = {
           kind: "general",
           phone,
           deal_type: document.getElementById("ntDeal").value,
           priority: document.getElementById("ntPriority").value,
+          assign_to_self: !!(assignSelf && assignSelf.checked),
         };
       } else {
         const agentId = document.getElementById("ntAgent").value;
@@ -1049,9 +1385,15 @@ function bindAdminTasksActions() {
 /* ------------------------------------------------------ შეხვედრები */
 function renderMeetings(payload) {
   const rows = (payload && payload.rows) || [];
+  const isTeamLead = state.role === "admin" && state.data && state.data.is_team_lead;
+  const scopeSwitch = isTeamLead ? `<div class="period-switch" id="meetingsScopeSwitch">
+      <button data-scope="team" class="${state.meetingsScope !== "own" ? "active" : ""}">👥 გუნდის</button>
+      <button data-scope="own" class="${state.meetingsScope === "own" ? "active" : ""}">👤 ჩემი პირადი</button>
+    </div>` : "";
   return `<div class="card">
+    ${scopeSwitch}
     ${renderPeriodSwitch()}
-    <h2>🤝 შეხვედრები — ${esc(PERIOD_TITLES[state.period] || "")} <span class="cnt">${rows.length}</span></h2>
+    <h2>🤝 შეხვედრები — ${isTeamLead ? (state.meetingsScope === "own" ? "ჩემი პირადი — " : "გუნდის — ") : ""}${esc(PERIOD_TITLES[state.period] || "")} <span class="cnt">${rows.length}</span></h2>
     ${!rows.length ? `<div class="empty">ამ პერიოდში შეხვედრა არ ყოფილა</div>` :
       rows.map((m, i) => `
       <div class="list-row clickable" style="align-items:flex-start" data-meeting-idx="${i}">
@@ -1068,6 +1410,17 @@ function renderMeetings(payload) {
 
 function bindMeetingsActions(payload) {
   const rows = (payload && payload.rows) || [];
+  const scopeSwitch = document.getElementById("meetingsScopeSwitch");
+  if (scopeSwitch) {
+    scopeSwitch.querySelectorAll("button").forEach((b) => {
+      b.onclick = () => {
+        if (state.meetingsScope === b.dataset.scope) return;
+        state.meetingsScope = b.dataset.scope;
+        delete lazyCache.meetings;
+        renderContent();
+      };
+    });
+  }
   document.querySelectorAll("[data-meeting-idx]").forEach((el) => {
     el.onclick = () => {
       const m = rows[parseInt(el.dataset.meetingIdx, 10)];
@@ -1536,77 +1889,91 @@ function bindAgentRequestsActions() {
    ცხრილი. */
 const REGULATION_GROUPS = [
   { icon: "🗣️", title: "კომუნიკაცია და პროფესიონალიზმი", items: [
-    "კლიენტთან კომუნიკაცია ყოველთვის თავაზიანი, სწრაფი და პროფესიულია.",
-    "კოლეგებთან ურთიერთობაშიც კორექტულობა და ურთიერთდახმარებაა მოსალოდნელი.",
+    { title: "კლიენტთან კომუნიკაცია",
+      detail: "კომუნიკაცია კლიენტთან ყოველთვის თავაზიანი, სწრაფი და პროფესიულია. ზარზე/მიმოწერაზე პასუხი გონივრულ ვადაში (იდეალურად — რამდენიმე საათში) აუცილებელია, თუნდაც უარყოფითი პასუხის მისატანად. კომპანიის სახელით საუბრისას აგენტი წარმოადგენს მთელ ბრენდს." },
+    { title: "კოლეგებთან ურთიერთობა",
+      detail: "კოლეგებთან ურთიერთობაშიც კორექტულობა და ურთიერთდახმარებაა მოსალოდნელი — ერთი კლიენტის ორმა აგენტმა რომ არ „მოინადირონ“ ერთმანეთის ხელიდან, ამისთვისვე არსებობს ექსკლუზივის გაზიარების ფუნქცია (იხ. „კონფიდენციალურობა“)." },
   ] },
   { icon: "📊", title: "დღიური გეგმა და ანგარიშგება", items: [
-    "დღიური განცხადებების გეგმა (ოფისზე — საიტი/myhome/ss.ge ცალ-ცალკე, ონლაინზე — საერთო რაოდენობა) სავალდებულოა და ივსება იმავე დღეს, /clockout-ის დროს.",
-    "კლიენტთან შეხვედრის/მუშაობის შემდეგ რეპორტი ივსება იმავე დღეს (/clientreport ან /clockout-ის დროს ერთდროულად).",
-    "შეხვედრაზე ყოფნისას /meeting-ით ფიქსირდება — მისამართი, მეპატრონის საკონტაქტო და პირობები.",
+    { title: "დღიური განცხადებების გეგმა",
+      detail: "ოფისის ცვლაზე გეგმა იზომება საიტზე/myhome-ზე/ss.ge-ზე ატვირთული განცხადებებით ცალ-ცალკე (საიტისა და myhome-ის ჯამი არ იკრიბება — ერთი და იგივე განცხადება ორივეგან იტვირთება ერთდროულად), ონლაინ დღეზე კი — საერთო რაოდენობით. გეგმის შეუსრულებლობა ავტომატურად აღირიცხება „quota_missed“ გაფრთხილებად /clockout-ის დროს." },
+    { title: "კლიენტის ანგარიში სავალდებულოა",
+      detail: "თუ დღეს კონკრეტული კლიენტი გქონდათ მინიჭებული (მენეჯერისგან), დღის დახურვისას (/clockout ან Mini App) ანგარიშის შევსება — რა შესრულდა, რა დეტალები — სავალდებულოა და აღარ შეიძლება გამოტოვება. ეს პირდაპირ მოქმედებს KPI-ის სისწორეზე." },
+    { title: "შეხვედრის ფიქსაცია",
+      detail: "შეხვედრაზე ყოფნისას /meeting-ით (ან Mini App-იდან) ფიქსირდება მისამართი, მეპატრონის საკონტაქტო და გარიგების პირობები — ეს მონაცემი მერე მენეჯერსაც და დირექტორსაც უჩანს „შეხვედრების“ ისტორიაში." },
   ] },
   { icon: "🕐", title: "დასწრება და სამუშაო დღე", items: [
-    "სამუშაო დღის დაწყება/დასრულება ბოტში (/clockin, /clockout) ან Mini App-ის „დღეს“ ტაბიდან აღინიშნება — არარეგისტრირებული დღე არ ითვლება ნამუშევრად.",
-    "ცვლის შეცვლა (მაგ. დღეს სახლიდან/ოფისიდან მუშაობა) წინასწარ, /swapshift-ით ან მენეჯერთან შეთანხმებით ხდება.",
+    { title: "დღის დაწყება/დასრულება",
+      detail: "სამუშაო დღის დაწყება/დასრულება ბოტში (/clockin, /clockout) ან Mini App-ის „დღეს“ ტაბიდან აღინიშნება — არარეგისტრირებული დღე არ ითვლება ნამუშევრად, თუნდაც ფაქტობრივად ნამუშევარი იყოს. ოფისის ცვლაზე დაგვიანება (grace-პერიოდის მეტ ხანს) ავტომატურ გაფრთხილებას იწვევს." },
+    { title: "ცვლის გაცვლა",
+      detail: "ცვლის ტიპის შეცვლა (მაგ. დღეს სახლიდან მუშაობა ჩვეულებრივი ოფისის ცვლის ნაცვლად) წინასწარ, /swapshift-ით ხდება და საბოლოოდ მენეჯერის დამტკიცებას საჭიროებს — თვეში შეზღუდული რაოდენობით." },
   ] },
   { icon: "🏖️", title: "დასვენების დღეები", items: [
-    "დასვენების დღე წინასწარ, /dayoff ბრძანებით ან Mini App-იდან, მოთხოვნილია — დამტკიცებამდე დასვენება არ ითვლება ოფიციალურად.",
-    "დამტკიცება/უარყოფა შეუძლია ადმინს ან საკუთარი გუნდის ფარგლებში — მენეჯერს.",
+    { title: "დასვენების მოთხოვნა",
+      detail: "დასვენების დღე წინასწარ, /dayoff ბრძანებით ან Mini App-იდან მოთხოვნილია — დამტკიცებამდე დასვენება არ ითვლება ოფიციალურად და ჩვეულებრივ სამუშაო დღედ ითვლება, სანამ არ დამტკიცდება." },
+    { title: "დამტკიცების უფლება და თვიური ჭერი",
+      detail: "დამტკიცება/უარყოფა შეუძლია ადმინს (ყველაზე), ან საკუთარი გუნდის ფარგლებში — მენეჯერს. თვეში დასაშვები დამტკიცებული დღეოფების რაოდენობას ჭერი აქვს (იხ. ზემოთ „მოქმედი ლიმიტები“) — ჭერს გადაცილებული მოთხოვნა ავტომატურად ითიშება, თუნდაც მენეჯერს სურდეს დამტკიცება." },
   ] },
   { icon: "🔒", title: "კონფიდენციალურობა", items: [
-    "ექსკლუზივის (მეპატრონის საკონტაქტო, პირობები) ინფორმაცია კონფიდენციალურია.",
-    "კოლეგისთვის ექსკლუზივზე ინფორმაცია მხოლოდ Mini App-ის „გაზიარების“ ფუნქციით ნაწილდება, პირდაპირ არა.",
+    { title: "ექსკლუზივის ინფორმაცია",
+      detail: "ექსკლუზივის (მეპატრონის საკონტაქტო, ფასი/პირობები, საკადასტრო კოდი) ინფორმაცია მკაცრად კონფიდენციალურია — მხოლოდ პასუხისმგებელი აგენტისა და მენეჯმენტისთვის." },
+    { title: "გაზიარების წესი",
+      detail: "კოლეგისთვის ექსკლუზივზე ინფორმაცია მხოლოდ Mini App-ის „გაზიარების“ ფუნქციით ნაწილდება (თანამშრომლობის აღრიცხვითურთ), არასდროს პირდაპირ სკრინშოთით/ზეპირად — ასე ჩანს ვინ ვისთან ითანამშრომლა, საკომისიოს სამართლიანი დანაწილებისთვისაც." },
   ] },
   { icon: "⚠️", title: "დისციპლინა", items: [
-    "განმეორებითი გაფრთხილება (დაგვიანება, გამოტოვებული რეპორტი, შეუსრულებელი დღიური გეგმა) აღირიცხება და ლიმიტის მიღწევისას დისციპლინურ ზომებს/ავტომატურ გათიშვას იწვევს.",
+    { title: "გაფრთხილება და ავტომატური გათიშვა",
+      detail: "განმეორებითი გაფრთხილება (დაგვიანება, გამოტოვებული რეპორტი, არ-გამოცხადება, შეუსრულებელი დღიური გეგმა) აღირიცხება. დაწესებულ ლიმიტს მიღწევისას (იხ. „მოქმედი ლიმიტები“) აგენტის ანგარიში ავტომატურად ითიშება — ხელახლა გააქტიურება მხოლოდ ადმინს შეუძლია." },
+    { title: "გაფრთხილების გაუქმების მოთხოვნა",
+      detail: "თუ გაფრთხილება უსამართლოდ ჩანს (მაგ. ამ დროს აგენტი შეხვედრაზე იყო) — მენეჯერს შეუძლია „გაფრთხილებები“ ტაბიდან კონკრეტულ გაფრთხილებაზე დაწეროს გაუქმების მოთხოვნა მიზეზის მითითებით. საბოლოო გადაწყვეტილებას მხოლოდ დირექტორი იღებს, და აგენტიც, და მომთხოვნი მენეჯერიც იღებენ შეტყობინებას შედეგზე." },
   ] },
 ];
 
 const AGENT_BOT_COMMAND_GROUPS = [
   { icon: "ℹ️", title: "ზოგადი", items: [
-    ["/start", "რეგისტრაცია ბოტში"],
-    ["/app", "Mini App-ის (ვიზუალური დაშბორდის) გახსნა"],
-    ["/cancel", "მიმდინარე ნაბიჯოვანი ბრძანების გაუქმება"],
+    ["/start", "რეგისტრაცია ბოტში", "პირველი გაშვებისას საჭირო ბრძანება — აგენტს ბოტში რეგისტრირებს და აძლევს წვდომას ყველა დანარჩენ ფუნქციაზე. თუ უკვე რეგისტრირებული ხართ, ხელახლა გაშვება უვნებელია."],
+    ["/app", "Mini App-ის (ვიზუალური დაშბორდის) გახსნა", "ხსნის ვიზუალურ დაშბორდს, სადაც ერთ სივრცეშია დღევანდელი მდგომარეობა, დავალებები, KPI, გრაფიკი და ა.შ. — უმეტესი ყოველდღიური მოქმედება აქედან კეთდება ბრძანებების ნაცვლად."],
+    ["/cancel", "მიმდინარე ნაბიჯოვანი ბრძანების გაუქმება", "თუ რომელიმე მრავალნაბიჯოვანი ბრძანება (მაგ. /newtask, /addexclusive) შუაში გაგიჭირდათ ან შეცდომით დაიწყეთ — /cancel წყვეტს მას და ბოტს საწყის მდგომარეობაში აბრუნებს."],
   ] },
   { icon: "🕐", title: "ყოველდღიური სამუშაო", items: [
-    ["/clockin", "სამუშაო დღის დაწყება"],
-    ["/clockout", "სამუშაო დღის დასრულება — განცხადებების რაოდენობა + კლიენტის რეპორტი"],
-    ["/mytasks", "ჩემი მიმდინარე დავალებების ნახვა"],
-    ["/done (task_id)", "დავალების დასრულებულად მონიშვნა"],
+    ["/clockin", "სამუშაო დღის დაწყება", "აღნიშნავს დღის დაწყების ზუსტ დროს. ოფისის ცვლაზე დაგვიანებით დაწყება (grace-პერიოდის მეტ ხანს) ავტომატურ გაფრთხილებას წარმოშობს — ამიტომ სჯობს დროულად."],
+    ["/clockout", "სამუშაო დღის დასრულება — განცხადებების რაოდენობა + კლიენტის რეპორტი", "დღის ბოლოს გამოსაყენებელია: ითხოვს დღიური გეგმის რიცხვებს (განცხადებები საიტზე/myhome/ss.ge ან ონლაინის შემთხვევაში საერთო რაოდენობა), ხოლო თუ დღეს კონკრეტული კლიენტი გქონდათ მინიჭებული — სავალდებულოდ ითხოვს იმ კლიენტის ანგარიშსაც (რა შესრულდა, დეტალები, სურათებიც კი). ეს უკანასკნელი აღარ იტოვება გამოტოვებას."],
+    ["/mytasks", "ჩემი მიმდინარე დავალებების ნახვა", "აჩვენებს ყველა დავალებას, რომელიც ამჟამად თქვენზეა მინიჭებული და ჯერ არაა დასრულებული."],
+    ["/done (task_id)", "დავალების დასრულებულად მონიშვნა", "კონკრეტული task_id-ის მითითებით დავალებას სრულდება-ს სტატუსში გადაჰყავს — task_id ჩანს /mytasks-ის სიაში."],
   ] },
   { icon: "📝", title: "რეპორტები და შეხვედრები", items: [
-    ["/clientreport", "კლიენტთან მუშაობის რეპორტის ცალკე შევსება"],
-    ["/meeting", "შეხვედრის დაფიქსირება"],
+    ["/clientreport", "კლიენტთან მუშაობის რეპორტის ცალკე შევსება", "საშუალებას იძლევა კლიენტის რეპორტი შეავსოთ დღის განმავლობაში ნებისმიერ დროს, არა მხოლოდ /clockout-ის დროს — მაგალითად, თუ რამდენიმე კლიენტთან გქონდათ საქმე."],
+    ["/meeting", "შეხვედრის დაფიქსირება", "შეხვედრაზე ყოფნისას ფიქსირდება მისამართი, მეპატრონის საკონტაქტო და გარიგების პირობები — ეს ავტომატურად ითვლება საპატიო მიზეზად და მენეჯერსაც/დირექტორსაც უჩანს „შეხვედრების“ ისტორიაში, ასე რომ დღიური გეგმის შეუსრულებლობის დროს ეს კონტექსტი ჩანს."],
   ] },
   { icon: "🏖️", title: "დასვენება და გრაფიკი", items: [
-    ["/dayoff", "დასვენების დღის მოთხოვნა"],
-    ["/myschedule", "საკუთარი კვირის გრაფიკის ნახვა"],
-    ["/swapshift", "სამუშაო ცვლის გაცვლის მოთხოვნა (თვეში შეზღუდული რაოდენობა)"],
-    ["/swapnumber", "შიდა სამუშაო ნომრის გაცვლა კოლეგასთან"],
+    ["/dayoff", "დასვენების დღის მოთხოვნა", "თარიღის მითითებით იგზავნება მოთხოვნა მენეჯერთან/ადმინთან დასამტკიცებლად — დამტკიცებამდე დღე ჩვეულებრივ სამუშაო დღედ ითვლება. თვეში დამტკიცებული დღეოფების რაოდენობას ჭერი აქვს."],
+    ["/myschedule", "საკუთარი კვირის გრაფიკის ნახვა", "აჩვენებს კვირის განმავლობაში დაგეგმილ ცვლებს (ოფისი/ონლაინ/დასვენება) დღეების მიხედვით."],
+    ["/swapshift", "სამუშაო ცვლის გაცვლის მოთხოვნა (თვეში შეზღუდული რაოდენობა)", "თუ კონკრეტულ დღეს გინდათ ცვლის ტიპის შეცვლა (მაგ. ოფისის ნაცვლად ონლაინ) — მოთხოვნა წინასწარ იგზავნება და მენეჯერის დამტკიცებას საჭიროებს. თვეში დასაშვები რაოდენობა შეზღუდულია."],
+    ["/swapnumber", "შიდა სამუშაო ნომრის გაცვლა კოლეგასთან", "საშუალებას იძლევა ორმა აგენტმა ურთიერთშეთანხმებით გაცვალონ შიდა სამუშაო ნომრები (მაგ. კლიენტებთან ურთიერთობისთვის გამოყოფილი ნომერი)."],
   ] },
   { icon: "🏘️", title: "ექსკლუზივები", items: [
-    ["/addexclusive", "ახალი ექსკლუზივის დამატება"],
-    ["/exclusives", "აქტიური ექსკლუზივების სია"],
+    ["/addexclusive", "ახალი ექსკლუზივის დამატება", "ამატებს ახალ ექსკლუზივს თქვენს სახელზე — მისამართი, მეპატრონის საკონტაქტო, ფასი/პირობები. ეს ინფორმაცია მკაცრად კონფიდენციალურია."],
+    ["/exclusives", "აქტიური ექსკლუზივების სია", "აჩვენებს ყველა ექსკლუზივს, რომელიც ამჟამად თქვენზეა რეგისტრირებული."],
   ] },
 ];
 
 const ADMIN_ONLY_BOT_COMMAND_GROUPS = [
   { icon: "👑", title: "პერსონალის მართვა", items: [
-    ["/addagent", "ახალი აგენტის დამატება (ან Mini App-ის „აგენტების მართვა“/„მოთხოვნები“)"],
-    ["/agents", "ყველა აგენტის სია"],
-    ["/setrole", "თიმლიდერის დანიშვნა (agent_id team_lead)"],
-    ["/setteam", "აგენტის გუნდში ჩართვა ხელით"],
-    ["/reactivate", "გათავისუფლებული აგენტის ხელახლა გააქტიურება"],
+    ["/addagent", "ახალი აგენტის დამატება (ან Mini App-ის „აგენტების მართვა“/„მოთხოვნები“)", "ამატებს ახალ აგენტს სისტემაში (სახელი, გვარი, გუნდი, სამუშაო რეჟიმი). იგივეს აკეთებს Mini App-ის „აგენტების მართვა“ ტაბიც, ვიზუალურად."],
+    ["/agents", "ყველა აგენტის სია", "აჩვენებს ყველა რეგისტრირებულ (აქტიურ და გათავისუფლებულ) აგენტს."],
+    ["/setrole", "თიმლიდერის დანიშვნა (agent_id team_lead)", "კონკრეტულ აგენტს ანიჭებს თიმლიდერის/მენეჯერის უფლებებს — ეს აძლევს წვდომას გუნდის მართვის ფუნქციებზე Mini App-ში."],
+    ["/setteam", "აგენტის გუნდში ჩართვა ხელით", "ხელით ანაწილებს აგენტს კონკრეტულ გუნდში, თუ ავტომატური განაწილება საჭირო არაა."],
+    ["/reactivate", "გათავისუფლებული აგენტის ხელახლა გააქტიურება", "აბრუნებს გათიშულ/გათავისუფლებულ აგენტს აქტიურ სტატუსში. საბოლოო, სამუდამო წაშლა (რომელიც აღარ დააბრუნებს) ცალკე, Mini App-ის „აგენტების მართვა“ ტაბიდან კეთდება."],
   ] },
   { icon: "📄", title: "დავალებები და ანგარიშები", items: [
-    ["/newtask", "ახალი კლიენტის/დავალების დამატება"],
-    ["/report", "დღიური ტექსტური ანგარიში"],
-    ["/ranking", "შედეგების რეიტინგი"],
-    ["/findclient", "კლიენტის ძებნა ტელეფონით (დავალება+რეპორტი+შეხვედრა)"],
+    ["/newtask", "ახალი კლიენტის/დავალების დამატება", "ამატებს ახალ კლიენტს/დავალებას და გადასცემს კონკრეტულ აგენტს ან თავად თქვენს თავზე (მენეჯერს/დირექტორსაც შეუძლია საკუთარ თავზე დარეგისტრირება)."],
+    ["/report", "დღიური ტექსტური ანგარიში", "აგზავნის მოკლე ტექსტურ შეჯამებას დღის მდგომარეობაზე."],
+    ["/ranking", "შედეგების რეიტინგი", "აჩვენებს აგენტების რეიტინგს შედეგების მიხედვით, პერიოდის მითითებით."],
+    ["/findclient", "კლიენტის ძებნა ტელეფონით (დავალება+რეპორტი+შეხვედრა)", "ტელეფონის ნომრით პოულობს კონკრეტულ კლიენტთან დაკავშირებულ სრულ ისტორიას — ვის გადაეცა, რა რეპორტები/შეხვედრები დაფიქსირდა. იგივეს, ვიზუალურად და უფრო დეტალურად, აკეთებს Mini App-ის ახალი „კლიენტები“ ტაბი."],
   ] },
   { icon: "🗓️", title: "დამტკიცებები", items: [
-    ["/dayoffs", "დასადასტურებელი დღეოფების სია"],
-    ["/swaps", "დასადასტურებელი ცვლის გაცვლების სია"],
-    ["/warnings", "ბოლო გაფრთხილებების სია"],
+    ["/dayoffs", "დასადასტურებელი დღეოფების სია", "აჩვენებს ყველა მოლოდინში მყოფ დასვენების მოთხოვნას დასამტკიცებლად/უარსაყოფად."],
+    ["/swaps", "დასადასტურებელი ცვლის გაცვლების სია", "აჩვენებს ყველა მოლოდინში მყოფ ცვლის გაცვლის მოთხოვნას."],
+    ["/warnings", "ბოლო გაფრთხილებების სია", "აჩვენებს ბოლო გაფრთხილებებს და მათ სტატუსს (აქტიური/გაუქმებულია/გაუქმებას ითხოვს). გაუქმების მოთხოვნის შეტანა და საბოლოო გადაწყვეტილება Mini App-ის „გაფრთხილებები“ ტაბიდან ხდება."],
   ] },
 ];
 
@@ -1624,16 +1991,44 @@ const MANAGER_MINIAPP_TABS = [
   ["💬", "კითხვები", "აგენტების კითხვებზე პასუხის გაცემა"],
 ];
 
+let _regDetailStore = [];
+
 function _renderRegGroups(groups, isBotCommands) {
   return groups.map((g) => `<div class="card">
     <h2>${g.icon} ${esc(g.title)}</h2>
-    ${isBotCommands
-      ? g.items.map(([c, d]) => `<div class="list-row"><div class="avatar">${g.icon}</div><div class="main"><div class="title">${esc(c)}</div><div class="sub">${esc(d)}</div></div></div>`).join("")
-      : g.items.map((t) => `<div class="list-row"><div class="avatar">${g.icon}</div><div class="main"><div class="title">${esc(t)}</div></div></div>`).join("")}
+    ${g.items.map((item) => {
+      let title, sub, detail;
+      if (isBotCommands) {
+        title = item[0];
+        sub = item[1];
+        detail = item[2] || item[1] || "";
+      } else {
+        title = item.title;
+        sub = "";
+        detail = item.detail || "";
+      }
+      const idx = _regDetailStore.length;
+      _regDetailStore.push({ title, detail });
+      return `<div class="list-row clickable" data-reg-idx="${idx}">
+        <div class="avatar">${g.icon}</div>
+        <div class="main"><div class="title">${esc(title)}</div>${sub ? `<div class="sub">${esc(sub)}</div>` : ""}</div>
+      </div>`;
+    }).join("")}
   </div>`).join("");
 }
 
+function bindRegulationsActions() {
+  document.querySelectorAll("[data-reg-idx]").forEach((el) => {
+    el.onclick = () => {
+      const entry = _regDetailStore[parseInt(el.dataset.regIdx, 10)];
+      if (!entry || !entry.detail) return;
+      openDetail(entry.title, [], `<div class="sub" style="margin-top:10px;line-height:1.6;white-space:pre-line">${esc(entry.detail)}</div>`);
+    };
+  });
+}
+
 function renderRegulations(payload) {
+  _regDetailStore = [];
   const limits = (payload && payload.limits) || {};
   const isTeamLead = state.role === "admin" && state.data && state.data.is_team_lead;
   const isAdminOnly = state.role === "admin" && !isTeamLead;
@@ -1690,6 +2085,8 @@ const LAZY_ENDPOINTS = {
   dayoffs: "/api/dayoffs",
   agentrequests: "/api/agent-requests",
   regulations: "/api/regulations",
+  warnings: "/api/warnings",
+  clients: "/api/clients",
 };
 /* ტაბები, რომელთა endpoint-საც სჭირდება ?period=day|week|month —
    period-ის შეცვლისას load() ისედაც წმენდს lazyCache-ს მთლიანად,
@@ -1703,6 +2100,8 @@ if (!state.digestTeam) state.digestTeam = "";
 if (!state.reportsTeam) state.reportsTeam = "";
 if (!state.reportsAgent) state.reportsAgent = "";
 if (!state.reportsDate) state.reportsDate = "";
+/* თიმლიდერისთვის: შეხვედრების ჩვენება „გუნდის" ან „საკუთარი" ჭრილში. */
+if (!state.meetingsScope) state.meetingsScope = "team";
 
 /* `adminOnly` ტაბები (მაგ. აგენტების/მენეჯერების მართვა) დირექტორის
    დონის მოქმედებაა — თიმლიდერს (რომელიც ტექნიკურად იმავე "admin"
@@ -1754,6 +2153,7 @@ async function renderContent() {
             if (state.reportsDate) params.push("date=" + encodeURIComponent(state.reportsDate));
           }
           if (tab === "digest" && state.digestTeam) params.push("team=" + encodeURIComponent(state.digestTeam));
+          if (tab === "meetings" && state.meetingsScope === "own") params.push("scope=own");
           if (params.length) url += "?" + params.join("&");
           const resp = await api(url);
           const wholeObjTabs = ["admintasks", "agentsmgmt", "meetings", "taskhistory", "digest", "reports", "dayoffs", "swaps", "regulations"];
@@ -1775,7 +2175,9 @@ async function renderContent() {
       else if (tab === "digest") { content.innerHTML = renderDigest(rows); bindDigestActions(); }
       else if (tab === "dayoffs") { content.innerHTML = renderDayoffs(rows); bindDayoffsActions(); }
       else if (tab === "agentrequests") { content.innerHTML = renderAgentRequests(rows); bindAgentRequestsActions(); }
-      else if (tab === "regulations") { content.innerHTML = renderRegulations(rows); }
+      else if (tab === "regulations") { content.innerHTML = renderRegulations(rows); bindRegulationsActions(); }
+      else if (tab === "warnings") { content.innerHTML = renderWarnings(rows); bindWarningsActions(rows); }
+      else if (tab === "clients") { content.innerHTML = renderClients(rows); bindClientsActions(rows); }
       return;
     }
 
@@ -1790,7 +2192,6 @@ async function renderContent() {
       if (tab === "overview") html = renderOverview(admin);
       else if (tab === "team") html = renderTeam(admin);
       else if (tab === "ranking") html = renderRanking(admin);
-      else if (tab === "warnings") html = renderWarnings(admin);
     }
     content.innerHTML = html;
     if (state.role === "agent" && tab === "today") bindAgentActions(d.agent);

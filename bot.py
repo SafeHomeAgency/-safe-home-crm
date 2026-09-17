@@ -1500,10 +1500,13 @@ async def warnings_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lines = [f"⚠️ გაფრთხილებები (ბოლო {config.WARNING_WINDOW_DAYS} დღე):", ""]
     for agent_id, warns in sorted(by_agent.items(), key=lambda kv: -len(kv[1])):
         name = agents_by_id.get(agent_id, agent_id)
-        flag = " 🚫 (გამორთულია)" if len(warns) >= config.WARNING_LIMIT else ""
-        lines.append(f"• {name}: {len(warns)}/{config.WARNING_LIMIT}{flag}")
+        active_count = len([w for w in warns if str(w.get("status") or "active") != "dismissed"])
+        flag = " 🚫 (გამორთულია)" if active_count >= config.WARNING_LIMIT else ""
+        lines.append(f"• {name}: {active_count}/{config.WARNING_LIMIT}{flag}")
         for w in warns[-3:]:
-            lines.append(f"   – {w.get('created_at')}: {w.get('type')} ({w.get('detail') or '-'})")
+            status = str(w.get("status") or "active")
+            status_note = " [გაუქმებულია]" if status == "dismissed" else (" [გასაუქმებლად მოთხოვნილია]" if status == "dismiss_pending" else "")
+            lines.append(f"   – {w.get('created_at')}: {w.get('type')} ({w.get('detail') or '-'}){status_note}")
     await update.message.reply_text("\n".join(lines))
 
 
@@ -1774,6 +1777,9 @@ async def check_new_tasks(context: ContextTypes.DEFAULT_TYPE):
                         f"პრიორიტეტი: {t.get('priority') or '-'} | ვადა: {t.get('due_date') or '-'}\n"
                         f"დახურვა: /done_{t['task_id']}"
                     ),
+                    reply_markup=InlineKeyboardMarkup([[
+                        InlineKeyboardButton("✅ მივიღე კლიენტი", callback_data=f"taskseen:{t['task_id']}"),
+                    ]]),
                 )
                 sheets.mark_task_notified(t["task_id"])
             except Exception:
@@ -1781,6 +1787,43 @@ async def check_new_tasks(context: ContextTypes.DEFAULT_TYPE):
         else:
             # აგენტი ჯერ არაა დარეგისტრირებული ტელეგრამში — მოგვიანებით ისევ ვცდით
             pass
+
+
+async def taskseen_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """აგენტი ბოტში (Mini App-ის გარეშეც) ადასტურებს კონკრეტული
+    კლიენტის მიღებას ღილაკზე დაჭერით — მენეჯერს/ადმინს ეცნობება."""
+    query = update.callback_query
+    task_id = query.data.split(":", 1)[1]
+    agent = sheets.find_agent_by_chat_id(update.effective_chat.id)
+    if not agent:
+        await query.answer("ჯერ დარეგისტრირდით — /start", show_alert=True)
+        return
+    row = sheets.mark_task_seen(task_id, agent["agent_id"])
+    if not row:
+        await query.answer("ვერ მოიძებნა ან სხვა აგენტზეა მინიჭებული.", show_alert=True)
+        return
+    await query.answer("✅ დადასტურდა")
+    try:
+        await query.edit_message_reply_markup(reply_markup=None)
+        await query.message.reply_text("✅ დადასტურებული — გმადლობთ!")
+    except Exception:
+        pass
+
+    created_by = str(row.get("created_by") or "")
+    text = f"✅ {agent.get('name')} დაადასტურა კლიენტის მიღება: {row.get('title')}"
+    if created_by and created_by != "admin":
+        creator = next((a for a in sheets.get_agents() if str(a.get("agent_id")) == created_by), None)
+        if creator and creator.get("telegram_chat_id"):
+            try:
+                await context.bot.send_message(chat_id=int(creator["telegram_chat_id"]), text=text)
+            except Exception:
+                log.exception("მენეჯერისთვის დადასტურების შეტყობინება ვერ გაეგზავნა")
+    else:
+        for admin_id in config.ADMIN_CHAT_IDS:
+            try:
+                await context.bot.send_message(chat_id=admin_id, text=text)
+            except Exception:
+                log.exception("ადმინისთვის დადასტურების შეტყობინება ვერ გაეგზავნა")
 
 
 async def send_daily_report(context: ContextTypes.DEFAULT_TYPE):
@@ -1990,6 +2033,55 @@ async def remind_before_shift_edge(context: ContextTypes.DEFAULT_TYPE):
             start_hour = None
             end_hour = config.REPORT_DEADLINE_HOUR
 
+        # ონლაინ (სახლიდან) რეჟიმს ფიქსირებული დაწყების საათი არა აქვს
+        # — დღის შუაში ერთხელადი შეხსენება, თუ ჯერ არ დაუწყია.
+        if mode == "online":
+            start_reminder_dt = now.replace(
+                hour=config.ONLINE_START_REMINDER_HOUR, minute=0, second=0, microsecond=0,
+            )
+            key_online_start = (str(agent_id), today, "online_start")
+            if (
+                now >= start_reminder_dt
+                and key_online_start not in _shift_reminder_sent
+                and not (att and att.get("clock_in"))
+            ):
+                _shift_reminder_sent.add(key_online_start)
+                try:
+                    await context.bot.send_message(
+                        chat_id=int(chat_id),
+                        text=(
+                            "🏠 დღეს ონლაინ რეჟიმზე ხართ — დაიწყეთ /clockin როცა მზად იქნებით. "
+                            f"მთავარია {config.REPORT_DEADLINE_HOUR}:00-მდე დაასრულოთ (/clockout) "
+                            "და შეავსოთ დღის ანგარიში, თორემ გაფრთხილება დაგერიცხებათ."
+                        ),
+                    )
+                except Exception:
+                    log.exception("ონლაინ დაწყების შეხსენება ვერ გაეგზავნა agent_id=%s", agent_id)
+
+            # 1 საათით ადრე — ცალკე შეხსენება რეპორტის შესახებ, თუ უკვე
+            # დაწყებული აქვს დღე, მაგრამ ჯერ არ დაუხურავს.
+            report_reminder_dt = now.replace(
+                hour=max(0, config.REPORT_DEADLINE_HOUR - 1), minute=0, second=0, microsecond=0,
+            )
+            key_report = (str(agent_id), today, "online_report")
+            if (
+                now >= report_reminder_dt
+                and now < now.replace(hour=config.REPORT_DEADLINE_HOUR, minute=0, second=0, microsecond=0)
+                and key_report not in _shift_reminder_sent
+                and att and att.get("clock_in") and not att.get("clock_out")
+            ):
+                _shift_reminder_sent.add(key_report)
+                try:
+                    await context.bot.send_message(
+                        chat_id=int(chat_id),
+                        text=(
+                            f"📝 1 საათი დარჩა {config.REPORT_DEADLINE_HOUR}:00-მდე — არ დაგავიწყდეთ "
+                            "/clockout დღის დასახურად და დღიური ანგარიშის შევსება."
+                        ),
+                    )
+                except Exception:
+                    log.exception("ონლაინ რეპორტის შეხსენება ვერ გაეგზავნა agent_id=%s", agent_id)
+
         if start_hour is not None:
             start_dt = now.replace(hour=start_hour, minute=0, second=0, microsecond=0)
             key_start = (str(agent_id), today, "start")
@@ -2021,11 +2113,12 @@ async def remind_before_shift_edge(context: ContextTypes.DEFAULT_TYPE):
         ):
             _shift_reminder_sent.add(key_end)
             try:
+                extra = " და დღიური ანგარიშის შევსება" if mode == "online" else ""
                 await context.bot.send_message(
                     chat_id=int(chat_id),
                     text=(
                         f"⏰ 10 წუთში მთავრდება თქვენი ცვლა ({end_hour}:00). "
-                        f"არ დაგავიწყდეთ /clockout დღის დასახურად."
+                        f"არ დაგავიწყდეთ /clockout დღის დასახურად{extra}."
                     ),
                 )
             except Exception:
@@ -2406,6 +2499,7 @@ def main():
     # conversation-ის მიღმა გლობალური handler-ებია საჭირო.
     app.add_handler(CallbackQueryHandler(swapshift_accept, pattern=r"^swshift_accept:"))
     app.add_handler(CallbackQueryHandler(swapshift_decide, pattern=r"^swshift_decide:"))
+    app.add_handler(CallbackQueryHandler(taskseen_callback, pattern=r"^taskseen:"))
 
     threading.Thread(target=webserver.run, name="webapp", daemon=True).start()
 

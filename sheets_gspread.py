@@ -127,7 +127,7 @@ TASKS_HEADERS = [
     "task_id", "title", "description", "assigned_to", "status",
     "priority", "due_date", "created_by", "created_at", "updated_at",
     "notified", "lead_type", "client_phone", "deal_type", "listing_id",
-    "viewing_time", "assigned_to_name",
+    "viewing_time", "assigned_to_name", "seen", "seen_at",
 ]
 REPORTS_HEADERS = [
     "report_id", "agent_id", "client_phone", "actions", "notes",
@@ -159,7 +159,11 @@ ATTENDANCE_HEADERS = [
 
 # გაფრთხილებები (დაგვიანებული/გამოტოვებული ანგარიში, დაგვიანება,
 # არ-გამოცხადება). ტიპები: late_report / late_arrival / no_show / quota_missed
-WARNINGS_HEADERS = ["warning_id", "agent_id", "type", "detail", "created_at", "agent_name"]
+WARNINGS_HEADERS = [
+    "warning_id", "agent_id", "type", "detail", "created_at", "agent_name",
+    "status", "dismiss_reason", "dismiss_requested_by", "dismiss_requested_by_name",
+    "dismiss_requested_at", "dismiss_decided_by", "dismiss_decided_at",
+]
 
 # სმენების/ცვლის გაცვლის მოთხოვნები. request_type: swap_agent (კონკრეტულ
 # კოლეგასთან გაცვლა) / change_mode (საკუთარი ცვლის ტიპის შეცვლა, მაგ.
@@ -417,6 +421,25 @@ def set_agent_active(agent_id: str, value: str) -> bool:
         return True
 
 
+def delete_agent(agent_id: str) -> bool:
+    """იხ. sheets_postgres.py-ის იგივე ფუნქციის დოკუმენტაცია — მხოლოდ
+    agents/schedule tab-ებიდან შლის მთლიან სტრიქონს, ისტორიული
+    ჩანაწერები (სახელი ცალკეა შენახული მათში) უცვლელად რჩება."""
+    with _lock:
+        ws = _agents_ws()
+        cell = ws.find(agent_id, in_column=1)
+        if not cell:
+            return False
+        ws.delete_rows(cell.row)
+        _invalidate(config.AGENTS_SHEET_NAME)
+        sched_ws = _schedule_ws()
+        sched_cell = sched_ws.find(agent_id, in_column=1)
+        if sched_cell:
+            sched_ws.delete_rows(sched_cell.row)
+            _invalidate(config.SCHEDULE_SHEET_NAME)
+    return True
+
+
 def set_agent_role(agent_id: str, role: str) -> bool:
     """role: 'agent' / 'team_lead' — თიმლიდერს Mini App-ში ემატება
     საკუთარი გუნდის ფილტრირებული მენეჯერული ხედვაც."""
@@ -570,7 +593,7 @@ def create_task(title: str, description: str, assigned_to: str,
             task_id, title, description, assigned_to, "New",
             priority, due_date, created_by, now, now, "no",
             lead_type, client_phone, deal_type, listing_id, viewing_time,
-            agent_name_by_id(assigned_to),
+            agent_name_by_id(assigned_to), "no", "",
         ])
         _invalidate(config.TASKS_SHEET_NAME)
         return task_id
@@ -591,6 +614,21 @@ def mark_task_done(task_id: str) -> bool:
         ws.update_cell(cell.row, TASKS_HEADERS.index("updated_at") + 1, _now())
         _invalidate(config.TASKS_SHEET_NAME)
         return True
+
+
+def mark_task_seen(task_id: str, agent_id: str) -> dict | None:
+    """იხ. sheets_postgres.py-ის იგივე ფუნქციის დოკუმენტაცია."""
+    with _lock:
+        ws, cell = _find_task_row(task_id)
+        if not cell:
+            return None
+        row = dict(zip(TASKS_HEADERS, ws.row_values(cell.row)))
+        if str(row.get("assigned_to")) != str(agent_id):
+            return None
+        ws.update_cell(cell.row, TASKS_HEADERS.index("seen") + 1, "yes")
+        ws.update_cell(cell.row, TASKS_HEADERS.index("seen_at") + 1, _now())
+        _invalidate(config.TASKS_SHEET_NAME)
+        return dict(zip(TASKS_HEADERS, ws.row_values(cell.row)))
 
 
 def mark_task_notified(task_id: str):
@@ -622,6 +660,8 @@ def reassign_task(task_id: str, new_agent_id: str, actor_agent_id: str = "") -> 
         ws.update_cell(cell.row, TASKS_HEADERS.index("assigned_to_name") + 1, agent_name_by_id(new_agent_id))
         ws.update_cell(cell.row, TASKS_HEADERS.index("updated_at") + 1, _now())
         ws.update_cell(cell.row, TASKS_HEADERS.index("notified") + 1, "no")
+        ws.update_cell(cell.row, TASKS_HEADERS.index("seen") + 1, "no")
+        ws.update_cell(cell.row, TASKS_HEADERS.index("seen_at") + 1, "")
         row = ws.row_values(cell.row)
         _invalidate(config.TASKS_SHEET_NAME)
         return dict(zip(TASKS_HEADERS, row))
@@ -786,6 +826,44 @@ def get_client_history(client_phone: str) -> dict:
     reports = get_reports(client_phone=client_phone)
     meetings = get_meetings(client_phone=client_phone)
     return {"tasks": tasks, "reports": reports, "meetings": meetings}
+
+
+def get_all_clients(team: str | None = None) -> list[dict]:
+    """იხ. sheets_postgres.py-ის იგივე ფუნქციის დოკუმენტაცია — ლოგიკა
+    იდენტურია (pure Python, მხოლოდ get_tasks()/get_agents()-ზეა
+    დაფუძნებული)."""
+    tasks = get_tasks()
+    agents_by_id = {str(a.get("agent_id")): a for a in get_agents()}
+    by_phone: dict[str, list[dict]] = {}
+    for t in tasks:
+        phone = str(t.get("client_phone", "")).strip()
+        if not phone:
+            continue
+        by_phone.setdefault(phone, []).append(t)
+
+    out = []
+    for phone, trows in by_phone.items():
+        trows_sorted = sorted(trows, key=lambda t: str(t.get("created_at", "")))
+        latest = trows_sorted[-1]
+        if team is not None:
+            team_keys = {
+                str(agents_by_id.get(str(t.get("assigned_to")), {}).get("team", "")).strip()
+                for t in trows
+            }
+            if team not in team_keys:
+                continue
+        out.append({
+            "client_phone": phone,
+            "current_agent_id": latest.get("assigned_to"),
+            "current_agent_name": latest.get("assigned_to_name") or agent_name_by_id(latest.get("assigned_to")),
+            "status": latest.get("status"),
+            "deal_type": latest.get("deal_type") or latest.get("lead_type"),
+            "task_count": len(trows),
+            "first_seen": trows_sorted[0].get("created_at", ""),
+            "last_activity": latest.get("updated_at") or latest.get("created_at", ""),
+        })
+    out.sort(key=lambda c: str(c.get("last_activity") or ""), reverse=True)
+    return out
 
 
 # ---------- Day off მოთხოვნები ----------
@@ -1117,15 +1195,62 @@ def add_warning(agent_id: str, type_: str, detail: str = "") -> dict:
     """
     with _lock:
         warning_id = uuid.uuid4().hex[:8]
-        _warnings_ws().append_row([warning_id, agent_id, type_, detail, _now(), agent_name_by_id(agent_id)])
+        _warnings_ws().append_row([
+            warning_id, agent_id, type_, detail, _now(), agent_name_by_id(agent_id),
+            "active", "", "", "", "", "", "",
+        ])
         _invalidate(config.WARNINGS_SHEET_NAME)
 
-    count = len(get_warnings(agent_id=agent_id, days=config.WARNING_WINDOW_DAYS))
+    count = len([
+        w for w in get_warnings(agent_id=agent_id, days=config.WARNING_WINDOW_DAYS)
+        if str(w.get("status") or "active") != "dismissed"
+    ])
     deactivated = False
     if count >= config.WARNING_LIMIT:
         set_agent_active(agent_id, "no")
         deactivated = True
     return {"warning_id": warning_id, "count": count, "deactivated": deactivated}
+
+
+def _find_warning_row(warning_id: str):
+    ws = _warnings_ws()
+    cell = ws.find(warning_id, in_column=1)
+    return ws, cell
+
+
+def request_warning_dismissal(warning_id: str, requested_by: str, reason: str) -> dict | None:
+    """იხ. sheets_postgres.py-ის იგივე ფუნქციის დოკუმენტაცია."""
+    with _lock:
+        ws, cell = _find_warning_row(warning_id)
+        if not cell:
+            return None
+        row = dict(zip(WARNINGS_HEADERS, ws.row_values(cell.row)))
+        if str(row.get("status") or "active") != "active":
+            return None
+        ws.update_cell(cell.row, WARNINGS_HEADERS.index("status") + 1, "dismiss_pending")
+        ws.update_cell(cell.row, WARNINGS_HEADERS.index("dismiss_reason") + 1, reason)
+        ws.update_cell(cell.row, WARNINGS_HEADERS.index("dismiss_requested_by") + 1, requested_by)
+        ws.update_cell(cell.row, WARNINGS_HEADERS.index("dismiss_requested_by_name") + 1, agent_name_by_id(requested_by))
+        ws.update_cell(cell.row, WARNINGS_HEADERS.index("dismiss_requested_at") + 1, _now())
+        _invalidate(config.WARNINGS_SHEET_NAME)
+        return dict(zip(WARNINGS_HEADERS, ws.row_values(cell.row)))
+
+
+def decide_warning_dismissal(warning_id: str, approve: bool, decided_by: str) -> dict | None:
+    """იხ. sheets_postgres.py-ის იგივე ფუნქციის დოკუმენტაცია."""
+    with _lock:
+        ws, cell = _find_warning_row(warning_id)
+        if not cell:
+            return None
+        row = dict(zip(WARNINGS_HEADERS, ws.row_values(cell.row)))
+        if str(row.get("status") or "active") != "dismiss_pending":
+            return None
+        new_status = "dismissed" if approve else "active"
+        ws.update_cell(cell.row, WARNINGS_HEADERS.index("status") + 1, new_status)
+        ws.update_cell(cell.row, WARNINGS_HEADERS.index("dismiss_decided_by") + 1, decided_by)
+        ws.update_cell(cell.row, WARNINGS_HEADERS.index("dismiss_decided_at") + 1, _now())
+        _invalidate(config.WARNINGS_SHEET_NAME)
+        return dict(zip(WARNINGS_HEADERS, ws.row_values(cell.row)))
 
 
 # ---------- სმენების/ნომრის გაცვლა ----------
@@ -1384,6 +1509,23 @@ def client_counts(agent_id: str) -> dict:
     return {"today": today_count, "total": len(agent_tasks)}
 
 
+def get_today_client_phones(agent_id: str) -> list[str]:
+    """იხ. sheets_postgres.py-ის იგივე ფუნქციის დოკუმენტაცია."""
+    today_str = _today_str()
+    tasks = [
+        t for t in get_tasks()
+        if str(t.get("assigned_to")) == str(agent_id)
+        and str(t.get("created_at", "")).startswith(today_str)
+        and str(t.get("client_phone", "")).strip()
+    ]
+    out = []
+    for t in tasks:
+        phone = str(t.get("client_phone")).strip()
+        if phone not in out:
+            out.append(phone)
+    return out
+
+
 def get_agent_dashboard(agent_id: str, days: int = 30) -> dict | None:
     """ერთი აგენტის სრული დღევანდელი სურათი — Mini App-ის "ჩემი დღე"
     გვერდისთვის. `days` განსაზღვრავს "performance"-ის პერიოდს (მაგ. 1
@@ -1435,6 +1577,7 @@ def get_agent_dashboard(agent_id: str, days: int = 30) -> dict | None:
             "myhome_count": att.get("myhome_count", ""),
             "ssge_count": att.get("ssge_count", ""),
             "quota": quota_for_mode(mode),
+            "client_phones": get_today_client_phones(agent_id),
         },
         "clients": clients,
         "schedule": {k: str(sched.get(k) or "off") for k in WEEKDAY_KEYS},
@@ -1444,7 +1587,7 @@ def get_agent_dashboard(agent_id: str, days: int = 30) -> dict | None:
             "rate": perf.get("rate"),
         },
         "warnings": {
-            "count": len(warns),
+            "count": len([w for w in warns if str(w.get("status") or "active") != "dismissed"]),
             "limit": config.WARNING_LIMIT,
             "recent": warns[-5:][::-1],
         },
@@ -1509,7 +1652,10 @@ def get_admin_dashboard(team: str | None = None, days: int = 30) -> dict:
             if _now_dt >= _deadline:
                 late = True
                 late_count += 1
-        w = len(get_warnings(agent_id=aid, days=config.WARNING_WINDOW_DAYS))
+        w = len([
+            x for x in get_warnings(agent_id=aid, days=config.WARNING_WINDOW_DAYS)
+            if str(x.get("status") or "active") != "dismissed"
+        ])
         p = perf.get(str(aid), {})
         c = client_counts(aid)
         clients_today_total += c["today"]
@@ -1653,7 +1799,10 @@ def get_daily_digest(team: str | None = None) -> dict:
     attention = []
     for a in agents:
         aid = str(a.get("agent_id"))
-        w_count = len(get_warnings(agent_id=aid, days=config.WARNING_WINDOW_DAYS))
+        w_count = len([
+            x for x in get_warnings(agent_id=aid, days=config.WARNING_WINDOW_DAYS)
+            if str(x.get("status") or "active") != "dismissed"
+        ])
         if w_count >= max(1, config.WARNING_LIMIT - 1):
             attention.append(
                 f"{a.get('name')} — {w_count}/{config.WARNING_LIMIT} გაფრთხილება "

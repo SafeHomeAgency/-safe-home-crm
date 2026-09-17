@@ -35,8 +35,42 @@ import sheets
 log = logging.getLogger("safehome-crm-webapp")
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+UPLOADS_DIR = os.path.join(BASE_DIR, "uploads", "reports")
+os.makedirs(UPLOADS_DIR, exist_ok=True)
 
 app = Flask(__name__)
+
+
+def _save_base64_photos(photos) -> list[str]:
+    """Mini App-იდან მოსული base64 ფოტოების (data URI) დისკზე
+    შენახვა — აბრუნებს შენახული ფაილების ფარდობით გზებს (`file_id`
+    ველში ჩასაწერად, სხვა Telegram file_id-ების იგივე ფორმატით,
+    მძიმით გამოყოფილი). დაცვა: მაქსიმუმ 5 ფოტო თითო ანგარიშზე, თითო
+    ფოტო მაქს. 8MB. შენიშვნა: Railway-ის დისკი ჩვეულებრივ ეფემერულია —
+    ხელახალ deploy-ზე შესაძლოა წაიშალოს, თუ Volume არაა მიმაგრებული."""
+    import base64
+    import uuid as _uuid
+    saved = []
+    for p in (photos or [])[:5]:
+        try:
+            if not isinstance(p, str) or "," not in p:
+                continue
+            header, b64data = p.split(",", 1)
+            ext = "jpg"
+            if "png" in header:
+                ext = "png"
+            elif "webp" in header:
+                ext = "webp"
+            raw = base64.b64decode(b64data)
+            if len(raw) > 8 * 1024 * 1024:
+                continue
+            fname = f"{_uuid.uuid4().hex}.{ext}"
+            with open(os.path.join(UPLOADS_DIR, fname), "wb") as f:
+                f.write(raw)
+            saved.append(f"uploads/reports/{fname}")
+        except Exception:
+            log.exception("ფოტოს შენახვა ვერ მოხერხდა")
+    return saved
 
 
 def _send_telegram_message(chat_id, text: str) -> None:
@@ -102,6 +136,14 @@ def _authed_agent():
 
 def _is_team_lead(agent) -> bool:
     return bool(agent) and str(agent.get("role", "")).strip() == "team_lead"
+
+
+WARNING_TYPE_LABELS = {
+    "late_report": "დაგვიანებული/გამოტოვებული ანგარიში",
+    "late_arrival": "დაგვიანება სამუშაოზე",
+    "no_show": "არ გამოცხადება",
+    "quota_missed": "დღიური გეგმა ვერ შესრულდა",
+}
 
 
 _PERIOD_DAYS = {"day": 1, "week": 7, "month": 30}
@@ -393,6 +435,138 @@ def api_swaps_decide():
     return jsonify(ok=True, row=row)
 
 
+def _active_warning_count(agent_id: str) -> int:
+    return len([
+        w for w in sheets.get_warnings(agent_id=agent_id, days=config.WARNING_WINDOW_DAYS)
+        if str(w.get("status") or "active") != "dismissed"
+    ])
+
+
+@app.get("/api/warnings")
+def api_warnings():
+    """გაფრთხილებების სრული სია (არა მხოლოდ ბოლო 10, დაშბორდის
+    ხედვისგან განსხვავებით) — დეტალურ ჩაშლას/გაუქმების მოთხოვნას
+    რომ დაექვემდებაროს. ადმინს ყველა ჩანს, თიმლიდერს — საკუთარი
+    გუნდის."""
+    agent, admin, err = _authed_agent()
+    if err:
+        return err
+    if not (admin or _is_team_lead(agent)):
+        return jsonify(error="მხოლოდ მენეჯერისთვის/თიმლიდერისთვის"), 403
+    rows = sheets.get_warnings()
+    if not admin:
+        my_team = str(agent.get("team", "")).strip()
+        team_ids = {
+            str(a.get("agent_id")) for a in sheets.get_agents()
+            if str(a.get("team", "")).strip() == my_team
+        }
+        rows = [r for r in rows if str(r.get("agent_id")) in team_ids]
+    rows.sort(key=lambda r: str(r.get("created_at", "")), reverse=True)
+    return jsonify(rows=rows[:300])
+
+
+@app.post("/api/warnings/request-dismiss")
+def api_warnings_request_dismiss():
+    """მენეჯერი ითხოვს კონკრეტული გაფრთხილების გაუქმებას — მაგ. თუ
+    გაფრთხილება (ხშირად "quota_missed"/"late_report") იმიტომ დაეწერა,
+    რომ აგენტი ამ დროს შეხვედრაზე იყო. მოთხოვნა თავად არაფერს
+    აუქმებს, მხოლოდ დირექტორის დამტკიცებამდე ითვლება "pending"-ად."""
+    agent, admin, err = _authed_agent()
+    if err:
+        return err
+    if not (admin or _is_team_lead(agent)):
+        return jsonify(error="მხოლოდ მენეჯერისთვის/თიმლიდერისთვის"), 403
+    body = request.get_json(silent=True) or {}
+    warning_id = body.get("warning_id")
+    reason = (body.get("reason") or "").strip()
+    if not warning_id or not reason:
+        return jsonify(error="მიზეზის მითითება სავალდებულოა"), 400
+
+    target = next((w for w in sheets.get_warnings() if str(w.get("warning_id")) == str(warning_id)), None)
+    if not target:
+        return jsonify(error="ვერ მოიძებნა"), 404
+    if not admin:
+        my_team = str(agent.get("team", "")).strip()
+        target_agent = next(
+            (a for a in sheets.get_agents() if str(a.get("agent_id")) == str(target.get("agent_id"))), None,
+        )
+        if not target_agent or str(target_agent.get("team", "")).strip() != my_team:
+            return jsonify(error="მხოლოდ საკუთარი გუნდის გაფრთხილებაზე შეგიძლიათ მოთხოვნა"), 403
+
+    requested_by = "admin" if admin else agent.get("agent_id")
+    row = sheets.request_warning_dismissal(warning_id, requested_by, reason)
+    if not row:
+        return jsonify(error="ეს გაფრთხილება უკვე მოთხოვნილი/გაუქმებულია"), 400
+
+    # ხაზგასმა: ბოტმა "სმენის დამთხვევის" კონტექსტი დირექტორის
+    # თვალწინ რომ დადოს — თუ ამ თარიღზე ამ აგენტს შეხვედრა
+    # ჩაწერილი ჰქონდა, ეს ინფორმაცია ერთვის შეტყობინებას.
+    meeting_hint = ""
+    warn_date = str(target.get("created_at", "")).split(" ")[0]
+    if warn_date:
+        same_day_meetings = [
+            m for m in sheets.get_meetings(agent_id=target.get("agent_id"))
+            if str(m.get("meeting_date", "")).strip() == warn_date
+            or str(m.get("timestamp", "")).startswith(warn_date)
+        ]
+        if same_day_meetings:
+            meeting_hint = f"\n📅 ამ დღეს ({warn_date}) ჩაწერილია {len(same_day_meetings)} შეხვედრა ამ აგენტთან."
+
+    requester_name = "ადმინი" if admin else agent.get("name")
+    text = (
+        f"📝 გაფრთხილების გაუქმების მოთხოვნა — {requester_name}\n"
+        f"აგენტი: {row.get('agent_name')}\n"
+        f"გაფრთხილება: {WARNING_TYPE_LABELS.get(row.get('type'), row.get('type'))} ({warn_date})\n"
+        f"მიზეზი: {reason}"
+        f"{meeting_hint}"
+    )
+    for admin_id in config.ADMIN_CHAT_IDS:
+        _send_telegram_message(admin_id, text)
+    return jsonify(ok=True, row=row)
+
+
+@app.post("/api/warnings/decide-dismiss")
+def api_warnings_decide_dismiss():
+    """დირექტორის საბოლოო გადაწყვეტილება — დამტკიცებისას აგენტისა და
+    მომთხოვნი მენეჯერისთვის ეცნობება ახალი (განახლებული)
+    გაფრთხილებების რაოდენობა, რომ არსად არაფერი არ აირიოს."""
+    _, admin, err = _authed_agent()
+    if err:
+        return err
+    if not admin:
+        return jsonify(error="მხოლოდ ადმინისთვის"), 403
+    body = request.get_json(silent=True) or {}
+    warning_id = body.get("warning_id")
+    approve = bool(body.get("approve"))
+    if not warning_id:
+        return jsonify(error="არასწორი მოთხოვნა"), 400
+    row = sheets.decide_warning_dismissal(warning_id, approve, decided_by="admin")
+    if not row:
+        return jsonify(error="ვერ მოიძებნა ან უკვე გადაწყვეტილია"), 404
+
+    agent_id = str(row.get("agent_id"))
+    new_count = _active_warning_count(agent_id)
+    label = "✅ გაუქმდა" if approve else "❌ უარყოფილია, ძალაშია"
+    agents_by_id = {str(a.get("agent_id")): a for a in sheets.get_agents()}
+
+    target_agent = agents_by_id.get(agent_id)
+    if target_agent and target_agent.get("telegram_chat_id"):
+        _send_telegram_message(
+            int(target_agent["telegram_chat_id"]),
+            f"თქვენი გაფრთხილება ({WARNING_TYPE_LABELS.get(row.get('type'), row.get('type'))}) — {label}.\n"
+            f"მიმდინარე გაფრთხილებების რაოდენობა: {new_count}/{config.WARNING_LIMIT}.",
+        )
+
+    requester = agents_by_id.get(str(row.get("dismiss_requested_by")))
+    if requester and requester.get("telegram_chat_id"):
+        _send_telegram_message(
+            int(requester["telegram_chat_id"]),
+            f"თქვენი მოთხოვნა ({row.get('agent_name')}-ის გაფრთხილების გაუქმებაზე) — {label}.\n"
+            f"{row.get('agent_name')}-ის მიმდინარე გაფრთხილებების რაოდენობა: {new_count}/{config.WARNING_LIMIT}.",
+        )
+    return jsonify(ok=True, row=row)
+
+
 @app.get("/api/agents")
 def api_agents():
     """აგენტების/მენეჯერების მართვის ცხრილი (მხოლოდ ადმინისთვის —
@@ -464,6 +638,27 @@ def api_agents_rekey_team():
     if not target or str(target.get("role", "")).strip() != "team_lead":
         return jsonify(error="მხოლოდ თიმლიდერისთვის"), 400
     sheets.set_agent_team(agent_id, agent_id)
+    return jsonify(ok=True)
+
+
+@app.post("/api/agents/delete")
+def api_agents_delete():
+    """აგენტის ჩანაწერის სრული, შეუქცევადი წაშლა — "აგენტების მართვა"
+    ტაბიდან, დეაქტივაციისგან განსხვავებით საერთოდ აღარსად ჩანს.
+    ისტორიული მონაცემები (დავალებები/რეპორტები/შეხვედრები/
+    გაფრთხილებები) უცვლელად რჩება — მათში სახელი ცალკეა შენახული."""
+    _, admin, err = _authed_agent()
+    if err:
+        return err
+    if not admin:
+        return jsonify(error="მხოლოდ ადმინისთვის"), 403
+    body = request.get_json(silent=True) or {}
+    agent_id = body.get("agent_id")
+    if not agent_id:
+        return jsonify(error="არასწორი მოთხოვნა"), 400
+    ok = sheets.delete_agent(agent_id)
+    if not ok:
+        return jsonify(error="ვერ მოიძებნა"), 404
     return jsonify(ok=True)
 
 
@@ -694,7 +889,13 @@ def api_tasks_new():
             return jsonify(error="არასწორი მოთხოვნა"), 400
         if not admin and not my_team:
             return jsonify(error="ჯერ არ გაქვთ საკუთარი გუნდი მინიჭებული"), 400
-        target_agent_id = sheets.pick_agent_for_priority(priority, team=my_team)
+        # მენეჯერს/თიმლიდერს შეუძლია კლიენტი პირდაპირ საკუთარ თავზეც
+        # დაირეგისტრიროს (ავტომატური არჩევანის ალგორითმის გვერდის
+        # ავლით) — რომ დირექტორსაც სჩანდეს, თავად რას აკეთებს.
+        if body.get("assign_to_self") and agent:
+            target_agent_id = agent.get("agent_id")
+        else:
+            target_agent_id = sheets.pick_agent_for_priority(priority, team=my_team)
         if not target_agent_id:
             return jsonify(error="შესაფერისი აქტიური აგენტი ვერ მოიძებნა"), 400
         title = f"კლიენტი {phone} ({deal_type})"
@@ -759,6 +960,37 @@ def api_tasks():
         key=lambda r: r.get("name") or "",
     )
     return jsonify(rows=rows[:100], agents=agents_out)
+
+
+@app.post("/api/tasks/ack")
+def api_tasks_ack():
+    """აგენტი ადასტურებს, რომ კონკრეტული მისთვის მინიჭებული
+    კლიენტი/დავალება უკვე ნახა — მენეჯერს/ადმინს რომ სჩანდეს, ვინ
+    ჯერ არ გახსნია/მიუღია."""
+    agent, admin, err = _authed_agent()
+    if err:
+        return err
+    if not agent:
+        return jsonify(error="მხოლოდ დარეგისტრირებული აგენტისთვის"), 403
+    body = request.get_json(silent=True) or {}
+    task_id = body.get("task_id")
+    if not task_id:
+        return jsonify(error="არასწორი მოთხოვნა"), 400
+    row = sheets.mark_task_seen(task_id, agent["agent_id"])
+    if not row:
+        return jsonify(error="ვერ მოიძებნა ან სხვა აგენტზეა მინიჭებული"), 404
+
+    # შემქმნელს (მენეჯერს/ადმინს) ეცნობება, რომ აგენტმა დაადასტურა.
+    created_by = str(row.get("created_by") or "")
+    text = f"✅ {agent.get('name')} დაადასტურა კლიენტის მიღება: {row.get('title')}"
+    if created_by and created_by != "admin":
+        creator = next((a for a in sheets.get_agents() if str(a.get("agent_id")) == created_by), None)
+        if creator and creator.get("telegram_chat_id"):
+            _send_telegram_message(int(creator["telegram_chat_id"]), text)
+    else:
+        for admin_id in config.ADMIN_CHAT_IDS:
+            _send_telegram_message(admin_id, text)
+    return jsonify(ok=True, row=row)
 
 
 @app.post("/api/tasks/reassign")
@@ -858,6 +1090,14 @@ def api_meetings_history():
     days = _period_to_days(request.args.get("period"))
     team_lead = _is_team_lead(agent)
 
+    # თიმლიდერიც ჩვეულებრივი აგენტივით მუშაობს და შეიძლება პირადი
+    # შეხვედრებიც ჰქონდეს — "own" მოთხოვნისას მხოლოდ საკუთარი ეჩვენება
+    # (ჯამურ გუნდში აღარ ერევა), ნაგულისხმევად კი გუნდის ჯამური.
+    if team_lead and request.args.get("scope") == "own":
+        rows = sheets.get_meetings(agent_id=agent["agent_id"], days=days)
+        rows.sort(key=lambda r: str(r.get("timestamp", "")), reverse=True)
+        return jsonify(rows=rows[:200], count=len(rows), scope="own")
+
     if admin or team_lead:
         team_filter = None if admin else str(agent.get("team", "")).strip()
         rows = sheets.get_meetings(days=days)
@@ -875,6 +1115,52 @@ def api_meetings_history():
     rows = sheets.get_meetings(agent_id=agent["agent_id"], days=days)
     rows.sort(key=lambda r: str(r.get("timestamp", "")), reverse=True)
     return jsonify(rows=rows[:200], count=len(rows), scope="own")
+
+
+@app.get("/api/clients")
+def api_clients():
+    """კლიენტების ჯამური სია (თითო უნიკალურ ტელეფონზე ერთი
+    სტრიქონი) — ადმინს ყველა კლიენტი ეჩვენება, თიმლიდერს მხოლოდ
+    საკუთარი გუნდის (ოდესმე). ძებნა ტელეფონის/სახელის მიხედვით
+    frontend-ის მხარეს სრულდება (სია ჯერჯერობით პატარაა)."""
+    agent, admin, err = _authed_agent()
+    if err:
+        return err
+    if not (admin or _is_team_lead(agent)):
+        return jsonify(error="მხოლოდ მენეჯერისთვის/თიმლიდერისთვის"), 403
+    team = None if admin else str(agent.get("team", "")).strip()
+    rows = sheets.get_all_clients(team=team)
+    return jsonify(rows=rows[:500])
+
+
+@app.get("/api/clients/<path:phone>")
+def api_client_history(phone):
+    """ერთი კონკრეტული კლიენტის სრული ისტორია — ვისაც კი ოდესმე
+    ჰყოლია გადაბარებული (ყველა დავალება/რეპორტი/შეხვედრა ამ
+    ტელეფონზე), ერთად, დროის მიხედვით დალაგებული."""
+    agent, admin, err = _authed_agent()
+    if err:
+        return err
+    if not (admin or _is_team_lead(agent)):
+        return jsonify(error="მხოლოდ მენეჯერისთვის/თიმლიდერისთვის"), 403
+    hist = sheets.get_client_history(phone)
+    if not admin:
+        my_team = str(agent.get("team", "")).strip()
+        team_ids = {
+            str(a.get("agent_id")) for a in sheets.get_agents()
+            if str(a.get("team", "")).strip() == my_team
+        }
+        if not any(str(t.get("assigned_to")) in team_ids for t in hist["tasks"]):
+            return jsonify(error="ეს კლიენტი თქვენს გუნდს არასდროს ჰყოლია"), 403
+    timeline = []
+    for t in hist["tasks"]:
+        timeline.append({"kind": "task", "at": t.get("updated_at") or t.get("created_at", ""), "data": t})
+    for r in hist["reports"]:
+        timeline.append({"kind": "report", "at": r.get("created_at", ""), "data": r})
+    for m in hist["meetings"]:
+        timeline.append({"kind": "meeting", "at": m.get("timestamp") or m.get("meeting_date", ""), "data": m})
+    timeline.sort(key=lambda e: str(e.get("at") or ""), reverse=True)
+    return jsonify(phone=phone, timeline=timeline)
 
 
 @app.get("/api/digest")
@@ -921,6 +1207,25 @@ def api_clockout():
         return jsonify(error="მხოლოდ დარეგისტრირებული აგენტისთვის"), 403
     body = request.get_json(silent=True) or {}
     agent_id = agent["agent_id"]
+
+    # მკაცრი წესი: თუ დღეს ამ აგენტს ჰქონდა მინიჭებული/გადაბარებული
+    # კლიენტი (ნებისმიერი დავალება, შექმნილი დღეს), დღის დახურვამდე
+    # კლიენტის ანგარიშის შევსება სავალდებულოა — "გამოტოვება" აღარ
+    # შეიძლება მხოლოდ თვითონ აგენტის სიტყვის მიხედვით. სერვერი თავად
+    # ამოწმებს (client_counts), აგენტის თვითდეკლარაციას აღარ ენდობა.
+    had_client_today = sheets.client_counts(agent_id).get("today", 0) > 0
+    cr = body.get("client_report")
+    cr_valid = (
+        isinstance(cr, dict)
+        and str(cr.get("phone", "")).strip()
+        and str(cr.get("actions", "")).strip()
+    )
+    if had_client_today and not cr_valid:
+        return jsonify(
+            error="დღეს კლიენტი გქონდათ მინიჭებული — დღის დასახურად კლიენტის ანგარიშის შევსება სავალდებულოა",
+            code="client_report_required",
+        ), 400
+
     result = sheets.clock_out(agent_id)
     if result == "ok":
         mode = sheets.get_today_mode(agent_id)
@@ -983,18 +1288,19 @@ def api_clockout():
                         f"⚠️ თქვენი გუნდიდან — {agent['name']}: {label}\n{detail}",
                     )
 
-        # სავალდებულო "კლიენტი გყავდათ დღეს?" კითხვის პასუხი Mini App-იდან
-        # — თუ agent-მა კი უპასუხა და ტელეფონი მოვიდა, ავტომატურად იქმნება
+        # "კლიენტი გყავდათ დღეს?" კითხვის პასუხი Mini App-იდან — თუ
+        # agent-მა ტელეფონი/მოქმედებები შეავსო, ავტომატურად იქმნება
         # client report, ისევე როგორც /clientreport-ით (ბოტის მხარეს).
-        cr = body.get("client_report")
-        if result == "ok" and isinstance(cr, dict) and str(cr.get("phone", "")).strip():
+        # ფოტოებიც (base64) ინახება დისკზე და file_id-ში ერთვის.
+        if result == "ok" and cr_valid:
             try:
+                photo_paths = _save_base64_photos(cr.get("photos"))
                 sheets.create_report(
                     agent_id=agent_id,
                     client_phone=str(cr.get("phone", "")).strip(),
                     actions=str(cr.get("actions", "")).strip(),
                     notes=str(cr.get("notes", "")).strip(),
-                    file_id="",
+                    file_id=",".join(photo_paths),
                 )
             except Exception:
                 log.exception("Mini App clockout client report ვერ შეიქმნა agent_id=%s", agent_id)
@@ -1189,6 +1495,15 @@ def style_css():
 @app.get("/app.js")
 def app_js():
     return send_from_directory(BASE_DIR, "app.js")
+
+
+@app.get("/uploads/reports/<path:filename>")
+def uploaded_report_photo(filename):
+    """კლიენტის რეპორტთან ატვირთული ფოტოს გაცემა — ფაილის სახელი
+    შემთხვევითი (UUID) წარმოქმნილია, პირდაპირ ვერავინ გამოიცნობს;
+    ცალკე ავტორიზაცია არ სჭირდება, რადგან <img src>-ს Mini App-ის
+    custom header-ის დამატება არ შეუძლია."""
+    return send_from_directory(UPLOADS_DIR, filename)
 
 
 def run():

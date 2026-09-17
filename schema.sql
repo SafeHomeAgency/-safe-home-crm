@@ -315,3 +315,27 @@ CREATE INDEX IF NOT EXISTS idx_audit_log_occurred_at ON audit_log (occurred_at);
 -- ცხრილის ნამდვილი უცვლელობისთვის: მოცემული აპლიკაციის db user-ს
 -- REVOKE UPDATE, DELETE ON audit_log — ეს ხელით სრულდება production
 -- ბაზაზე, README.md-ში აღწერილია.
+
+-- =====================================================================
+-- მე-3 რაუნდის დამატებები (ALTER TABLE ... ADD COLUMN IF NOT EXISTS —
+-- უსაფრთხოა უკვე არსებულ, ცოცხალ production ცხრილებზეც ხელახლა
+-- გაშვება, init_schema() ყოველ სტარტზე იძახება).
+-- =====================================================================
+
+-- გაფრთხილების გაუქმების მოთხოვნის ნახევრად-მექანიკური ნაკადი:
+-- მენეჯერი ითხოვს გაუქმებას მიზეზის მითითებით, დირექტორი ამტკიცებს/
+-- უარყოფს. "დამტკიცებული" (dismissed) გაფრთხილება აღარ ითვლება
+-- WARNING_LIMIT-ის ჭერში.
+ALTER TABLE warnings ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'active';
+ALTER TABLE warnings ADD COLUMN IF NOT EXISTS dismiss_reason TEXT NOT NULL DEFAULT '';
+ALTER TABLE warnings ADD COLUMN IF NOT EXISTS dismiss_requested_by TEXT NOT NULL DEFAULT '';
+ALTER TABLE warnings ADD COLUMN IF NOT EXISTS dismiss_requested_by_name TEXT NOT NULL DEFAULT '';
+ALTER TABLE warnings ADD COLUMN IF NOT EXISTS dismiss_requested_at TEXT NOT NULL DEFAULT '';
+ALTER TABLE warnings ADD COLUMN IF NOT EXISTS dismiss_decided_by TEXT NOT NULL DEFAULT '';
+ALTER TABLE warnings ADD COLUMN IF NOT EXISTS dismiss_decided_at TEXT NOT NULL DEFAULT '';
+
+-- აგენტმა უნდა დაადასტუროს კონკრეტული კლიენტის მიღება, როცა
+-- მენეჯერი/ადმინი დავალებას მას აბარებს (მენეჯერს რომ სჩანდეს, ნახა
+-- თუ არა აგენტმა).
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS seen TEXT NOT NULL DEFAULT 'no';
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS seen_at TEXT NOT NULL DEFAULT '';

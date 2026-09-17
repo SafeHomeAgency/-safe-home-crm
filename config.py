@@ -63,8 +63,12 @@ ATTENDANCE_GRACE_MINUTES = int(os.environ.get("ATTENDANCE_GRACE_MINUTES", "15"))
 # დღიური გეგმა (განცხადებების რაოდენობა) — ცალ-ცალკე ონლაინ დღეზე და
 # ოფისის ცვლაზე მყოფი აგენტისთვის (ოფისზე იზომება ჯამურად: საიტი +
 # myhome + ss.ge)
-ONLINE_DAILY_QUOTA = int(os.environ.get("ONLINE_DAILY_QUOTA", "10"))
+ONLINE_DAILY_QUOTA = int(os.environ.get("ONLINE_DAILY_QUOTA", "20"))
 OFFICE_DAILY_QUOTA = int(os.environ.get("OFFICE_DAILY_QUOTA", "20"))
+# ონლაინ დღეზე რომელ საათზე შევახსენოთ აგენტს დაწყება (/clockin), თუ
+# ჯერ არ დაუწყია — ონლაინ რეჟიმს ფიქსირებული საწყისი საათი არა აქვს,
+# ამიტომ ეს მხოლოდ ერთხელადი, დღის შუა საათის შეხსენებაა.
+ONLINE_START_REMINDER_HOUR = int(os.environ.get("ONLINE_START_REMINDER_HOUR", "12"))
 
 # Mini App (ვიზუალური დაშბორდი ტელეგრამშივე). Railway-ზე
 # Settings → Networking → Generate Domain-ით მიღებული საჯარო https

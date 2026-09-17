@@ -43,7 +43,8 @@ CREATE TABLE tasks (
     due_date TEXT DEFAULT '', created_by TEXT DEFAULT '', created_at TEXT DEFAULT '',
     updated_at TEXT DEFAULT '', notified TEXT DEFAULT 'no', lead_type TEXT DEFAULT '',
     client_phone TEXT DEFAULT '', deal_type TEXT DEFAULT '', listing_id TEXT DEFAULT '',
-    viewing_time TEXT DEFAULT '', assigned_to_name TEXT DEFAULT ''
+    viewing_time TEXT DEFAULT '', assigned_to_name TEXT DEFAULT '',
+    seen TEXT DEFAULT 'no', seen_at TEXT DEFAULT ''
 );
 CREATE TABLE reports (
     report_id TEXT PRIMARY KEY, agent_id TEXT DEFAULT '', client_phone TEXT DEFAULT '',
@@ -79,7 +80,11 @@ CREATE TABLE attendance (
 );
 CREATE TABLE warnings (
     warning_id TEXT PRIMARY KEY, agent_id TEXT DEFAULT '', type TEXT DEFAULT '',
-    detail TEXT DEFAULT '', created_at TEXT DEFAULT '', agent_name TEXT DEFAULT ''
+    detail TEXT DEFAULT '', created_at TEXT DEFAULT '', agent_name TEXT DEFAULT '',
+    status TEXT DEFAULT 'active', dismiss_reason TEXT DEFAULT '',
+    dismiss_requested_by TEXT DEFAULT '', dismiss_requested_by_name TEXT DEFAULT '',
+    dismiss_requested_at TEXT DEFAULT '', dismiss_decided_by TEXT DEFAULT '',
+    dismiss_decided_at TEXT DEFAULT ''
 );
 CREATE TABLE shift_swaps (
     swap_id TEXT PRIMARY KEY, agent_id TEXT DEFAULT '', agent_name TEXT DEFAULT '',
@@ -524,7 +529,10 @@ def test_daily_digest_covers_all_six_points():
     check(digest["teams"] == [], "კონკრეტული team-ის მოთხოვნისას teams სია ცარიელია")
 
     company_digest = sp.get_daily_digest(team=None)
-    check("დიჯგუნდი" in company_digest["teams"], "team=None-ზე teams სია ყველა გუნდს შეიცავს")
+    check(
+        any(t.get("team") == "დიჯგუნდი" for t in company_digest["teams"]),
+        "team=None-ზე teams სია ყველა გუნდს შეიცავს (ლეიბლირებული ობიექტებით)",
+    )
 
 
 def test_admin_dashboard_late_flag():
@@ -540,6 +548,149 @@ def test_admin_dashboard_late_flag():
     row = next(t for t in admin["team"] if t["agent_id"] == aid)
     check("late" in row and isinstance(row["late"], bool), "team_rows-ს აქვს ბულეანი 'late' ველი")
     check("late_count" in admin["summary"], "summary-ს აქვს 'late_count'")
+
+
+def test_get_team_directory_returns_labeled_teams():
+    setup()
+    lead1 = sp.add_agent("გაბო", "555030", team="")
+    sp.set_agent_role(lead1, "team_lead")
+    sp.set_agent_team(lead1, lead1)
+    sp.add_agent("წევრი1", "555031", team=lead1)
+    sp.add_agent("წევრი2", "555032", team=lead1)
+
+    lead2 = sp.add_agent("ლიკა", "555033", team="")
+    sp.set_agent_role(lead2, "team_lead")
+    sp.set_agent_team(lead2, lead2)
+
+    directory = sp.get_team_directory()
+    check(len(directory) == 2, "get_team_directory ორივე ლიდერს აბრუნებს")
+    gabo_entry = next(t for t in directory if t["name"] == "გაბო")
+    check(gabo_entry["team"] == lead1, "team-key ლიდერის agent_id-ის ტოლია")
+    check(gabo_entry["member_count"] == 2, "member_count სწორად ითვლის წევრებს (ლიდერის გარეშე)")
+    lika_entry = next(t for t in directory if t["name"] == "ლიკა")
+    check(lika_entry["member_count"] == 0, "წევრების გარეშე ლიდერს member_count=0 აქვს")
+
+    inactive_lead = sp.add_agent("არააქტიური", "555034", team="")
+    sp.set_agent_role(inactive_lead, "team_lead")
+    sp.set_agent_team(inactive_lead, inactive_lead)
+    sp.set_agent_active(inactive_lead, "no")
+    directory2 = sp.get_team_directory()
+    check(
+        all(t["agent_id"] != inactive_lead for t in directory2),
+        "get_team_directory დეაქტივირებულ ლიდერებს არ შეიცავს",
+    )
+
+
+def test_find_duplicate_team_keys_detects_collisions():
+    setup()
+    lead1 = sp.add_agent("დუბლიკატი1", "555035", team="")
+    sp.set_agent_role(lead1, "team_lead")
+    lead2 = sp.add_agent("დუბლიკატი2", "555036", team="")
+    sp.set_agent_role(lead2, "team_lead")
+    sp.set_agent_team(lead1, "საერთოგუნდი")
+    sp.set_agent_team(lead2, "საერთოგუნდი")
+
+    dups = sp.find_duplicate_team_keys()
+    check(len(dups) == 1, "ერთი კოლიზია გამოვლინდა")
+    check(dups[0]["team"] == "საერთოგუნდი", "კოლიზიის team-key სწორია")
+    names = {l["name"] for l in dups[0]["leads"]}
+    check(names == {"დუბლიკატი1", "დუბლიკატი2"}, "ორივე კოლიდირებული ლიდერი ჩამოთვლილია")
+
+    lead3 = sp.add_agent("უნიკალური", "555037", team="")
+    sp.set_agent_role(lead3, "team_lead")
+    sp.set_agent_team(lead3, lead3)
+    dups2 = sp.find_duplicate_team_keys()
+    check(len(dups2) == 1, "უნიკალური team-key-ის მქონე ლიდერი კოლიზიაში არ ხვდება")
+
+
+def test_delete_agent_removes_row_but_keeps_history():
+    setup()
+    aid = sp.add_agent("წასაშლელი", "555040", team="")
+    task_id = sp.create_task(
+        title="ტესტი", description="", assigned_to=aid, priority="საშუალო",
+        due_date="", created_by="admin", client_phone="555999",
+    )
+    check(sp.delete_agent(aid) is True, "delete_agent წარმატებით შლის არსებულ აგენტს")
+    check(sp.delete_agent(aid) is False, "მეორედ იგივე agent_id-ზე False ბრუნდება")
+    check(all(str(a["agent_id"]) != str(aid) for a in sp.get_agents()), "აგენტი აღარ ჩანს get_agents()-ში")
+    task = sp.get_task(task_id) if hasattr(sp, "get_task") else next(
+        (t for t in sp.get_tasks() if t["task_id"] == task_id), None)
+    check(task is not None, "დავალება ისტორიაში უცვლელად რჩება აგენტის წაშლის შემდეგაც")
+
+
+def test_mark_task_seen_only_by_assigned_agent():
+    setup()
+    a1 = sp.add_agent("აგენტი1", "555041", team="")
+    a2 = sp.add_agent("აგენტი2", "555042", team="")
+    task_id = sp.create_task(
+        title="ტესტი", description="", assigned_to=a1, priority="საშუალო",
+        due_date="", created_by="admin", client_phone="555998",
+    )
+    check(sp.mark_task_seen(task_id, a2) is None, "სხვა აგენტს არ შეუძლია დადასტურება")
+    row = sp.mark_task_seen(task_id, a1)
+    check(row is not None and row["seen"] == "yes", "მინიჭებულმა აგენტმა დაადასტურა")
+
+    a3 = sp.add_agent("აგენტი3", "555043", team="")
+    sp.reassign_task(task_id, a3)
+    row2 = next((t for t in sp.get_tasks() if t["task_id"] == task_id), None)
+    check(row2["seen"] == "no", "გადაბარებისას seen ისევ 'no'-ზე ბრუნდება")
+
+
+def test_warning_dismissal_workflow():
+    setup()
+    aid = sp.add_agent("გაფრთხილებული", "555044", team="")
+    manager = sp.add_agent("მენეჯერი", "555045", team="")
+    director = "admin"
+    result = sp.add_warning(aid, "quota_missed", "დღიური გეგმა არ შესრულდა")
+    warning_id = result["warning_id"]
+    check(result["count"] == 1, "პირველი გაფრთხილება ითვლის 1-ს")
+
+    row = sp.request_warning_dismissal(warning_id, manager, "ამ დროს შეხვედრაზე იყო")
+    check(row["status"] == "dismiss_pending", "მოთხოვნის შემდეგ სტატუსი dismiss_pending-ია")
+    check(sp.request_warning_dismissal(warning_id, manager, "ხელახლა") is None,
+          "უკვე მოთხოვნილზე ხელახლა მოთხოვნა არ დაშვებულა")
+
+    approved = sp.decide_warning_dismissal(warning_id, True, director)
+    check(approved["status"] == "dismissed", "დირექტორის დამტკიცებით სტატუსი dismissed-ია")
+
+    dash = sp.get_agent_dashboard(aid)
+    check(dash["warnings"]["count"] == 0, "გაუქმებული გაფრთხილება აღარ ითვლება დაშბორდზე")
+
+
+def test_warning_dismissal_rejection_keeps_it_active():
+    setup()
+    aid = sp.add_agent("გაფრთხილებული2", "555046", team="")
+    manager = sp.add_agent("მენეჯერი2", "555047", team="")
+    result = sp.add_warning(aid, "late", "დაგვიანება")
+    warning_id = result["warning_id"]
+    sp.request_warning_dismissal(warning_id, manager, "მიზეზი")
+    rejected = sp.decide_warning_dismissal(warning_id, False, "admin")
+    check(rejected["status"] == "active", "უარყოფისას გაფრთხილება ისევ active-ზე ბრუნდება")
+    dash = sp.get_agent_dashboard(aid)
+    check(dash["warnings"]["count"] == 1, "უარყოფილი მოთხოვნის შემდეგაც გაფრთხილება ისევ ითვლება")
+
+
+def test_get_today_client_phones_and_all_clients():
+    setup()
+    aid = sp.add_agent("აგენტი", "555048", team="გუნდიX")
+    sp.create_task(title="კლ1", description="", assigned_to=aid, priority="საშუალო",
+                    due_date="", created_by="admin", client_phone="555111")
+    sp.create_task(title="კლ1 დუბლი", description="", assigned_to=aid, priority="საშუალო",
+                    due_date="", created_by="admin", client_phone="555111")
+    sp.create_task(title="კლ2", description="", assigned_to=aid, priority="საშუალო",
+                    due_date="", created_by="admin", client_phone="555222")
+
+    phones = sp.get_today_client_phones(aid)
+    check(sorted(phones) == ["555111", "555222"], "დღევანდელი უნიკალური ტელეფონები სწორია")
+
+    clients = sp.get_all_clients()
+    client_phones = {c["client_phone"] for c in clients}
+    check({"555111", "555222"}.issubset(client_phones), "get_all_clients ორივე კლიენტს შეიცავს")
+
+    clients_team = sp.get_all_clients(team="გუნდიX")
+    check(len(clients_team) == len(clients), "team-ფილტრი იმავე გუნდის კლიენტებს არ ჭრის")
+    clients_other_team = sp.get_all_clients(team="სხვაგუნდი")
+    check(len(clients_other_team) == 0, "სხვა გუნდზე კლიენტი არ ჩანს")
 
 
 # ---------------------------------------------------------------------
