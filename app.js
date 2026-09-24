@@ -50,6 +50,7 @@ const AGENT_TABS = [
   { id: "taskhistory", label: "ისტორია", icon: "📜", lazy: true },
   { id: "meetings", label: "შეხვედრები", icon: "🤝", lazy: true },
   { id: "exclusives", label: "ექსკლუზივები", icon: "🏘️", lazy: true },
+  { id: "myhomejobs", label: "MyHome", icon: "🏘️", lazy: true },
   { id: "questions", label: "კითხვები", icon: "💬", lazy: true },
   { id: "regulations", label: "ინსტრუქცია", icon: "📘", lazy: true },
 ];
@@ -69,6 +70,7 @@ const ADMIN_TABS = [
   { id: "reports", label: "რეპორტები", icon: "📝", lazy: true },
   { id: "clients", label: "კლიენტები", icon: "👥", lazy: true },
   { id: "exclusives", label: "ექსკლუზივები", icon: "🏘️", lazy: true },
+  { id: "myhomejobs", label: "MyHome", icon: "🏘️", lazy: true },
   { id: "questions", label: "კითხვები", icon: "💬", lazy: true },
   { id: "regulations", label: "ინსტრუქცია/წესები", icon: "📘", lazy: true },
 ];
@@ -1881,6 +1883,75 @@ function bindQuestionsActions(role) {
   });
 }
 
+/* ------------------------------------------- MyHome ლისტინგის queue */
+
+const MYHOME_JOB_STATUS_LABEL = {
+  QUEUED: `<span class="badge amber">⏳ რიგშია</span>`,
+  PROCESSING: `<span class="badge amber">⚙️ მუშავდება</span>`,
+  COMPLETED: `<span class="badge green">✅ დასრულდა</span>`,
+  FAILED: `<span class="badge red">❌ ჩავარდა</span>`,
+};
+
+function renderMyHomeJobs(rows, role) {
+  const compose = `
+    <div class="card">
+      <h2>🏘️ MyHome ლისტინგის დამატება</h2>
+      <div class="qa-compose">
+        <input id="mhListingId" type="text" inputmode="numeric" placeholder="MyHome ID (მაგ. 20134412)">
+        <input id="mhPercent" type="text" inputmode="decimal" placeholder="თანამშრომლობის % (არასავალდებულო)">
+        <input id="mhPrice" type="text" inputmode="decimal" placeholder="საბოლოო ფასი (არასავალდებულო)">
+        <textarea id="mhNotes" placeholder="შენიშვნა (არასავალდებულო)"></textarea>
+        <button class="btn" id="mhSubmit">დამატება</button>
+      </div>
+    </div>`;
+
+  const list = !rows.length
+    ? `<div class="card"><div class="empty">ჯერ არცერთი MyHome ID არაა დამატებული</div></div>`
+    : `<div class="card">
+        <h2>📋 ${role === "agent" ? "ჩემი დავალებები" : "MyHome დავალებები"} <span class="cnt">${rows.length}</span></h2>
+        ${rows.map((r) => `
+          <div class="list-row">
+            <div class="avatar">🏠</div>
+            <div class="main">
+              <div class="title">MyHome ID: ${esc(r.myhome_listing_id)}${role !== "agent" ? " · " + esc(r.agent_name) : ""}</div>
+              <div class="sub">${MYHOME_JOB_STATUS_LABEL[r.status] || esc(r.status)}${r.cooperation_percent ? " · " + esc(r.cooperation_percent) + "%" : ""}${r.final_price ? " · 💰 " + esc(r.final_price) : ""}</div>
+              ${r.notes ? `<div class="sub">📝 ${esc(r.notes)}</div>` : ""}
+              <div class="sub">${esc((r.created_at || "").split(" ")[0] || "")}${r.completed_at ? " → " + esc((r.completed_at || "").split(" ")[0] || "") : ""}</div>
+              ${r.status === "FAILED" && r.error_message ? `<div class="sub">⚠️ ${esc(r.error_message)}</div>` : ""}
+            </div>
+          </div>`).join("")}
+      </div>`;
+  return compose + list;
+}
+
+function bindMyHomeJobsActions() {
+  const btn = document.getElementById("mhSubmit");
+  if (!btn) return;
+  btn.onclick = async () => {
+    const listingId = (document.getElementById("mhListingId").value || "").trim();
+    const percent = (document.getElementById("mhPercent").value || "").trim();
+    const price = (document.getElementById("mhPrice").value || "").trim();
+    const notes = (document.getElementById("mhNotes").value || "").trim();
+    if (!listingId || !/^\d+$/.test(listingId)) { toast("შეიყვანეთ სწორი MyHome ID (მხოლოდ ციფრები)"); return; }
+    btn.disabled = true;
+    try {
+      await api("/api/myhome-jobs", {
+        method: "POST",
+        body: JSON.stringify({
+          myhome_listing_id: listingId,
+          cooperation_percent: percent,
+          final_price: price,
+          notes,
+        }),
+      });
+      tg && tg.HapticFeedback && tg.HapticFeedback.notificationOccurred("success");
+      toast("დაემატა რიგში ✅");
+      delete lazyCache.myhomejobs;
+      await renderContent();
+    } catch (e) { toast(e.message); btn.disabled = false; }
+  };
+}
+
 /* ------------------------------------------------ აგენტის დამატება/
    გათავისუფლების მოთხოვნები (მენეჯერი ითხოვს, ადმინი ამტკიცებს) */
 const AGENT_REQUEST_STATUS_LABEL = { pending: "⏳ მოლოდინში", approved: "✅ დამტკიცებული", rejected: "❌ უარყოფილი" };
@@ -2202,6 +2273,7 @@ function renderRegulations(payload) {
 
 const LAZY_ENDPOINTS = {
   exclusives: "/api/exclusives",
+  myhomejobs: "/api/myhome-jobs",
   swaps: "/api/swaps",
   reports: "/api/reports",
   questions: "/api/questions",
@@ -2296,6 +2368,7 @@ async function renderContent() {
       }
       const rows = lazyCache[tab];
       if (tab === "exclusives") { content.innerHTML = renderExclusives(rows); bindExclusivesActions(rows); }
+      else if (tab === "myhomejobs") { content.innerHTML = renderMyHomeJobs(rows, state.role); bindMyHomeJobsActions(); }
       else if (tab === "reports") { content.innerHTML = renderReports(rows); bindReportsActions(rows); }
       else if (tab === "swaps") { content.innerHTML = renderSwaps(rows); bindSwapsActions(rows); }
       else if (tab === "questions") { content.innerHTML = renderQuestions(rows, state.role); bindQuestionsActions(state.role); }

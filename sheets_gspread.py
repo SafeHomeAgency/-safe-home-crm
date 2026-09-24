@@ -208,6 +208,21 @@ AGENT_REQUESTS_HEADERS = [
     "created_at", "decided_at", "decided_by",
 ]
 
+# MyHome სქრეპერის queue (worker.py, home-automation რეპო, ცალკე
+# კომპიუტერზე) — აგენტი შეაქვს ID-ს Mini App-იდან, worker.py
+# ამუშავებს და აქვე წერს სტატუსს. status: QUEUED -> PROCESSING ->
+# COMPLETED/FAILED. პაროლები აქ არასდროს ინახება.
+MYHOME_JOBS_HEADERS = [
+    "job_id", "agent_id", "agent_name", "team", "manager_label",
+    "myhome_listing_id", "cooperation_percent", "final_price", "notes",
+    "status", "error_message", "retry_count",
+    "created_at", "started_at", "completed_at",
+]
+
+# თიმი -> მენეჯერის MyHome ანგარიშის (non-secret) იარლიყი. ნამდვილი
+# email/password მხოლოდ worker.py-ს მანქანაზეა ლოკალურად.
+MYHOME_ACCOUNTS_HEADERS = ["team", "manager_label", "manager_name", "updated_at"]
+
 
 def _get_client():
     """
@@ -276,6 +291,8 @@ def ensure_sheets():
         (config.QUESTIONS_SHEET_NAME, QUESTIONS_HEADERS, 1000),
         (config.EXCLUSIVE_SHARES_SHEET_NAME, EXCLUSIVE_SHARES_HEADERS, 2000),
         (config.AGENT_REQUESTS_SHEET_NAME, AGENT_REQUESTS_HEADERS, 500),
+        (config.MYHOME_JOBS_SHEET_NAME, MYHOME_JOBS_HEADERS, 1000),
+        (config.MYHOME_ACCOUNTS_SHEET_NAME, MYHOME_ACCOUNTS_HEADERS, 50),
     ]
     for name, headers, rows in sheets_to_ensure:
         try:
@@ -336,6 +353,14 @@ def _exclusive_shares_ws():
 
 def _agent_requests_ws():
     return _worksheet(config.AGENT_REQUESTS_SHEET_NAME)
+
+
+def _myhome_jobs_ws():
+    return _worksheet(config.MYHOME_JOBS_SHEET_NAME)
+
+
+def _myhome_accounts_ws():
+    return _worksheet(config.MYHOME_ACCOUNTS_SHEET_NAME)
 
 
 def _now():
@@ -1831,3 +1856,176 @@ def get_daily_digest(team: str | None = None, days: int = 1) -> dict:
         "attention": attention,
         "teams": teams,
     }
+
+
+# ---------- MyHome სქრეპერის queue (worker.py, home-automation რეპო) ----------
+
+def get_myhome_accounts() -> list[dict]:
+    with _lock:
+        return _cached_records(config.MYHOME_ACCOUNTS_SHEET_NAME)
+
+
+def get_myhome_account_for_team(team: str) -> dict | None:
+    team = str(team or "").strip()
+    return next(
+        (r for r in get_myhome_accounts() if str(r.get("team", "")).strip() == team), None
+    )
+
+
+def set_myhome_account(team: str, manager_label: str, manager_name: str = "") -> None:
+    """თიმისთვის მენეჯერის MyHome ანგარიშის იარლიყის მინიჭება/განახლება
+    (ადმინის მოქმედება) — არასდროს ინახავს ნამდვილ პაროლს, მხოლოდ
+    იარლიყს, რომლითაც worker.py თავის ლოკალურ ანგარიშთა სიაში პოულობს
+    შესაბამის ავტორიზაციის მონაცემებს."""
+    team = str(team or "").strip()
+    with _lock:
+        ws = _myhome_accounts_ws()
+        cell = ws.find(team, in_column=1)
+        if cell:
+            ws.update_cell(cell.row, MYHOME_ACCOUNTS_HEADERS.index("manager_label") + 1, manager_label)
+            ws.update_cell(cell.row, MYHOME_ACCOUNTS_HEADERS.index("manager_name") + 1, manager_name)
+            ws.update_cell(cell.row, MYHOME_ACCOUNTS_HEADERS.index("updated_at") + 1, _now())
+        else:
+            ws.append_row([team, manager_label, manager_name, _now()])
+        _invalidate(config.MYHOME_ACCOUNTS_SHEET_NAME)
+
+
+def create_myhome_job(agent_id: str, fields: dict) -> str:
+    """აგენტმა Mini App-იდან შეიყვანა MyHome ID — job-ის დამატება
+    queue-ში "QUEUED" სტატუსით. `fields`-ში წინასწარ უნდა იყოს
+    გამოთვლილი team/manager_label (webserver.py წყვეტს agent -> team ->
+    manager_label-ს, აქ მხოლოდ ინახება)."""
+    with _lock:
+        job_id = uuid.uuid4().hex[:8]
+        row = []
+        for h in MYHOME_JOBS_HEADERS:
+            if h == "job_id":
+                row.append(job_id)
+            elif h == "agent_id":
+                row.append(agent_id)
+            elif h == "agent_name":
+                row.append(agent_name_by_id(agent_id))
+            elif h == "status":
+                row.append("QUEUED")
+            elif h == "retry_count":
+                row.append("0")
+            elif h == "created_at":
+                row.append(_now())
+            elif h in ("started_at", "completed_at", "error_message"):
+                row.append("")
+            else:
+                row.append(fields.get(h, ""))
+        _myhome_jobs_ws().append_row(row)
+        _invalidate(config.MYHOME_JOBS_SHEET_NAME)
+        return job_id
+
+
+def get_myhome_jobs(agent_id: str | None = None, team: str | None = None,
+                     status: str | None = None) -> list[dict]:
+    with _lock:
+        rows = _cached_records(config.MYHOME_JOBS_SHEET_NAME)
+    if agent_id:
+        rows = [r for r in rows if str(r.get("agent_id")) == str(agent_id)]
+    if team:
+        rows = [r for r in rows if str(r.get("team", "")).strip() == str(team).strip()]
+    if status:
+        rows = [r for r in rows if str(r.get("status")) == status]
+    return sorted(rows, key=lambda r: str(r.get("created_at", "")), reverse=True)
+
+
+def find_myhome_job(job_id: str) -> dict | None:
+    return next(
+        (r for r in get_myhome_jobs() if str(r.get("job_id")) == str(job_id)), None
+    )
+
+
+def find_active_myhome_job(myhome_listing_id: str) -> dict | None:
+    """დუბლიკატის დაცვა: იგივე MyHome ID-ზე უკვე მიმდინარე (QUEUED ან
+    PROCESSING) job არსებობს თუ არა. დასრულებულ/ჩავარდნილ job-ებს არ
+    ეხება — იმავე ID-ის ხელახლა გაგზავნა მოგვიანებით დაშვებულია."""
+    listing_id = str(myhome_listing_id or "").strip()
+    if not listing_id:
+        return None
+    return next(
+        (
+            r for r in get_myhome_jobs()
+            if str(r.get("myhome_listing_id", "")).strip() == listing_id
+            and str(r.get("status")) in ("QUEUED", "PROCESSING")
+        ),
+        None,
+    )
+
+
+def _update_myhome_job_fields(job_id: str, updates: dict) -> dict | None:
+    with _lock:
+        ws = _myhome_jobs_ws()
+        cell = ws.find(job_id, in_column=1)
+        if not cell:
+            return None
+        for field, value in updates.items():
+            ws.update_cell(cell.row, MYHOME_JOBS_HEADERS.index(field) + 1, value)
+        row = ws.row_values(cell.row)
+        _invalidate(config.MYHOME_JOBS_SHEET_NAME)
+        return dict(zip(MYHOME_JOBS_HEADERS, row))
+
+
+def claim_next_myhome_job(manager_label: str) -> dict | None:
+    """worker.py გამოძახებით: ამ მენეჯერის ანგარიშზე უძველესი "QUEUED"
+    job-ის დაკავება — მაშინვე "PROCESSING"-ში გადაყვანა, რომ მეორე
+    (თუნდაც შემთხვევით ერთდროულად გაშვებული) worker-მა იგივე ის
+    ხელახლა არ დაიწყოს. ერთდროულად მხოლოდ ერთი worker-ის დაშვებით
+    (რეკომენდებული) ეს საკმარისად უსაფრთხოა."""
+    manager_label = str(manager_label or "").strip()
+    candidates = [
+        r for r in get_myhome_jobs(status="QUEUED")
+        if str(r.get("manager_label", "")).strip() == manager_label
+    ]
+    if not candidates:
+        return None
+    oldest = sorted(candidates, key=lambda r: str(r.get("created_at", "")))[0]
+    return _update_myhome_job_fields(str(oldest["job_id"]), {
+        "status": "PROCESSING",
+        "started_at": _now(),
+    })
+
+
+def complete_myhome_job(job_id: str, status: str, error_message: str = "") -> dict | None:
+    """status: "COMPLETED" ან "FAILED"."""
+    return _update_myhome_job_fields(str(job_id), {
+        "status": status,
+        "error_message": error_message,
+        "completed_at": _now(),
+    })
+
+
+def reset_stale_myhome_jobs(older_than_minutes: int, max_retries: int) -> list[dict]:
+    """worker.py-ს crash-ის/restart-ის დაცვა: "PROCESSING"-ში
+    `older_than_minutes`-ზე მეტხანს გაჭედილი job-ები ბრუნდება
+    "QUEUED"-ში ხელახლა (retry_count იზრდება), ან თუ უკვე `max_retries`
+    მიაღწია — საბოლოოდ "FAILED". აბრუნებს შეცვლილი job-ების სიას (რომ
+    გამომძახებელმა შეატყობინოს შესაბამის აგენტს, საჭიროების შემთხვევაში)."""
+    cutoff = datetime.datetime.now() - datetime.timedelta(minutes=older_than_minutes)
+    changed = []
+    for r in get_myhome_jobs(status="PROCESSING"):
+        started = r.get("started_at") or r.get("created_at")
+        try:
+            started_dt = datetime.datetime.strptime(str(started).strip(), "%Y-%m-%d %H:%M")
+        except (ValueError, TypeError):
+            continue
+        if started_dt > cutoff:
+            continue
+        retry_count = int(str(r.get("retry_count") or "0").strip() or "0")
+        if retry_count >= max_retries:
+            updated = complete_myhome_job(
+                r["job_id"], "FAILED",
+                error_message="worker-ი გაითიშა დამუშავებისას, ცდების ლიმიტი ამოიწურა",
+            )
+        else:
+            updated = _update_myhome_job_fields(str(r["job_id"]), {
+                "status": "QUEUED",
+                "retry_count": str(retry_count + 1),
+                "started_at": "",
+            })
+        if updated:
+            changed.append(updated)
+    return changed

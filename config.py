@@ -45,6 +45,21 @@ EXCLUSIVES_SHEET_NAME = "Exclusives"
 QUESTIONS_SHEET_NAME = "Questions"
 EXCLUSIVE_SHARES_SHEET_NAME = "ExclusiveShares"
 AGENT_REQUESTS_SHEET_NAME = "AgentRequests"
+MYHOME_JOBS_SHEET_NAME = "MyHomeJobs"
+MYHOME_ACCOUNTS_SHEET_NAME = "MyHomeAccounts"
+
+# MyHome სქრეპერის queue-ს ინტეგრაცია: worker.py (გარეთა, ცალკე
+# კომპიუტერზე მომუშავე პროცესი) იძახებს webserver.py-ს "/internal/..."
+# endpoint-ებს ამ საერთო გასაღებით (Authorization header) — Telegram
+# initData-ს მაგივრად, რადგან ეს machine-to-machine გამოძახებაა, არა
+# Mini App-იდან. ცარიელი ნიშნავს, რომ ეს endpoint-ები გამორთულია
+# (401-ს დააბრუნებენ), სანამ ვინმე შეგნებულად არ დააყენებს.
+MYHOME_WORKER_API_KEY = os.environ.get("MYHOME_WORKER_API_KEY", "").strip()
+# რამდენი წუთის განმავლობაში "PROCESSING"-ში გაჭედილი job ითვლება
+# "worker ჩამოვარდნილად" და უბრუნდება "QUEUED"-ს ხელახლა (retry_count-ის
+# გაზრდით) — worker-ის restart-ის/crash-ის დაცვა.
+MYHOME_JOB_STALE_MINUTES = int(os.environ.get("MYHOME_JOB_STALE_MINUTES", "15"))
+MYHOME_JOB_MAX_RETRIES = int(os.environ.get("MYHOME_JOB_MAX_RETRIES", "3"))
 
 # თვეში მაქსიმუმ რამდენჯერ შეუძლია აგენტს სმენის გაცვლის მოთხოვნა
 SHIFT_SWAP_MONTHLY_LIMIT = int(os.environ.get("SHIFT_SWAP_MONTHLY_LIMIT", "2"))

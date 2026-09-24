@@ -1606,6 +1606,29 @@ async def setrole_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("ასეთი agent_id ვერ ვიპოვე. სია: /agents")
 
 
+async def setmyhome_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """ადმინი: /setmyhome <team> <manager_label> [მენეჯერის სახელი...] —
+    თიმს მიაბამს, რომელ MyHome ანგარიშზე უნდა გამოქვეყნდეს ამ თიმის
+    აგენტების მიერ Mini App-იდან შემოტანილი ლისტინგები. ნამდვილი
+    email/password აქ არასდროს იწერება — manager_label მხოლოდ
+    იარლიყია, რომლითაც worker.py (ცალკე, home-automation კომპიუტერზე)
+    თავის ლოკალურ ანგარიშთა სიაში პოულობს შესაბამის ავტორიზაციის
+    მონაცემებს."""
+    if not is_admin(update.effective_chat.id):
+        return
+    if len(context.args) < 2:
+        await update.message.reply_text(
+            "გამოყენება: /setmyhome <team> <manager_label> [მენეჯერის სახელი]"
+        )
+        return
+    team, manager_label = context.args[0], context.args[1]
+    manager_name = " ".join(context.args[2:])
+    sheets.set_myhome_account(team, manager_label, manager_name)
+    await update.message.reply_text(
+        f"✅ თიმი '{team}' მიბმულია MyHome ანგარიშზე '{manager_label}'."
+    )
+
+
 async def setnumber_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """ადმინი: /setnumber <agent_id> <შიდა ნომერი> — საწყისი შიდა ნომრის
     მინიჭება (შემდეგ აგენტებს შეუძლიათ ერთმანეთში გაცვლა /swapnumber-ით)."""
@@ -2133,6 +2156,46 @@ async def remind_before_shift_edge(context: ContextTypes.DEFAULT_TYPE):
                 log.exception("ცვლის დასრულების შეხსენება ვერ გაეგზავნა agent_id=%s", agent_id)
 
 
+async def check_myhome_jobs_stale(context: ContextTypes.DEFAULT_TYPE):
+    """worker.py-ს (ცალკე კომპიუტერზე მომუშავე MyHome სქრეპერის queue
+    worker, home-automation რეპო) crash-ის/restart-ის დაცვა:
+    "PROCESSING"-ში დიდხანს გაჭედილი job-ები ბრუნდება "QUEUED"-ში
+    ხელახლა საცდელად, ან საბოლოოდ "FAILED"-ში, თუ ცდების ლიმიტი
+    ამოიწურა — შესაბამის აგენტს ეცნობება."""
+    try:
+        changed = sheets.reset_stale_myhome_jobs(
+            config.MYHOME_JOB_STALE_MINUTES, config.MYHOME_JOB_MAX_RETRIES
+        )
+    except Exception:
+        log.exception("MyHome job-ების stale-შემოწმება ვერ გაეშვა")
+        return
+    if not changed:
+        return
+    agents = sheets.get_agents()
+    for row in changed:
+        agent = next(
+            (a for a in agents if str(a.get("agent_id")) == str(row.get("agent_id"))), None
+        )
+        if not (agent and agent.get("telegram_chat_id")):
+            continue
+        try:
+            if row.get("status") == "FAILED":
+                text = (
+                    f"❌ MyHome ID {row.get('myhome_listing_id')} — ვერ დამუშავდა "
+                    f"(worker გაითიშა, ცდების ლიმიტი ამოიწურა)."
+                )
+            else:
+                text = (
+                    f"⚠️ MyHome ID {row.get('myhome_listing_id')} — დამუშავება შეწყდა "
+                    f"მოულოდნელად, თავიდან ჩადგა რიგში."
+                )
+            await context.bot.send_message(chat_id=int(agent["telegram_chat_id"]), text=text)
+        except Exception:
+            log.exception(
+                "MyHome stale-შეტყობინება ვერ გაეგზავნა agent_id=%s", row.get("agent_id")
+            )
+
+
 async def check_manager_notifications(context: ContextTypes.DEFAULT_TYPE):
     """5 წუთში ერთხელ — ადმინისგან დამოუკიდებლად, კონკრეტულ თიმლიდერს
     ატყობინებს, თუ მისი გუნდის წევრს ცვლის დაწყებიდან 30 წუთში ჯერ არ
@@ -2377,6 +2440,7 @@ def main():
     app.add_handler(CommandHandler("migratepg", migratepg_cmd))
     app.add_handler(CommandHandler("setteam", setteam_cmd))
     app.add_handler(CommandHandler("setrole", setrole_cmd))
+    app.add_handler(CommandHandler("setmyhome", setmyhome_cmd))
     app.add_handler(CommandHandler("setnumber", setnumber_cmd))
     app.add_handler(CommandHandler("exclusives", exclusives_list))
     app.add_handler(CommandHandler("swaps", swaps_list))
@@ -2541,6 +2605,7 @@ def main():
         )
         app.job_queue.run_repeating(remind_before_shift_edge, interval=300, first=60)
         app.job_queue.run_repeating(check_manager_notifications, interval=300, first=90)
+        app.job_queue.run_repeating(check_myhome_jobs_stale, interval=300, first=150)
 
     log.info("ბოტი გაშვებულია...")
     # drop_pending_updates=True: სტარტზე ასუფთავებს დაგროვილ ძველ/გაფუჭებულ

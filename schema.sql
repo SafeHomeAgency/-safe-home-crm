@@ -339,3 +339,40 @@ ALTER TABLE warnings ADD COLUMN IF NOT EXISTS dismiss_decided_at TEXT NOT NULL D
 -- თუ არა აგენტმა).
 ALTER TABLE tasks ADD COLUMN IF NOT EXISTS seen TEXT NOT NULL DEFAULT 'no';
 ALTER TABLE tasks ADD COLUMN IF NOT EXISTS seen_at TEXT NOT NULL DEFAULT '';
+
+-- =====================================================================
+-- MyHome სქრეპერის queue ინტეგრაცია — აგენტი Mini App-იდან შეაქვს
+-- MyHome ლისტინგის ID, ცალკე (Windows) კომპიუტერზე მომუშავე worker.py
+-- (home-automation რეპოში) ამუშავებს რიგში, სწორ მენეჯერის MyHome
+-- ანგარიშზე აქვეყნებს. აქ ინახება მხოლოდ job-ის სტატუსი და
+-- non-secret მენეჯერის მიბმა (team -> manager_label) — ნამდვილი MyHome
+-- პაროლები აქ არასდროს ინახება, ისინი მხოლოდ worker.py-ს მანქანაზეა.
+-- =====================================================================
+
+CREATE TABLE IF NOT EXISTS myhome_jobs (
+    job_id               TEXT PRIMARY KEY,
+    agent_id             TEXT NOT NULL DEFAULT '',
+    agent_name           TEXT NOT NULL DEFAULT '',
+    team                 TEXT NOT NULL DEFAULT '',
+    manager_label        TEXT NOT NULL DEFAULT '',
+    myhome_listing_id    TEXT NOT NULL DEFAULT '',
+    cooperation_percent  TEXT NOT NULL DEFAULT '',
+    final_price          TEXT NOT NULL DEFAULT '',
+    notes                TEXT NOT NULL DEFAULT '',
+    status               TEXT NOT NULL DEFAULT 'QUEUED',
+    error_message        TEXT NOT NULL DEFAULT '',
+    retry_count          TEXT NOT NULL DEFAULT '0',
+    created_at           TEXT NOT NULL DEFAULT '',
+    started_at           TEXT NOT NULL DEFAULT '',
+    completed_at         TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_myhome_jobs_agent_id ON myhome_jobs (agent_id);
+CREATE INDEX IF NOT EXISTS idx_myhome_jobs_status ON myhome_jobs (status);
+CREATE INDEX IF NOT EXISTS idx_myhome_jobs_listing_id ON myhome_jobs (myhome_listing_id);
+
+CREATE TABLE IF NOT EXISTS myhome_accounts (
+    team                 TEXT PRIMARY KEY,
+    manager_label        TEXT NOT NULL DEFAULT '',
+    manager_name         TEXT NOT NULL DEFAULT '',
+    updated_at           TEXT NOT NULL DEFAULT ''
+);

@@ -299,6 +299,70 @@ def api_exclusives_share():
     return jsonify(ok=True, share=result)
 
 
+@app.get("/api/myhome-jobs")
+def api_myhome_jobs():
+    """აგენტს — საკუთარი job-ები; თიმლიდერს — თავისი თიმის; ადმინს —
+    ყველა (იგივე თიმის-ფილტრის პრინციპი, რაც `/api/reports`-ს აქვს)."""
+    agent, admin, err = _authed_agent()
+    if err:
+        return err
+    if admin:
+        rows = sheets.get_myhome_jobs()
+    elif _is_team_lead(agent):
+        rows = sheets.get_myhome_jobs(team=agent.get("team", ""))
+    elif agent:
+        rows = sheets.get_myhome_jobs(agent_id=agent["agent_id"])
+    else:
+        return jsonify(error="ავტორიზაცია საჭიროა"), 403
+    return jsonify(rows=rows)
+
+
+@app.post("/api/myhome-jobs")
+def api_myhome_jobs_create():
+    """აგენტი Mini App-იდან შეაქვს MyHome ID (+ %, ფასი, შენიშვნა) —
+    queue-ში ემატება "QUEUED" job. worker.py (ცალკე კომპიუტერზე)
+    შემდეგ თავად პოულობს, რომელ მენეჯერის ანგარიშზე უნდა გამოქვეყნდეს
+    (agent -> team -> myhome_accounts) — აგენტს არაფრის არჩევა არ
+    სჭირდება და MyHome ანგარიშის შესახებ არაფერს ხედავს."""
+    agent, admin, err = _authed_agent()
+    if err:
+        return err
+    if not agent:
+        return jsonify(error="მხოლოდ დარეგისტრირებული აგენტისთვის"), 403
+
+    body = request.get_json(silent=True) or {}
+    listing_id = str(body.get("myhome_listing_id") or "").strip()
+    if not listing_id or not listing_id.isdigit():
+        return jsonify(error="MyHome ID არასწორია — მხოლოდ ციფრები"), 400
+
+    team = str(agent.get("team", "")).strip()
+    account = sheets.get_myhome_account_for_team(team)
+    if not account or not str(account.get("manager_label", "")).strip():
+        return jsonify(
+            error="თქვენი გუნდისთვის MyHome ანგარიში ჯერ არაა მიბმული — მიმართეთ ადმინს"
+        ), 409
+
+    existing = sheets.find_active_myhome_job(listing_id)
+    if existing:
+        return jsonify(error="ეს MyHome ID უკვე რიგშია/მუშავდება", row=existing), 409
+
+    job_id = sheets.create_myhome_job(agent["agent_id"], {
+        "team": team,
+        "manager_label": account.get("manager_label", ""),
+        "myhome_listing_id": listing_id,
+        "cooperation_percent": str(body.get("cooperation_percent") or "").strip(),
+        "final_price": str(body.get("final_price") or "").strip(),
+        "notes": str(body.get("notes") or "").strip(),
+    })
+    row = sheets.find_myhome_job(job_id)
+    if agent.get("telegram_chat_id"):
+        _send_telegram_message(
+            int(agent["telegram_chat_id"]),
+            f"🏠 MyHome ID {listing_id} დაემატა რიგში (QUEUED) — შეგატყობინებთ დამუშავებისას.",
+        )
+    return jsonify(ok=True, row=row)
+
+
 @app.post("/api/reports/rate")
 def api_reports_rate():
     agent, admin, err = _authed_agent()
@@ -1504,6 +1568,79 @@ def api_dayoff_decide():
             int(a2["telegram_chat_id"]),
             f"თქვენი Day off მოთხოვნა ({row.get('date')}) — {label}",
         )
+    return jsonify(ok=True, row=row)
+
+
+# --------------------------------------------------- internal (worker.py)
+# MyHome სქრეპერის queue worker (home-automation რეპო, ცალკე, Windows
+# კომპიუტერზე მომუშავე პროცესი) იძახებს ამ ორ endpoint-ს. ეს
+# machine-to-machine გამოძახებაა (არა Mini App-იდან) — ამიტომ Telegram
+# initData-ს მაგივრად საერთო გასაღები (Authorization: Bearer <key>).
+# ცარიელი MYHOME_WORKER_API_KEY ნიშნავს, რომ ეს გამორთულია (404).
+
+def _authed_worker():
+    if not config.MYHOME_WORKER_API_KEY:
+        return jsonify(error="ეს endpoint გამორთულია"), 404
+    expected = f"Bearer {config.MYHOME_WORKER_API_KEY}"
+    if not hmac.compare_digest(request.headers.get("Authorization", ""), expected):
+        return jsonify(error="ავტორიზაცია ვერ დადასტურდა"), 401
+    return None
+
+
+@app.get("/internal/myhome-jobs/next")
+def internal_myhome_jobs_next():
+    """worker.py ყოველ SCRAPER_POLL_INTERVAL წამში — ამ მენეჯერის
+    (`?manager_label=`) უძველესი "QUEUED" job-ის ატომური დაკავება
+    ("PROCESSING"-ში გადაყვანით). job არაა → `row: null`."""
+    err = _authed_worker()
+    if err:
+        return err
+    manager_label = str(request.args.get("manager_label") or "").strip()
+    if not manager_label:
+        return jsonify(error="manager_label საჭიროა"), 400
+    row = sheets.claim_next_myhome_job(manager_label)
+    if not row:
+        return jsonify(row=None)
+    agent = next(
+        (a for a in sheets.get_agents() if str(a.get("agent_id")) == str(row.get("agent_id"))),
+        None,
+    )
+    if agent and agent.get("telegram_chat_id"):
+        _send_telegram_message(
+            int(agent["telegram_chat_id"]),
+            f"⏳ MyHome ID {row.get('myhome_listing_id')} — მუშავდება...",
+        )
+    return jsonify(row=row)
+
+
+@app.post("/internal/myhome-jobs/<job_id>/complete")
+def internal_myhome_jobs_complete(job_id):
+    """worker.py-ს job-ის დამუშავების შედეგის ანგარიში
+    (`{"status": "COMPLETED"|"FAILED", "error_message": "..."}"`)."""
+    err = _authed_worker()
+    if err:
+        return err
+    body = request.get_json(silent=True) or {}
+    status = str(body.get("status") or "").strip().upper()
+    if status not in ("COMPLETED", "FAILED"):
+        return jsonify(error="status უნდა იყოს COMPLETED ან FAILED"), 400
+    error_message = str(body.get("error_message") or "").strip()
+    row = sheets.complete_myhome_job(job_id, status, error_message)
+    if not row:
+        return jsonify(error="job ვერ მოიძებნა"), 404
+    agent = next(
+        (a for a in sheets.get_agents() if str(a.get("agent_id")) == str(row.get("agent_id"))),
+        None,
+    )
+    if agent and agent.get("telegram_chat_id"):
+        if status == "COMPLETED":
+            text = f"✅ MyHome ID {row.get('myhome_listing_id')} — წარმატებით აიტვირთა."
+        else:
+            text = (
+                f"❌ MyHome ID {row.get('myhome_listing_id')} — ვერ აიტვირთა. "
+                f"მიზეზი: {error_message or 'უცნობი'}"
+            )
+        _send_telegram_message(int(agent["telegram_chat_id"]), text)
     return jsonify(ok=True, row=row)
 
 

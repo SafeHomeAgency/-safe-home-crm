@@ -89,6 +89,13 @@ AGENT_REQUESTS_HEADERS = [
     "target_agent_id", "name", "phone", "reason", "status",
     "created_at", "decided_at", "decided_by",
 ]
+MYHOME_JOBS_HEADERS = [
+    "job_id", "agent_id", "agent_name", "team", "manager_label",
+    "myhome_listing_id", "cooperation_percent", "final_price", "notes",
+    "status", "error_message", "retry_count",
+    "created_at", "started_at", "completed_at",
+]
+MYHOME_ACCOUNTS_HEADERS = ["team", "manager_label", "manager_name", "updated_at"]
 
 
 # --------------------------------------------------------------- helpers
@@ -1485,3 +1492,163 @@ def get_daily_digest(team: str | None = None, days: int = 1) -> dict:
         "attention": attention,
         "teams": teams,
     }
+
+
+# ---------- MyHome სქრეპერის queue (worker.py, home-automation რეპო) ----------
+
+def get_myhome_accounts() -> list[dict]:
+    with _lock:
+        return db.query_all("SELECT * FROM myhome_accounts")
+
+
+def get_myhome_account_for_team(team: str) -> dict | None:
+    with _lock:
+        return db.query_one(
+            "SELECT * FROM myhome_accounts WHERE team = %s", (str(team or "").strip(),)
+        )
+
+
+def set_myhome_account(team: str, manager_label: str, manager_name: str = "") -> None:
+    team = str(team or "").strip()
+    with _lock:
+        rc = db.execute(
+            "UPDATE myhome_accounts SET manager_label = %s, manager_name = %s, "
+            "updated_at = %s WHERE team = %s",
+            (manager_label, manager_name, _now(), team),
+        )
+        if not rc:
+            _insert(
+                "myhome_accounts", MYHOME_ACCOUNTS_HEADERS,
+                [team, manager_label, manager_name, _now()],
+            )
+
+
+def create_myhome_job(agent_id: str, fields: dict) -> str:
+    with _lock:
+        job_id = uuid.uuid4().hex[:8]
+        values = []
+        for h in MYHOME_JOBS_HEADERS:
+            if h == "job_id":
+                values.append(job_id)
+            elif h == "agent_id":
+                values.append(agent_id)
+            elif h == "agent_name":
+                values.append(agent_name_by_id(agent_id))
+            elif h == "status":
+                values.append("QUEUED")
+            elif h == "retry_count":
+                values.append("0")
+            elif h == "created_at":
+                values.append(_now())
+            elif h in ("started_at", "completed_at", "error_message"):
+                values.append("")
+            else:
+                values.append(fields.get(h, ""))
+        _insert("myhome_jobs", MYHOME_JOBS_HEADERS, values)
+        return job_id
+
+
+def get_myhome_jobs(agent_id: str | None = None, team: str | None = None,
+                     status: str | None = None) -> list[dict]:
+    with _lock:
+        rows = db.query_all("SELECT * FROM myhome_jobs")
+    if agent_id:
+        rows = [r for r in rows if str(r.get("agent_id")) == str(agent_id)]
+    if team:
+        rows = [r for r in rows if str(r.get("team", "")).strip() == str(team).strip()]
+    if status:
+        rows = [r for r in rows if str(r.get("status")) == status]
+    return sorted(rows, key=lambda r: str(r.get("created_at", "")), reverse=True)
+
+
+def find_myhome_job(job_id: str) -> dict | None:
+    with _lock:
+        return db.query_one("SELECT * FROM myhome_jobs WHERE job_id = %s", (str(job_id),))
+
+
+def find_active_myhome_job(myhome_listing_id: str) -> dict | None:
+    """დუბლიკატის დაცვა: იგივე MyHome ID-ზე უკვე მიმდინარე (QUEUED ან
+    PROCESSING) job არსებობს თუ არა. დასრულებულ/ჩავარდნილ job-ებს არ
+    ეხება — იმავე ID-ის ხელახლა გაგზავნა მოგვიანებით დაშვებულია."""
+    listing_id = str(myhome_listing_id or "").strip()
+    if not listing_id:
+        return None
+    with _lock:
+        return db.query_one(
+            "SELECT * FROM myhome_jobs WHERE myhome_listing_id = %s "
+            "AND status IN ('QUEUED', 'PROCESSING') LIMIT 1",
+            (listing_id,),
+        )
+
+
+def claim_next_myhome_job(manager_label: str) -> dict | None:
+    """worker.py გამოძახებით: ამ მენეჯერის ანგარიშზე უძველესი "QUEUED"
+    job-ის დაკავება — მაშინვე "PROCESSING"-ში გადაყვანა. ერთდროულად
+    მხოლოდ ერთი worker-ის დაშვებით (რეკომენდებული) ეს საკმარისად
+    უსაფრთხოა; მკაცრი, ბევრ worker-ზე გათვლილი атомურობა (SELECT ...
+    FOR UPDATE SKIP LOCKED) ჯერჯერობით საჭირო არაა."""
+    manager_label = str(manager_label or "").strip()
+    with _lock:
+        row = db.query_one(
+            "SELECT * FROM myhome_jobs WHERE status = 'QUEUED' AND manager_label = %s "
+            "ORDER BY created_at ASC LIMIT 1",
+            (manager_label,),
+        )
+        if not row:
+            return None
+        rc = db.execute(
+            "UPDATE myhome_jobs SET status = 'PROCESSING', started_at = %s WHERE job_id = %s",
+            (_now(), row["job_id"]),
+        )
+        if not rc:
+            return None
+        return db.query_one("SELECT * FROM myhome_jobs WHERE job_id = %s", (row["job_id"],))
+
+
+def complete_myhome_job(job_id: str, status: str, error_message: str = "") -> dict | None:
+    """status: "COMPLETED" ან "FAILED"."""
+    with _lock:
+        rc = db.execute(
+            "UPDATE myhome_jobs SET status = %s, error_message = %s, completed_at = %s "
+            "WHERE job_id = %s",
+            (status, error_message, _now(), str(job_id)),
+        )
+        if not rc:
+            return None
+        return db.query_one("SELECT * FROM myhome_jobs WHERE job_id = %s", (str(job_id),))
+
+
+def reset_stale_myhome_jobs(older_than_minutes: int, max_retries: int) -> list[dict]:
+    """worker.py-ს crash-ის/restart-ის დაცვა: "PROCESSING"-ში
+    `older_than_minutes`-ზე მეტხანს გაჭედილი job-ები ბრუნდება
+    "QUEUED"-ში ხელახლა (retry_count იზრდება), ან თუ უკვე `max_retries`
+    მიაღწია — საბოლოოდ "FAILED"."""
+    cutoff = datetime.datetime.now() - datetime.timedelta(minutes=older_than_minutes)
+    changed = []
+    for r in get_myhome_jobs(status="PROCESSING"):
+        started = r.get("started_at") or r.get("created_at")
+        try:
+            started_dt = datetime.datetime.strptime(str(started).strip(), "%Y-%m-%d %H:%M")
+        except (ValueError, TypeError):
+            continue
+        if started_dt > cutoff:
+            continue
+        retry_count = int(str(r.get("retry_count") or "0").strip() or "0")
+        if retry_count >= max_retries:
+            updated = complete_myhome_job(
+                r["job_id"], "FAILED",
+                error_message="worker-ი გაითიშა დამუშავებისას, ცდების ლიმიტი ამოიწურა",
+            )
+        else:
+            with _lock:
+                db.execute(
+                    "UPDATE myhome_jobs SET status = 'QUEUED', retry_count = %s, "
+                    "started_at = '' WHERE job_id = %s",
+                    (str(retry_count + 1), r["job_id"]),
+                )
+                updated = db.query_one(
+                    "SELECT * FROM myhome_jobs WHERE job_id = %s", (r["job_id"],)
+                )
+        if updated:
+            changed.append(updated)
+    return changed
