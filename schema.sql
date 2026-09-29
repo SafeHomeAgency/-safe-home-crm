@@ -376,3 +376,11 @@ CREATE TABLE IF NOT EXISTS myhome_accounts (
     manager_name         TEXT NOT NULL DEFAULT '',
     updated_at           TEXT NOT NULL DEFAULT ''
 );
+
+-- worker.py-ს მიერ, დასრულებისას, დამატებით მოწოდებული დეტალები
+-- (წყარო-განცხადებიდან უკვე ამოღებული, უბრალოდ აქამდე არსად
+-- ინახებოდა) — Mini App-ის საძიებო/ფილტრის ფუნქციისთვის.
+ALTER TABLE myhome_jobs ADD COLUMN IF NOT EXISTS deal_type TEXT NOT NULL DEFAULT '';
+ALTER TABLE myhome_jobs ADD COLUMN IF NOT EXISTS address TEXT NOT NULL DEFAULT '';
+ALTER TABLE myhome_jobs ADD COLUMN IF NOT EXISTS district TEXT NOT NULL DEFAULT '';
+ALTER TABLE myhome_jobs ADD COLUMN IF NOT EXISTS city TEXT NOT NULL DEFAULT '';

@@ -94,6 +94,7 @@ MYHOME_JOBS_HEADERS = [
     "myhome_listing_id", "cooperation_percent", "final_price", "notes",
     "status", "error_message", "retry_count",
     "created_at", "started_at", "completed_at",
+    "deal_type", "address", "district", "city",
 ]
 MYHOME_ACCOUNTS_HEADERS = ["team", "manager_label", "manager_name", "updated_at"]
 
@@ -1605,13 +1606,24 @@ def claim_next_myhome_job(manager_label: str) -> dict | None:
         return db.query_one("SELECT * FROM myhome_jobs WHERE job_id = %s", (row["job_id"],))
 
 
-def complete_myhome_job(job_id: str, status: str, error_message: str = "") -> dict | None:
-    """status: "COMPLETED" ან "FAILED"."""
+def complete_myhome_job(job_id: str, status: str, error_message: str = "",
+                         deal_type: str = "", address: str = "",
+                         district: str = "", city: str = "") -> dict | None:
+    """status: "COMPLETED" ან "FAILED". deal_type/address/district/city —
+    worker.py-ს მიერ, წარმატების შემთხვევაში, დამატებით მოწოდებული
+    დეტალები (საძიებო/ფილტრის ველებისთვის); წარუმატებლობისას ცარიელია."""
+    fields = ["status = %s", "error_message = %s", "completed_at = %s"]
+    params: list = [status, error_message, _now()]
+    for col, val in (("deal_type", deal_type), ("address", address),
+                     ("district", district), ("city", city)):
+        if val:
+            fields.append(f"{col} = %s")
+            params.append(val)
+    params.append(str(job_id))
     with _lock:
         rc = db.execute(
-            "UPDATE myhome_jobs SET status = %s, error_message = %s, completed_at = %s "
-            "WHERE job_id = %s",
-            (status, error_message, _now(), str(job_id)),
+            f"UPDATE myhome_jobs SET {', '.join(fields)} WHERE job_id = %s",
+            tuple(params),
         )
         if not rc:
             return None
@@ -1652,3 +1664,57 @@ def reset_stale_myhome_jobs(older_than_minutes: int, max_retries: int) -> list[d
         if updated:
             changed.append(updated)
     return changed
+
+
+def search_myhome_jobs(query: str = "", deal_type: str = "", status: str = "",
+                        team: str = "", date_from: str = "", date_to: str = "") -> list[dict]:
+    """ყველა აგენტის MyHome job-ების ძებნა (Ctrl+F-ის მსგავსად, ისე
+    როგორც ძველ Google Sheets "ბაზაში" შეიძლებოდა) — ტექსტური ძებნა
+    ID-ზე/მისამართზე/რაიონზე/ქალაქზე/აგენტის სახელზე/შენიშვნაზე, პლუს
+    ფილტრები. განზრახ **არ** იფარგლება მხოლოდ საკუთარი აგენტის
+    მონაცემებით — კოლეგის მიერ დადებული ბინის საპოვნელად კლიენტის
+    გადაბარებისას (ისევე, როგორც ძველი "ბაზა"-ც ყველასთვის ღია იყო)."""
+    rows = get_myhome_jobs(team=team or None, status=status or None)
+    q = (query or "").strip().lower()
+    if q:
+        search_fields = ("myhome_listing_id", "address", "district", "city",
+                          "agent_name", "notes", "team")
+        rows = [
+            r for r in rows
+            if q in " ".join(str(r.get(f, "")) for f in search_fields).lower()
+        ]
+    if deal_type:
+        rows = [r for r in rows if str(r.get("deal_type", "")).strip() == deal_type.strip()]
+    if date_from:
+        rows = [r for r in rows if str(r.get("created_at", ""))[:10] >= date_from]
+    if date_to:
+        rows = [r for r in rows if str(r.get("created_at", ""))[:10] <= date_to]
+    return rows
+
+
+def get_myhome_job_stats(team: str | None = None, date_from: str = "",
+                          date_to: str = "") -> list[dict]:
+    """თითო აგენტზე შეჯამებული სტატისტიკა (სულ/დასრულებული/ჩავარდნილი/
+    მუშავდება/რიგშია) მითითებულ თარიღის დიაპაზონში — მენეჯერის
+    (`team` მითითებით) ან ადმინის (`team=None`) დაშბორდისთვის."""
+    rows = get_myhome_jobs(team=team) if team else get_myhome_jobs()
+    if date_from:
+        rows = [r for r in rows if str(r.get("created_at", ""))[:10] >= date_from]
+    if date_to:
+        rows = [r for r in rows if str(r.get("created_at", ""))[:10] <= date_to]
+
+    by_agent: dict[str, dict] = {}
+    for r in rows:
+        aid = str(r.get("agent_id", ""))
+        entry = by_agent.setdefault(aid, {
+            "agent_id": aid,
+            "agent_name": r.get("agent_name", ""),
+            "team": r.get("team", ""),
+            "total": 0, "completed": 0, "failed": 0,
+            "processing": 0, "queued": 0,
+        })
+        entry["total"] += 1
+        status_key = str(r.get("status", "")).upper().lower()
+        if status_key in ("completed", "failed", "processing", "queued"):
+            entry[status_key] += 1
+    return sorted(by_agent.values(), key=lambda e: -e["total"])

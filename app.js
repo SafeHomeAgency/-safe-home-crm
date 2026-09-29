@@ -71,6 +71,7 @@ const ADMIN_TABS = [
   { id: "clients", label: "კლიენტები", icon: "👥", lazy: true },
   { id: "exclusives", label: "ექსკლუზივები", icon: "🏘️", lazy: true },
   { id: "myhomejobs", label: "MyHome", icon: "🏘️", lazy: true },
+  { id: "myhomestats", label: "MyHome სტატისტიკა", icon: "📊", lazy: true },
   { id: "questions", label: "კითხვები", icon: "💬", lazy: true },
   { id: "regulations", label: "ინსტრუქცია/წესები", icon: "📘", lazy: true },
 ];
@@ -1892,6 +1893,24 @@ const MYHOME_JOB_STATUS_LABEL = {
   FAILED: `<span class="badge red">❌ ჩავარდა</span>`,
 };
 
+if (!state.mhSearch) state.mhSearch = { q: "", dealType: "", dateFrom: "", dateTo: "" };
+let mhSearchResults = null; // null = ჩემი/გუნდის ჩვეულებრივი სია; array = ძებნის შედეგი (ყველა კოლეგა)
+
+function _renderMyHomeRow(r, showAgentName) {
+  return `
+    <div class="list-row">
+      <div class="avatar">🏠</div>
+      <div class="main">
+        <div class="title">MyHome ID: ${esc(r.myhome_listing_id)}${showAgentName ? " · " + esc(r.agent_name) : ""}</div>
+        <div class="sub">${MYHOME_JOB_STATUS_LABEL[r.status] || esc(r.status)}${r.deal_type ? " · " + esc(r.deal_type) : ""}${r.cooperation_percent ? " · " + esc(r.cooperation_percent) + "%" : ""}${r.final_price ? " · 💰 " + esc(r.final_price) : ""}</div>
+        ${r.address ? `<div class="sub">📍 ${esc(r.address)}${r.district ? ", " + esc(r.district) : ""}</div>` : ""}
+        ${r.notes ? `<div class="sub">📝 ${esc(r.notes)}</div>` : ""}
+        <div class="sub">${esc((r.created_at || "").split(" ")[0] || "")}${r.completed_at ? " → " + esc((r.completed_at || "").split(" ")[0] || "") : ""}</div>
+        ${r.status === "FAILED" && r.error_message ? `<div class="sub">⚠️ ${esc(r.error_message)}</div>` : ""}
+      </div>
+    </div>`;
+}
+
 function renderMyHomeJobs(rows, role) {
   const compose = `
     <div class="card">
@@ -1905,50 +1924,159 @@ function renderMyHomeJobs(rows, role) {
       </div>
     </div>`;
 
-  const list = !rows.length
-    ? `<div class="card"><div class="empty">ჯერ არცერთი MyHome ID არაა დამატებული</div></div>`
+  const s = state.mhSearch;
+  const searchBar = `
+    <div class="card">
+      <h2>🔎 ძებნა ყველა კოლეგაში</h2>
+      <div class="qa-compose">
+        <input id="mhSearchQ" type="text" placeholder="მისამართი, MyHome ID, აგენტის სახელი..." value="${esc(s.q)}">
+        <select id="mhSearchDealType">
+          <option value="">ყველა გარიგება</option>
+          <option value="იყიდება" ${s.dealType === "იყიდება" ? "selected" : ""}>იყიდება</option>
+          <option value="ქირავდება" ${s.dealType === "ქირავდება" ? "selected" : ""}>ქირავდება</option>
+        </select>
+        <input id="mhSearchFrom" type="date" value="${esc(s.dateFrom)}">
+        <input id="mhSearchTo" type="date" value="${esc(s.dateTo)}">
+        <button class="btn" id="mhSearchBtn">ძებნა</button>
+        ${mhSearchResults !== null ? `<button class="btn" id="mhSearchClear">✕ გასუფთავება</button>` : ""}
+      </div>
+    </div>`;
+
+  const displayRows = mhSearchResults !== null ? mhSearchResults : rows;
+  const showAgentName = mhSearchResults !== null || role !== "agent";
+  const listTitle = mhSearchResults !== null
+    ? "ძებნის შედეგი"
+    : (role === "agent" ? "ჩემი დავალებები" : "MyHome დავალებები");
+  const emptyText = mhSearchResults !== null
+    ? "ვერაფერი მოიძებნა"
+    : "ჯერ არცერთი MyHome ID არაა დამატებული";
+
+  const list = !displayRows.length
+    ? `<div class="card"><div class="empty">${emptyText}</div></div>`
     : `<div class="card">
-        <h2>📋 ${role === "agent" ? "ჩემი დავალებები" : "MyHome დავალებები"} <span class="cnt">${rows.length}</span></h2>
-        ${rows.map((r) => `
-          <div class="list-row">
-            <div class="avatar">🏠</div>
-            <div class="main">
-              <div class="title">MyHome ID: ${esc(r.myhome_listing_id)}${role !== "agent" ? " · " + esc(r.agent_name) : ""}</div>
-              <div class="sub">${MYHOME_JOB_STATUS_LABEL[r.status] || esc(r.status)}${r.cooperation_percent ? " · " + esc(r.cooperation_percent) + "%" : ""}${r.final_price ? " · 💰 " + esc(r.final_price) : ""}</div>
-              ${r.notes ? `<div class="sub">📝 ${esc(r.notes)}</div>` : ""}
-              <div class="sub">${esc((r.created_at || "").split(" ")[0] || "")}${r.completed_at ? " → " + esc((r.completed_at || "").split(" ")[0] || "") : ""}</div>
-              ${r.status === "FAILED" && r.error_message ? `<div class="sub">⚠️ ${esc(r.error_message)}</div>` : ""}
-            </div>
-          </div>`).join("")}
+        <h2>📋 ${listTitle} <span class="cnt">${displayRows.length}</span></h2>
+        ${displayRows.map((r) => _renderMyHomeRow(r, showAgentName)).join("")}
       </div>`;
-  return compose + list;
+  return compose + searchBar + list;
 }
 
 function bindMyHomeJobsActions() {
   const btn = document.getElementById("mhSubmit");
+  if (btn) {
+    btn.onclick = async () => {
+      const listingId = (document.getElementById("mhListingId").value || "").trim();
+      const percent = (document.getElementById("mhPercent").value || "").trim();
+      const price = (document.getElementById("mhPrice").value || "").trim();
+      const notes = (document.getElementById("mhNotes").value || "").trim();
+      if (!listingId || !/^\d+$/.test(listingId)) { toast("შეიყვანეთ სწორი MyHome ID (მხოლოდ ციფრები)"); return; }
+      btn.disabled = true;
+      try {
+        await api("/api/myhome-jobs", {
+          method: "POST",
+          body: JSON.stringify({
+            myhome_listing_id: listingId,
+            cooperation_percent: percent,
+            final_price: price,
+            notes,
+          }),
+        });
+        tg && tg.HapticFeedback && tg.HapticFeedback.notificationOccurred("success");
+        toast("დაემატა რიგში ✅");
+        delete lazyCache.myhomejobs;
+        await renderContent();
+      } catch (e) { toast(e.message); btn.disabled = false; }
+    };
+  }
+
+  const searchBtn = document.getElementById("mhSearchBtn");
+  if (searchBtn) {
+    searchBtn.onclick = async () => {
+      state.mhSearch = {
+        q: (document.getElementById("mhSearchQ").value || "").trim(),
+        dealType: document.getElementById("mhSearchDealType").value,
+        dateFrom: document.getElementById("mhSearchFrom").value,
+        dateTo: document.getElementById("mhSearchTo").value,
+      };
+      searchBtn.disabled = true;
+      try {
+        const s = state.mhSearch;
+        const params = [];
+        if (s.q) params.push("q=" + encodeURIComponent(s.q));
+        if (s.dealType) params.push("deal_type=" + encodeURIComponent(s.dealType));
+        if (s.dateFrom) params.push("date_from=" + encodeURIComponent(s.dateFrom));
+        if (s.dateTo) params.push("date_to=" + encodeURIComponent(s.dateTo));
+        const resp = await api("/api/myhome-jobs/search" + (params.length ? "?" + params.join("&") : ""));
+        mhSearchResults = resp.rows || [];
+        await renderContent();
+      } catch (e) { toast(e.message); searchBtn.disabled = false; }
+    };
+  }
+
+  const clearBtn = document.getElementById("mhSearchClear");
+  if (clearBtn) {
+    clearBtn.onclick = async () => {
+      mhSearchResults = null;
+      state.mhSearch = { q: "", dealType: "", dateFrom: "", dateTo: "" };
+      await renderContent();
+    };
+  }
+}
+
+/* ------------------------------------------- MyHome სტატისტიკა (მენეჯერი/ადმინი) */
+
+function renderMyHomeStats(rows) {
+  if (!state.mhStatsFrom) state.mhStatsFrom = "";
+  if (!state.mhStatsTo) state.mhStatsTo = "";
+  const filterBar = `
+    <div class="card">
+      <h2>📊 MyHome სტატისტიკა</h2>
+      <div class="qa-compose">
+        <input id="mhStatsFrom" type="date" value="${esc(state.mhStatsFrom)}">
+        <input id="mhStatsTo" type="date" value="${esc(state.mhStatsTo)}">
+        <button class="btn" id="mhStatsFilterBtn">გაფილტვრა</button>
+      </div>
+    </div>`;
+
+  if (!rows.length) {
+    return filterBar + `<div class="card"><div class="empty">ამ პერიოდში მონაცემები არ არის</div></div>`;
+  }
+
+  const totals = rows.reduce((acc, r) => {
+    acc.total += r.total; acc.completed += r.completed; acc.failed += r.failed;
+    acc.processing += r.processing; acc.queued += r.queued;
+    return acc;
+  }, { total: 0, completed: 0, failed: 0, processing: 0, queued: 0 });
+
+  const summary = `
+    <div class="card">
+      <h2>ჯამური მაჩვენებლები</h2>
+      <div class="sub">სულ: <b>${totals.total}</b> · ✅ ${totals.completed} · ❌ ${totals.failed} · ⚙️ ${totals.processing} · ⏳ ${totals.queued}</div>
+    </div>`;
+
+  const list = `
+    <div class="card">
+      <h2>თითო აგენტზე</h2>
+      ${rows.map((r) => `
+        <div class="list-row">
+          <div class="avatar">👤</div>
+          <div class="main">
+            <div class="title">${esc(r.agent_name)}${r.team ? " · " + esc(r.team) : ""}</div>
+            <div class="sub">სულ: <b>${r.total}</b> · ✅ ${r.completed} · ❌ ${r.failed} · ⚙️ ${r.processing} · ⏳ ${r.queued}</div>
+          </div>
+        </div>`).join("")}
+    </div>`;
+
+  return filterBar + summary + list;
+}
+
+function bindMyHomeStatsActions() {
+  const btn = document.getElementById("mhStatsFilterBtn");
   if (!btn) return;
   btn.onclick = async () => {
-    const listingId = (document.getElementById("mhListingId").value || "").trim();
-    const percent = (document.getElementById("mhPercent").value || "").trim();
-    const price = (document.getElementById("mhPrice").value || "").trim();
-    const notes = (document.getElementById("mhNotes").value || "").trim();
-    if (!listingId || !/^\d+$/.test(listingId)) { toast("შეიყვანეთ სწორი MyHome ID (მხოლოდ ციფრები)"); return; }
-    btn.disabled = true;
-    try {
-      await api("/api/myhome-jobs", {
-        method: "POST",
-        body: JSON.stringify({
-          myhome_listing_id: listingId,
-          cooperation_percent: percent,
-          final_price: price,
-          notes,
-        }),
-      });
-      tg && tg.HapticFeedback && tg.HapticFeedback.notificationOccurred("success");
-      toast("დაემატა რიგში ✅");
-      delete lazyCache.myhomejobs;
-      await renderContent();
-    } catch (e) { toast(e.message); btn.disabled = false; }
+    state.mhStatsFrom = document.getElementById("mhStatsFrom").value;
+    state.mhStatsTo = document.getElementById("mhStatsTo").value;
+    delete lazyCache.myhomestats;
+    await renderContent();
   };
 }
 
@@ -2274,6 +2402,7 @@ function renderRegulations(payload) {
 const LAZY_ENDPOINTS = {
   exclusives: "/api/exclusives",
   myhomejobs: "/api/myhome-jobs",
+  myhomestats: "/api/myhome-jobs/stats",
   swaps: "/api/swaps",
   reports: "/api/reports",
   questions: "/api/questions",
@@ -2357,6 +2486,10 @@ async function renderContent() {
           }
           if (tab === "digest" && state.digestTeam) params.push("team=" + encodeURIComponent(state.digestTeam));
           if (tab === "meetings" && state.meetingsScope === "own") params.push("scope=own");
+          if (tab === "myhomestats") {
+            if (state.mhStatsFrom) params.push("date_from=" + encodeURIComponent(state.mhStatsFrom));
+            if (state.mhStatsTo) params.push("date_to=" + encodeURIComponent(state.mhStatsTo));
+          }
           if (params.length) url += "?" + params.join("&");
           const resp = await api(url);
           const wholeObjTabs = ["admintasks", "agentsmgmt", "meetings", "taskhistory", "digest", "reports", "dayoffs", "swaps", "regulations"];
@@ -2369,6 +2502,7 @@ async function renderContent() {
       const rows = lazyCache[tab];
       if (tab === "exclusives") { content.innerHTML = renderExclusives(rows); bindExclusivesActions(rows); }
       else if (tab === "myhomejobs") { content.innerHTML = renderMyHomeJobs(rows, state.role); bindMyHomeJobsActions(); }
+      else if (tab === "myhomestats") { content.innerHTML = renderMyHomeStats(rows); bindMyHomeStatsActions(); }
       else if (tab === "reports") { content.innerHTML = renderReports(rows); bindReportsActions(rows); }
       else if (tab === "swaps") { content.innerHTML = renderSwaps(rows); bindSwapsActions(rows); }
       else if (tab === "questions") { content.innerHTML = renderQuestions(rows, state.role); bindQuestionsActions(state.role); }

@@ -363,6 +363,50 @@ def api_myhome_jobs_create():
     return jsonify(ok=True, row=row)
 
 
+@app.get("/api/myhome-jobs/search")
+def api_myhome_jobs_search():
+    """ყველა აგენტის MyHome job-ების ძებნა — `?q=`(ტექსტი: ID/მისამართი/
+    რაიონი/ქალაქი/აგენტი/შენიშვნა), `?deal_type=`, `?status=`,
+    `?date_from=`/`?date_to=` (YYYY-MM-DD). განზრახ ღიაა ნებისმიერი
+    დარეგისტრირებული აგენტისთვის ყველა კოლეგის მონაცემებზე — იგივე,
+    რაც ძველი Google Sheets "ბაზა" იძლეოდა (კლიენტის გადაბარებისას
+    კოლეგის დადებული ბინის საპოვნელად)."""
+    agent, admin, err = _authed_agent()
+    if err:
+        return err
+    if not (agent or admin):
+        return jsonify(error="ავტორიზაცია საჭიროა"), 403
+    rows = sheets.search_myhome_jobs(
+        query=request.args.get("q", ""),
+        deal_type=request.args.get("deal_type", ""),
+        status=request.args.get("status", ""),
+        date_from=request.args.get("date_from", ""),
+        date_to=request.args.get("date_to", ""),
+    )
+    return jsonify(rows=rows)
+
+
+@app.get("/api/myhome-jobs/stats")
+def api_myhome_jobs_stats():
+    """თითო აგენტზე შეჯამებული სტატისტიკა, თარიღის ფილტრით
+    (`?date_from=`/`?date_to=`, YYYY-MM-DD). თიმლიდერს — მხოლოდ
+    საკუთარი გუნდი (query-ს `team` პარამეტრი, თუ არაა ადმინი,
+    იგნორირდება — იგივე დაცვა, რაც `/api/reports`-ს აქვს); ადმინს —
+    ყველა, ან კონკრეტული `?team=` მითითებით."""
+    agent, admin, err = _authed_agent()
+    if err:
+        return err
+    if not (admin or _is_team_lead(agent)):
+        return jsonify(error="მხოლოდ მენეჯერისთვის/ადმინისთვის"), 403
+    team = request.args.get("team") if admin else str(agent.get("team", "")).strip()
+    rows = sheets.get_myhome_job_stats(
+        team=team or None,
+        date_from=request.args.get("date_from", ""),
+        date_to=request.args.get("date_to", ""),
+    )
+    return jsonify(rows=rows)
+
+
 @app.post("/api/reports/rate")
 def api_reports_rate():
     agent, admin, err = _authed_agent()
@@ -1616,7 +1660,9 @@ def internal_myhome_jobs_next():
 @app.post("/internal/myhome-jobs/<job_id>/complete")
 def internal_myhome_jobs_complete(job_id):
     """worker.py-ს job-ის დამუშავების შედეგის ანგარიში
-    (`{"status": "COMPLETED"|"FAILED", "error_message": "..."}"`)."""
+    (`{"status": "COMPLETED"|"FAILED", "error_message": "...",
+    "deal_type"/"address"/"district"/"city": "..." (მხოლოდ
+    წარმატებისას, საძიებო/ფილტრის ველებისთვის)}`)."""
     err = _authed_worker()
     if err:
         return err
@@ -1625,7 +1671,13 @@ def internal_myhome_jobs_complete(job_id):
     if status not in ("COMPLETED", "FAILED"):
         return jsonify(error="status უნდა იყოს COMPLETED ან FAILED"), 400
     error_message = str(body.get("error_message") or "").strip()
-    row = sheets.complete_myhome_job(job_id, status, error_message)
+    row = sheets.complete_myhome_job(
+        job_id, status, error_message,
+        deal_type=str(body.get("deal_type") or "").strip(),
+        address=str(body.get("address") or "").strip(),
+        district=str(body.get("district") or "").strip(),
+        city=str(body.get("city") or "").strip(),
+    )
     if not row:
         return jsonify(error="job ვერ მოიძებნა"), 404
     agent = next(
