@@ -98,13 +98,23 @@ def _worksheet(name: str) -> "_RetryingWorksheet":
 
 
 def _cached_records(name: str) -> list[dict]:
-    """`name` ცხრილის ყველა სტრიქონი — მოკლევადიანი კეშით (იხ. ზემოთ)."""
+    """`name` ცხრილის ყველა სტრიქონი — მოკლევადიანი კეშით (იხ. ზემოთ).
+
+    `numericise_ignore=['all']`: gspread ნაგულისხმევად თავად ცდილობს
+    ამოიცნოს, "ტექსტივით გამოიყურება თუ რიცხვივით" თითოეული უჯრედი,
+    და თუ მთლიანად ციფრებისგან შედგება (მაგ. `job_id`/`agent_id`-ის
+    შემთხვევითი hex კოდი, რომელიც შემთხვევით მთლიანად ციფრებზე
+    გამოვიდა) — ჩუმად აქცევს Python int-ად. ეს შემდეგ ტექსტური
+    შედარებით ძებნას (`==`, `ws.find(...)`) ამტვრევს, რადგან int != str.
+    ეს სქემის საწყის პრინციპსაც არღვევს — აქ ყველაფერი TEXT-ია,
+    გამონაკლისის გარეშე — ამიტომ ეს ავტომატური გარდაქმნა მთლიანად
+    გამორთულია."""
     now = time.monotonic()
     with _records_cache_lock:
         hit = _records_cache.get(name)
         if hit and (now - hit[0]) < _CACHE_TTL_SECONDS:
             return hit[1]
-    data = _worksheet(name).get_all_records()
+    data = _worksheet(name).get_all_records(numericise_ignore=['all'])
     with _records_cache_lock:
         _records_cache[name] = (now, data)
     return data
