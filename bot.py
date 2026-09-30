@@ -338,20 +338,27 @@ async def addagent_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def addagent_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # ადრე აქ თავისუფალ ტექსტად ეკითხებოდა "თიმლიდერი/გუნდი?" და რასაც
+    # ადმინი აკრეფდა, უცვლელად ინახებოდა როგორც `team` კოდი — თუ ვინმემ
+    # პასუხად სიტყვასიტყვით დაწერა "თიმლიდერი" (როლის მნიშვნელობით,
+    # ნამდვილი გუნდის კოდის მაგივრად), ეს ზუსტად ისე შენახული "ცრუ"
+    # კოდი გახდებოდა, და ყველა შემდგომი ამავე პასუხით დამატებული აგენტი
+    # იმავე არარეალურ "გუნდში" ხვდებოდა — რის გამოც მათი ნამდვილი
+    # თიმლიდერისთვის MyHome/დავალებების გადაბარება ვეღარასდროს
+    # პოულობდა შესატყვის ჩანაწერს. ახლა ახალი აგენტი ყოველთვის
+    # "დამოუკიდებლად" (ცარიელი team) ემატება — გუნდში ჩასმა/თიმლიდერზე
+    # მიბმა კი ხდება Mini App-ის "აგენტების მართვა" ეკრანიდან, სადაც
+    # გუნდის კოდი ავტომატურად, agent_id-ის მიხედვით გენერირდება და
+    # არასდროს შეიძლება იყოს თავისუფალი ტექსტი.
     context.user_data["aa_phone"] = update.message.text.strip()
-    await update.message.reply_text("თიმლიდერი/გუნდი? (თუ არ არის — დაწერეთ „-“)")
-    return AA_TEAM
-
-
-async def addagent_team(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    team_raw = update.message.text.strip()
-    team = "" if team_raw == "-" else team_raw
     name = context.user_data.pop("aa_name")
     phone = context.user_data.pop("aa_phone")
-    agent_id = sheets.add_agent(name, phone, team=team)
+    agent_id = sheets.add_agent(name, phone, team="")
     await update.message.reply_text(
         f"დამატებულია: {name} ({phone}), agent_id={agent_id}.\n"
-        f"აგენტმა უნდა დაწეროს ბოტს /start და გაუზიაროს ნომერი."
+        f"აგენტმა უნდა დაწეროს ბოტს /start და გაუზიაროს ნომერი.\n"
+        f"გუნდში ჩასართავად/თიმლიდერად დასანიშნად გამოიყენეთ Mini App-ის "
+        f"„აგენტების მართვა“ ეკრანი."
     )
     return ConversationHandler.END
 
@@ -2451,7 +2458,6 @@ def main():
         states={
             AA_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, addagent_name)],
             AA_PHONE: [MessageHandler(filters.TEXT & ~filters.COMMAND, addagent_phone)],
-            AA_TEAM: [MessageHandler(filters.TEXT & ~filters.COMMAND, addagent_team)],
         },
         fallbacks=[CommandHandler("cancel", cancel), MessageHandler(filters.COMMAND, busy_fallback)],
     ))
