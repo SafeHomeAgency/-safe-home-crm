@@ -2022,6 +2022,20 @@ def complete_myhome_job(job_id: str, status: str, error_message: str = "",
     return _update_myhome_job_fields(str(job_id), updates)
 
 
+def retry_myhome_job(job_id: str) -> dict | None:
+    """ხელით ("Mini App"-იდან) ხელახლა რიგში ჩაყენება — FAILED (ან
+    გაჭედილი PROCESSING) job-ს უბრუნებს "QUEUED"-ს, პირდაპირ, retry_count
+    ლიმიტის დალოდების გარეშე. worker.py მას ჩვეულებრივი QUEUED job-ივით
+    აიღებს შემდეგივე ციკლზე."""
+    return _update_myhome_job_fields(str(job_id), {
+        "status": "QUEUED",
+        "error_message": "",
+        "retry_count": "0",
+        "started_at": "",
+        "completed_at": "",
+    })
+
+
 def reset_stale_myhome_jobs(older_than_minutes: int, max_retries: int) -> list[dict]:
     """worker.py-ს crash-ის/restart-ის დაცვა: "PROCESSING"-ში
     `older_than_minutes`-ზე მეტხანს გაჭედილი job-ები ბრუნდება

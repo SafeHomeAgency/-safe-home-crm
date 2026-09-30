@@ -415,6 +415,39 @@ def api_myhome_jobs_stats():
     return jsonify(rows=rows)
 
 
+@app.post("/api/myhome-jobs/retry")
+def api_myhome_jobs_retry():
+    """FAILED (ან გაჭედილი PROCESSING) job-ის ხელახლა "QUEUED"-ში
+    დაბრუნება პირდაპირ Mini App-იდან — აღარაა საჭირო Railway Console-ში
+    ხელით სკრიპტის გაშვება. აგენტს — მხოლოდ საკუთარი job, თიმლიდერს —
+    საკუთარი გუნდის, ადმინს — ნებისმიერი."""
+    agent, admin, err = _authed_agent()
+    if err:
+        return err
+    body = request.get_json(silent=True) or {}
+    job_id = str(body.get("job_id") or "").strip()
+    if not job_id:
+        return jsonify(error="job_id საჭიროა"), 400
+    row = sheets.find_myhome_job(job_id)
+    if not row:
+        return jsonify(error="job ვერ მოიძებნა"), 404
+    if not admin:
+        if _is_team_lead(agent):
+            if str(row.get("team", "")).strip() != str(agent.get("team", "")).strip():
+                return jsonify(error="მხოლოდ საკუთარი გუნდის job-ისთვის"), 403
+        elif agent:
+            if str(row.get("agent_id", "")) != str(agent.get("agent_id", "")):
+                return jsonify(error="მხოლოდ საკუთარი job-ისთვის"), 403
+        else:
+            return jsonify(error="ავტორიზაცია საჭიროა"), 403
+    if row.get("status") not in ("FAILED", "PROCESSING"):
+        return jsonify(error="მხოლოდ ჩავარდნილი/გაჭედილი job-ის ხელახლა გაშვება შეიძლება"), 400
+    updated = sheets.retry_myhome_job(job_id)
+    if not updated:
+        return jsonify(error="ვერ განახლდა"), 500
+    return jsonify(ok=True, row=updated)
+
+
 @app.post("/api/reports/rate")
 def api_reports_rate():
     agent, admin, err = _authed_agent()

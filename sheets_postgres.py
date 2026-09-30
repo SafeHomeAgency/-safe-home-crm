@@ -1630,6 +1630,22 @@ def complete_myhome_job(job_id: str, status: str, error_message: str = "",
         return db.query_one("SELECT * FROM myhome_jobs WHERE job_id = %s", (str(job_id),))
 
 
+def retry_myhome_job(job_id: str) -> dict | None:
+    """ხელით ("Mini App"-იდან) ხელახლა რიგში ჩაყენება — FAILED (ან
+    გაჭედილი PROCESSING) job-ს უბრუნებს "QUEUED"-ს, პირდაპირ, retry_count
+    ლიმიტის დალოდების გარეშე. worker.py მას ჩვეულებრივი QUEUED job-ივით
+    აიღებს შემდეგივე ციკლზე."""
+    with _lock:
+        rc = db.execute(
+            "UPDATE myhome_jobs SET status = 'QUEUED', error_message = '', "
+            "retry_count = '0', started_at = '', completed_at = '' WHERE job_id = %s",
+            (str(job_id),),
+        )
+        if not rc:
+            return None
+        return db.query_one("SELECT * FROM myhome_jobs WHERE job_id = %s", (str(job_id),))
+
+
 def reset_stale_myhome_jobs(older_than_minutes: int, max_retries: int) -> list[dict]:
     """worker.py-ს crash-ის/restart-ის დაცვა: "PROCESSING"-ში
     `older_than_minutes`-ზე მეტხანს გაჭედილი job-ები ბრუნდება
