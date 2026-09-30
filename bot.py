@@ -1357,12 +1357,26 @@ async def clockin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ერთადერთი საერთო რიცხვი ეკითხება და მოწმდება ONLINE_DAILY_QUOTA-სთან.
 CO_OFFICE_FIELDS = [
     ("site", "რამდენი განცხადება ატვირთეთ დღეს ჩვენს საიტზე? (მხოლოდ რიცხვი)"),
-    ("myhome", "რამდენი — myhome-ზე? (მხოლოდ რიცხვი)"),
     ("ssge", "რამდენი — ss.ge-ზე? (მხოლოდ რიცხვი)"),
 ]
-CO_ONLINE_FIELDS = [
-    ("total", "რამდენი განცხადება შეიყვანეთ/დაამუშავეთ დღეს? (მხოლოდ რიცხვი, მაგ. 10)"),
-]
+# "myhome"-ის საკუთარი, ხელით შეყვანილი კითხვა მოცილებულია — აქამდე
+# აგენტს შეეძლო რეალურზე მეტი რიცხვი დაეწერა (მაგ. "20", როცა
+# სინამდვილეში მხოლოდ 10 განცხადება ავტომატურად დაიდო MyHome-ზე) და
+# რეგლამენტი ყალბად "შესრულებულად" ჩათვლილიყო. ახლა ეს რიცხვი
+# ცალსახად, ავტომატურად გამოითვლება `_count_myhome_completed_today`-ით
+# — რეალურად "COMPLETED" სტატუსში მყოფი MyHome job-ების საფუძველზე,
+# რასაც agent-ს არავითარი გავლენა არ აქვს ხელით შეცვლაზე.
+CO_ONLINE_FIELDS = []  # მთლიანად ავტომატურია (MyHome-დან) — არაფერს ვეკითხებით
+
+
+def _count_myhome_completed_today(agent_id: str) -> int:
+    """რეალურად, ავტომატურად დადებული (worker.py-ს მიერ "COMPLETED"-ად
+    დამოწმებული) MyHome განცხადებების რაოდენობა დღეისთვის — რეგლამენტის
+    ანგარიშისთვის, აგენტის ხელით შეყვანილი (და, შესაბამისად,
+    შესაძლო არაზუსტი) რიცხვის ნაცვლად."""
+    today = datetime.datetime.now().strftime("%Y-%m-%d")
+    jobs = sheets.get_myhome_jobs(agent_id=agent_id, status="COMPLETED")
+    return sum(1 for j in jobs if str(j.get("completed_at", "")).startswith(today))
 
 
 async def clockout_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1385,6 +1399,11 @@ async def clockout_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     mode = sheets.get_today_mode(agent["agent_id"])
     fields = CO_OFFICE_FIELDS if mode in ("office_morning", "office_evening") else CO_ONLINE_FIELDS
+
+    if not fields:
+        # ონლაინ ცვლა — აღარაფერს ვეკითხებით, პირდაპირ ვხურავთ დღეს
+        # ავტომატურად დათვლილი MyHome რაოდენობით.
+        return await _finish_clockout(update, context, agent, mode, {})
 
     context.user_data["co_agent"] = agent
     context.user_data["co_mode"] = mode
@@ -1419,23 +1438,31 @@ async def clockout_count(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.pop("co_fields")
     data = context.user_data.pop("co_data")
     context.user_data.pop("co_idx")
+    return await _finish_clockout(update, context, agent, mode, data)
+
+
+async def _finish_clockout(update: Update, context: ContextTypes.DEFAULT_TYPE,
+                            agent: dict, mode: str, data: dict):
     agent_id = agent["agent_id"]
+    myhome = _count_myhome_completed_today(agent_id)
 
     sheets.clock_out(agent_id)
     if mode in ("office_morning", "office_evening"):
-        site, myhome, ssge = data.get("site", 0), data.get("myhome", 0), data.get("ssge", 0)
+        site, ssge = data.get("site", 0), data.get("ssge", 0)
         # ერთი და იგივე განცხადება ერთდროულად იტვირთება საიტზე და
         # myhome-ზე (სარკისებურად) — ამიტომ ჯამი არ არის site+myhome+ssge
         # (ეს დუბლირებას/ტრიპლირებას იძლევა), არამედ ორივედან უფრო დიდი
         # რიცხვი (რეალურად ატვირთული უნიკალური განცხადებების რაოდენობა).
         # ss.ge ამ ეტაპზე ჯამში არ ითვლება, მხოლოდ ინფორმაციულად ინახება.
+        # myhome — აღარ არის ხელით შეყვანილი, ავტომატურად, ნამდვილი
+        # "COMPLETED" job-ების რაოდენობითაა.
         total = max(site, myhome)
         sheets.set_daily_count(agent_id, total, site=site, myhome=myhome, ssge=ssge)
-        count_display = f"საიტი {site} / myhome {myhome} / ss.ge {ssge} (ინფო) = ჩაითვალა {total}"
+        count_display = f"საიტი {site} / myhome {myhome} (ავტომატური) / ss.ge {ssge} (ინფო) = ჩაითვალა {total}"
     else:
-        total = data.get("total", 0)
+        total = myhome
         sheets.set_daily_count(agent_id, total)
-        count_display = str(total)
+        count_display = f"{total} (ავტომატურად, MyHome-დან)"
 
     note = ""
     quota = sheets.quota_for_mode(mode)
@@ -2366,10 +2393,12 @@ async def check_daily_compliance(context: ContextTypes.DEFAULT_TYPE):
         if mode == "online" and not att.get("clock_out"):
             if sheets.has_warning_today(agent_id, "quota_missed"):
                 continue
-            try:
-                count_submitted = int(att.get("count_submitted") or 0)
-            except (TypeError, ValueError):
-                count_submitted = 0
+            # `count_submitted` მხოლოდ /clockout-ზეა დაფიქსირებული — ვინც
+            # ჯერ არ დახურულა, მისთვის ეს ველი ცარიელია და ამ შემოწმებას
+            # ყოველთვის "0"-ად დაინახავდა, მიუხედავად რეალურად რამდენი
+            # განცხადებაც უკვე დადო დღეს. ამის მაგივრად პირდაპირ ვითვლით
+            # რეალურ, ამ წუთამდე დასრულებულ MyHome job-ებს.
+            count_submitted = _count_myhome_completed_today(agent_id)
             if count_submitted < config.ONLINE_DAILY_QUOTA:
                 detail = (
                     f"{today}: {count_submitted}/{config.ONLINE_DAILY_QUOTA} "
