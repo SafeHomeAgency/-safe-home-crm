@@ -73,11 +73,17 @@ def _save_base64_photos(photos) -> list[str]:
     return saved
 
 
-def _send_telegram_message(chat_id, text: str) -> None:
+def _send_telegram_message(chat_id, text: str) -> bool:
     """პირდაპირი, სინქრონული HTTP მოთხოვნა Telegram-ის Bot API-სთან —
     Flask-ის (სინქრონული) მოთხოვნის დამმუშავებლიდან ბოტის (async)
     obj-ის გამოძახება პირდაპირ არ ხერხდება, ამიტომ აქ იგივეს ვაკეთებთ
-    "ხელით", python-telegram-bot-ის გვერდის ავლით."""
+    "ხელით", python-telegram-bot-ის გვერდის ავლით.
+
+    აბრუნებს True/False-ს — მნიშვნელოვანია იქ, სადაც ამ შედეგზეა
+    დამოკიდებული შემდგომი ლოგიკა (მაგ. task-ის "notified"-ად მონიშვნა):
+    თუ გაგზავნა ჩავარდა და მაინც "notified"-ად აღინიშნა, სარეზერვო
+    ფონური job (check_new_tasks) აღარასდროს გაიმეორებს მცდელობას და
+    შეტყობინება სამუდამოდ იკარგება."""
     try:
         url = f"https://api.telegram.org/bot{config.TELEGRAM_BOT_TOKEN}/sendMessage"
         payload = json.dumps({"chat_id": chat_id, "text": text}).encode()
@@ -85,8 +91,10 @@ def _send_telegram_message(chat_id, text: str) -> None:
             url, data=payload, headers={"Content-Type": "application/json"}
         )
         urllib.request.urlopen(req, timeout=10)
+        return True
     except Exception:
         log.exception("Telegram შეტყობინების გაგზავნა Mini App-იდან ვერ მოხერხდა")
+        return False
 
 
 # ---------------------------------------------------------------- auth
@@ -1152,18 +1160,31 @@ def api_tasks_reassign():
         return jsonify(error="დავალება ვერ მოიძებნა"), 404
 
     if to_agent.get("telegram_chat_id"):
-        _send_telegram_message(
+        sent_ok = _send_telegram_message(
             int(to_agent["telegram_chat_id"]),
             f"📋 გადმოგეცით დავალება: {row.get('title')}"
             + (f"\nკლიენტი: {row.get('client_phone')}" if row.get("client_phone") else ""),
         )
-        # უკვე გავაგზავნეთ საკუთარი (უფრო ინფორმატიული) შეტყობინება
-        # პირდაპირ აქედან — ვნიშნავთ, რომ არ გავაორმაგოთ ფონური
-        # check_new_tasks job-ის ზოგადი შეტყობინებით.
-        try:
-            sheets.mark_task_notified(task_id)
-        except Exception:
-            log.exception("mark_task_notified ჩავარდა reassign-ის შემდეგ")
+        # მნიშვნელოვანია: "notified"-ად მხოლოდ მაშინ ვნიშნავთ, თუ
+        # გაგზავნა ნამდვილად წარმატებული იყო. თუ ეს ერთხელ (ქსელის
+        # ხანმოკლე ჩავარდნით, ან Telegram API-ის დროებითი შეცდომით)
+        # წარუმატებელი აღმოჩნდა, მაგრამ მაინც "notified=yes"-ად
+        # მონიშნული დარჩებოდა — სარეზერვო ფონური job (check_new_tasks,
+        # რომელიც ზუსტად ასეთი შემთხვევებისთვისაა) აღარასდროს
+        # შეამჩნევდა და მეორედ ვეღარასდროს სცდიდა გაგზავნას, თანაც
+        # მენეჯერს "✅ გადაბარდა" ეჩვენებოდა მიუხედავად რეალური
+        # წარუმატებლობისა — სწორედ ეს იყო აგენტამდე კლიენტის
+        # "არმისვლის" ნამდვილი მიზეზი.
+        if sent_ok:
+            try:
+                sheets.mark_task_notified(task_id)
+            except Exception:
+                log.exception("mark_task_notified ჩავარდა reassign-ის შემდეგ")
+        else:
+            log.warning(
+                f"reassign: Telegram შეტყობინება ვერ გაეგზავნა agent_id={to_agent_id} "
+                f"task_id={task_id} — check_new_tasks ფონურმა job-მა უნდა გაიმეოროს."
+            )
     return jsonify(ok=True, row=row)
 
 
