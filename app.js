@@ -1893,12 +1893,14 @@ const MYHOME_JOB_STATUS_LABEL = {
   FAILED: `<span class="badge red">❌ ჩავარდა</span>`,
 };
 
-if (!state.mhSearch) state.mhSearch = { q: "", dealType: "", dateFrom: "", dateTo: "" };
+if (!state.mhSearch) state.mhSearch = { q: "", dealType: "", status: "", dateFrom: "", dateTo: "" };
 let mhSearchResults = null; // null = ჩემი/გუნდის ჩვეულებრივი სია; array = ძებნის შედეგი (ყველა კოლეგა)
+let mhRowsById = {}; // job_id -> row, დეტალის მოდალისთვის (ორიგინალი, გაუფილტრავი ველებით)
 
 function _renderMyHomeRow(r, showAgentName) {
+  const canRetry = r.status === "FAILED" || r.status === "PROCESSING";
   return `
-    <div class="list-row">
+    <div class="list-row" data-mh-row="${esc(r.job_id)}" style="cursor:pointer">
       <div class="avatar">🏠</div>
       <div class="main">
         <div class="title">MyHome ID: ${esc(r.myhome_listing_id)}${showAgentName ? " · " + esc(r.agent_name) : ""}</div>
@@ -1908,7 +1910,47 @@ function _renderMyHomeRow(r, showAgentName) {
         <div class="sub">${esc((r.created_at || "").split(" ")[0] || "")}${r.completed_at ? " → " + esc((r.completed_at || "").split(" ")[0] || "") : ""}</div>
         ${r.status === "FAILED" && r.error_message ? `<div class="sub">⚠️ ${esc(r.error_message)}</div>` : ""}
       </div>
+      ${canRetry ? `<button class="btn" data-mh-retry="${esc(r.job_id)}" style="padding:8px 10px">🔁</button>` : ""}
     </div>`;
+}
+
+function _openMyHomeDetail(jobId) {
+  const r = mhRowsById[jobId];
+  if (!r) return;
+  const canRetry = r.status === "FAILED" || r.status === "PROCESSING";
+  openDetail(`🏘️ MyHome ID: ${r.myhome_listing_id}`, [
+    { label: "სტატუსი", value: MYHOME_JOB_STATUS_LABEL[r.status] || r.status },
+    { label: "აგენტი", value: r.agent_name },
+    { label: "გუნდი", value: r.team },
+    { label: "გარიგება", value: r.deal_type },
+    { label: "თანამშრომლობის %", value: r.cooperation_percent },
+    { label: "საბოლოო ფასი", value: r.final_price },
+    { label: "მისამართი", value: r.address },
+    { label: "რაიონი", value: r.district },
+    { label: "ქალაქი", value: r.city },
+    { label: "შენიშვნა", value: r.notes },
+    { label: "დაემატა", value: r.created_at },
+    { label: "დაიწყო დამუშავება", value: r.started_at },
+    { label: "დასრულდა", value: r.completed_at },
+    { label: "ცდების რაოდენობა", value: r.retry_count },
+    { label: "შეცდომა", value: r.error_message },
+    { label: "MyHome ლინკი", value: r.status === "COMPLETED" ? `https://myhome.ge/pr/${r.myhome_listing_id}` : "" },
+  ], canRetry ? `<button class="btn" id="mhDetailRetry" style="margin-top:10px;width:100%">🔁 ხელახლა გაშვება</button>` : "");
+  const retryBtn = document.getElementById("mhDetailRetry");
+  if (retryBtn) retryBtn.onclick = () => _mhRetryJob(jobId, retryBtn);
+}
+
+async function _mhRetryJob(jobId, el) {
+  if (el) el.disabled = true;
+  try {
+    await api("/api/myhome-jobs/retry", { method: "POST", body: JSON.stringify({ job_id: jobId }) });
+    tg && tg.HapticFeedback && tg.HapticFeedback.notificationOccurred("success");
+    toast("ხელახლა რიგშია ✅");
+    closeDetail();
+    delete lazyCache.myhomejobs;
+    mhSearchResults = null;
+    await renderContent();
+  } catch (e) { toast(e.message); if (el) el.disabled = false; }
 }
 
 function renderMyHomeJobs(rows, role) {
@@ -1935,6 +1977,13 @@ function renderMyHomeJobs(rows, role) {
           <option value="იყიდება" ${s.dealType === "იყიდება" ? "selected" : ""}>იყიდება</option>
           <option value="ქირავდება" ${s.dealType === "ქირავდება" ? "selected" : ""}>ქირავდება</option>
         </select>
+        <select id="mhSearchStatus">
+          <option value="">ყველა სტატუსი</option>
+          <option value="QUEUED" ${s.status === "QUEUED" ? "selected" : ""}>⏳ რიგშია</option>
+          <option value="PROCESSING" ${s.status === "PROCESSING" ? "selected" : ""}>⚙️ მუშავდება</option>
+          <option value="COMPLETED" ${s.status === "COMPLETED" ? "selected" : ""}>✅ დადებულია</option>
+          <option value="FAILED" ${s.status === "FAILED" ? "selected" : ""}>❌ ჩავარდა</option>
+        </select>
         <input id="mhSearchFrom" type="date" value="${esc(s.dateFrom)}">
         <input id="mhSearchTo" type="date" value="${esc(s.dateTo)}">
         <button class="btn" id="mhSearchBtn">ძებნა</button>
@@ -1942,7 +1991,12 @@ function renderMyHomeJobs(rows, role) {
       </div>
     </div>`;
 
-  const displayRows = mhSearchResults !== null ? mhSearchResults : rows;
+  const baseRows = mhSearchResults !== null ? mhSearchResults : rows;
+  // სტატუსის ფილტრი ვრცელდება ჩვეულებრივ (არა-ძებნის) სიაზეც — ცალკე
+  // API-ს გამოძახების გარეშე, იმავე მონაცემებზე კლიენტის მხარეს.
+  const displayRows = s.status ? baseRows.filter((r) => r.status === s.status) : baseRows;
+  mhRowsById = {};
+  displayRows.forEach((r) => { mhRowsById[r.job_id] = r; });
   const showAgentName = mhSearchResults !== null || role !== "agent";
   const listTitle = mhSearchResults !== null
     ? "ძებნის შედეგი"
@@ -1994,6 +2048,7 @@ function bindMyHomeJobsActions() {
       state.mhSearch = {
         q: (document.getElementById("mhSearchQ").value || "").trim(),
         dealType: document.getElementById("mhSearchDealType").value,
+        status: document.getElementById("mhSearchStatus").value,
         dateFrom: document.getElementById("mhSearchFrom").value,
         dateTo: document.getElementById("mhSearchTo").value,
       };
@@ -2003,6 +2058,7 @@ function bindMyHomeJobsActions() {
         const params = [];
         if (s.q) params.push("q=" + encodeURIComponent(s.q));
         if (s.dealType) params.push("deal_type=" + encodeURIComponent(s.dealType));
+        if (s.status) params.push("status=" + encodeURIComponent(s.status));
         if (s.dateFrom) params.push("date_from=" + encodeURIComponent(s.dateFrom));
         if (s.dateTo) params.push("date_to=" + encodeURIComponent(s.dateTo));
         const resp = await api("/api/myhome-jobs/search" + (params.length ? "?" + params.join("&") : ""));
@@ -2016,10 +2072,33 @@ function bindMyHomeJobsActions() {
   if (clearBtn) {
     clearBtn.onclick = async () => {
       mhSearchResults = null;
-      state.mhSearch = { q: "", dealType: "", dateFrom: "", dateTo: "" };
+      state.mhSearch = { q: "", dealType: "", status: "", dateFrom: "", dateTo: "" };
       await renderContent();
     };
   }
+
+  // სტატუსის dropdown-ის ცვლილება მაშინვე ფილტრავს უკვე ჩატვირთულ სიას
+  // (ცალკე API-ს გამოძახების გარეშე) — ჩვეულებრივ, არა-ძებნის რეჟიმში.
+  const statusSel = document.getElementById("mhSearchStatus");
+  if (statusSel) {
+    statusSel.onchange = () => {
+      state.mhSearch = { ...state.mhSearch, status: statusSel.value };
+      renderContent();
+    };
+  }
+
+  document.querySelectorAll("[data-mh-row]").forEach((rowEl) => {
+    rowEl.onclick = (e) => {
+      if (e.target.closest("[data-mh-retry]")) return; // retry ღილაკზე დაჭერა ცალკე იმართება
+      _openMyHomeDetail(rowEl.dataset.mhRow);
+    };
+  });
+  document.querySelectorAll("[data-mh-retry]").forEach((retryBtn) => {
+    retryBtn.onclick = (e) => {
+      e.stopPropagation();
+      _mhRetryJob(retryBtn.dataset.mhRetry, retryBtn);
+    };
+  });
 }
 
 /* ------------------------------------------- MyHome სტატისტიკა (მენეჯერი/ადმინი) */
