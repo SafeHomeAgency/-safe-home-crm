@@ -343,6 +343,14 @@ def api_myhome_jobs_create():
     if not listing_id or not listing_id.isdigit():
         return jsonify(error="MyHome ID არასწორია — მხოლოდ ციფრები"), 400
 
+    # მესაკუთრის ნომერი სავალდებულოდ აგენტისგანვე ვიღებთ — myhome.ge-ს
+    # საკუთარი "ნომრის ნახვა" ხშირად დროებით იბლოკება (ანგარიშის/IP-ის
+    # დონეზე, ავტომატურადაც და ხელითაც), ამიტომ worker.py აღარ ცდილობს
+    # საიტიდან ამოღებას — პირდაპირ ამ ველს იყენებს.
+    owner_number = str(body.get("owner_number") or "").strip()
+    if not owner_number:
+        return jsonify(error="მესაკუთრის ნომრის მითითება სავალდებულოა"), 400
+
     team = str(agent.get("team", "")).strip()
     account = sheets.get_myhome_account_for_team(team)
     if not account or not str(account.get("manager_label", "")).strip():
@@ -361,6 +369,7 @@ def api_myhome_jobs_create():
         "cooperation_percent": str(body.get("cooperation_percent") or "").strip(),
         "final_price": str(body.get("final_price") or "").strip(),
         "notes": str(body.get("notes") or "").strip(),
+        "owner_number": owner_number,
     })
     row = sheets.find_myhome_job(job_id)
     if agent.get("telegram_chat_id"):

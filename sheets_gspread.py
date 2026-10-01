@@ -228,6 +228,7 @@ MYHOME_JOBS_HEADERS = [
     "status", "error_message", "retry_count",
     "created_at", "started_at", "completed_at",
     "deal_type", "address", "district", "city",
+    "owner_number",
 ]
 
 # თიმი -> მენეჯერის MyHome ანგარიშის (non-secret) იარლიყი. ნამდვილი

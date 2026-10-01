@@ -95,6 +95,7 @@ MYHOME_JOBS_HEADERS = [
     "status", "error_message", "retry_count",
     "created_at", "started_at", "completed_at",
     "deal_type", "address", "district", "city",
+    "owner_number",
 ]
 MYHOME_ACCOUNTS_HEADERS = ["team", "manager_label", "manager_name", "updated_at"]
 
