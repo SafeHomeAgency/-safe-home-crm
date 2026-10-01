@@ -1929,6 +1929,7 @@ function _openMyHomeDetail(jobId) {
     { label: "რაიონი", value: r.district },
     { label: "ქალაქი", value: r.city },
     { label: "შენიშვნა", value: r.notes },
+    { label: "მესაკუთრის ნომერი", value: r.owner_number },
     { label: "დაემატა", value: r.created_at },
     { label: "დაიწყო დამუშავება", value: r.started_at },
     { label: "დასრულდა", value: r.completed_at },
@@ -1959,6 +1960,7 @@ function renderMyHomeJobs(rows, role) {
       <h2>🏘️ MyHome ლისტინგის დამატება</h2>
       <div class="qa-compose">
         <input id="mhListingId" type="text" inputmode="numeric" placeholder="MyHome ID (მაგ. 20134412)">
+        <input id="mhOwnerNumber" type="text" inputmode="tel" placeholder="მესაკუთრის ნომერი (სავალდებულო)">
         <input id="mhPercent" type="text" inputmode="decimal" placeholder="თანამშრომლობის % (არასავალდებულო)">
         <input id="mhPrice" type="text" inputmode="decimal" placeholder="საბოლოო ფასი (არასავალდებულო)">
         <textarea id="mhNotes" placeholder="შენიშვნა (არასავალდებულო)"></textarea>
@@ -2019,16 +2021,19 @@ function bindMyHomeJobsActions() {
   if (btn) {
     btn.onclick = async () => {
       const listingId = (document.getElementById("mhListingId").value || "").trim();
+      const ownerNumber = (document.getElementById("mhOwnerNumber").value || "").trim();
       const percent = (document.getElementById("mhPercent").value || "").trim();
       const price = (document.getElementById("mhPrice").value || "").trim();
       const notes = (document.getElementById("mhNotes").value || "").trim();
       if (!listingId || !/^\d+$/.test(listingId)) { toast("შეიყვანეთ სწორი MyHome ID (მხოლოდ ციფრები)"); return; }
+      if (!ownerNumber) { toast("შეიყვანეთ მესაკუთრის ნომერი"); return; }
       btn.disabled = true;
       try {
         await api("/api/myhome-jobs", {
           method: "POST",
           body: JSON.stringify({
             myhome_listing_id: listingId,
+            owner_number: ownerNumber,
             cooperation_percent: percent,
             final_price: price,
             notes,
