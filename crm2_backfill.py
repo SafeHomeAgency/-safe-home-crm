@@ -62,7 +62,7 @@ def build_plan(tasks: list[dict], reports: list[dict], meetings: list[dict],
                 "status": "new", "source": "backfill",
                 "assigned_agent_id": str(lt.get("assigned_to", "")),
                 "assigned_agent_name": str(lt.get("assigned_to_name", "")),
-                "deal_type": str(lt.get("deal_type") or lt.get("lead_type") or ""),
+                "deal_type": str(lt.get("deal_type") or ""),
                 "created_at": now, "updated_at": now, "created_by": "backfill",
             })
             new_clients.append(rec)

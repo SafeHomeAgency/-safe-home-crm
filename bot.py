@@ -34,6 +34,7 @@ import crm_extras
 import crm_time
 import sheets
 import webserver
+import crm2_sync
 import migrate_sheets_to_postgres
 
 logging.basicConfig(
@@ -455,6 +456,8 @@ async def newtask_gen_priority(update: Update, context: ContextTypes.DEFAULT_TYP
         due_date="", created_by=str(update.effective_user.id),
         lead_type="general", client_phone=d["nl_phone"], deal_type=d["nl_deal"],
     )
+    crm2_sync.task_created(task_id, assigned_to=agent_id, client_phone=d["nl_phone"], title=title,
+                           deal_type=d["nl_deal"], by=str(update.effective_user.id))
     agent_name = next(
         (a["name"] for a in sheets.get_agents() if a["agent_id"] == agent_id), agent_id
     )
@@ -502,6 +505,8 @@ async def newtask_listing_time(update: Update, context: ContextTypes.DEFAULT_TYP
         lead_type="listing", client_phone=d["nl_listing_phone"],
         listing_id=d["nl_listing_id"], viewing_time=viewing_time,
     )
+    crm2_sync.task_created(task_id, assigned_to=agent_id, client_phone=d["nl_listing_phone"], title=title,
+                           by=str(update.effective_user.id))
     agent_name = next(
         (a["name"] for a in sheets.get_agents() if a["agent_id"] == agent_id), agent_id
     )
@@ -597,6 +602,8 @@ async def _clientreport_save(update: Update, context: ContextTypes.DEFAULT_TYPE,
         actions=", ".join(d.get("rp_actions_labels", [])),
         notes=notes, file_id=", ".join(files),
     )
+    crm2_sync.report_created(report_id, agent_id=d["rp_agent_id"], client_phone=d["rp_phone"],
+                             actions=", ".join(d.get("rp_actions_labels", [])), notes=notes)
     extra = f" ({len(files)} ფაილით)" if files else ""
     await update.message.reply_text(f"✅ რეპორტი შენახულია{extra} (id: {report_id}).")
     d.clear()
@@ -788,6 +795,7 @@ async def meeting_field(update: Update, context: ContextTypes.DEFAULT_TYPE):
     fields["agent_name"] = agent["name"]
     fields["agent_phone"] = agent.get("phone", "")
     meeting_id = sheets.create_meeting(fields)
+    crm2_sync.meeting_created(meeting_id, fields)
 
     await update.message.reply_text(f"✅ შეხვედრის მონაცემები შენახულია (id: {meeting_id}).")
 
@@ -881,6 +889,7 @@ async def exclusive_field(update: Update, context: ContextTypes.DEFAULT_TYPE):
     agent = context.user_data["ex_agent"]
     d = context.user_data["ex_data"]
     exclusive_id = sheets.create_exclusive(agent["agent_id"], d)
+    crm2_sync.exclusive_created(exclusive_id, agent["agent_id"], d)
     await update.message.reply_text(f"✅ ექსკლუზივი დამატებულია ბაზაში (id: {exclusive_id}).")
 
     summary = (

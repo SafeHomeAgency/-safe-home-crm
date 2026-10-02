@@ -35,6 +35,7 @@ import config
 import crm_extras
 import crm_security
 import crm_time
+import crm2_sync
 import sheets
 
 log = logging.getLogger("safehome-crm-webapp")
@@ -1417,6 +1418,12 @@ def api_tasks_new():
             owner_phone=owner_phone,
         )
 
+    # CRM 2.0 (P2.4): ასახვა კლიენტად/აქტივობად — ფონურად, ჩავარდნა დავალებას არ ეხება
+    crm2_sync.task_created(
+        task_id, assigned_to=target_agent_id, client_phone=phone,
+        owner_phone=(owner_phone if kind == "listing" else ""), title=title,
+        deal_type=(deal_type if kind != "listing" else ""), by=created_by,
+    )
     _audit(agent, admin, "task_create", "task", task_id, metadata={"kind": kind})
     return jsonify(ok=True, task_id=task_id)
 
@@ -1879,12 +1886,16 @@ def api_clockout():
         if result == "ok" and cr_valid:
             try:
                 photo_paths = _save_base64_photos(cr.get("photos"))
-                sheets.create_report(
+                _rid = sheets.create_report(
                     agent_id=agent_id,
                     client_phone=str(cr.get("phone", "")).strip(),
                     actions=str(cr.get("actions", "")).strip(),
                     notes=str(cr.get("notes", "")).strip(),
                     file_id=",".join(photo_paths),
+                )
+                crm2_sync.report_created(
+                    _rid, agent_id=agent_id, client_phone=str(cr.get("phone", "")).strip(),
+                    actions=str(cr.get("actions", "")).strip(), notes=str(cr.get("notes", "")).strip(),
                 )
             except Exception:
                 log.exception("Mini App clockout client report ვერ შეიქმნა agent_id=%s", agent_id)
