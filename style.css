@@ -620,3 +620,50 @@ body {
 .chart-wrap svg { display: block; overflow: visible; }
 .chart-lbl { font-size: 8.5px; fill: var(--hint); font-family: var(--font-ui); font-weight: 600; }
 .chart-val { font-size: 9.5px; fill: var(--text); font-family: var(--font-ui); font-weight: 800; }
+
+/* ===== v4.0: [hidden] fix + Attendance / Districts / multi-select ===== */
+/* .qa-compose{display:flex} გადაფარავდა [hidden]-ს და დამალული ველები
+   (მაგ. "კონკრეტული ბინის" ფორმაში ორი ტელეფონი) მაინც ჩანდა. */
+[hidden] { display: none !important; }
+
+.chk-row { display: flex; align-items: center; gap: 10px; }
+.chk-row > input[type=checkbox], .chk-pick { width: 20px; height: 20px; flex: none; accent-color: var(--gold); }
+.bulk-bar {
+  position: sticky; top: 0; z-index: 5; display: flex; gap: 8px; align-items: center; flex-wrap: wrap;
+  padding: 9px 10px; margin-bottom: 10px; border-radius: 12px;
+  background: rgba(201, 162, 39, .12); border: 1px solid rgba(201, 162, 39, .3); font-size: 12.5px;
+}
+.bulk-bar .btn { padding: 8px 12px; font-size: 12.5px; margin: 0; flex: none; }
+.bulk-bar .grow { flex: 1; min-width: 80px; font-weight: 650; }
+
+.att-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 10px; }
+.att-grid .stat .num { font-size: 18px; }
+.att-note { font-size: 12px; color: var(--hint); margin-top: 8px; line-height: 1.45; }
+.att-err {
+  margin-top: 10px; padding: 10px 12px; border-radius: 12px; font-size: 12.5px; line-height: 1.45;
+  background: rgba(242, 109, 109, .12); border: 1px solid rgba(242, 109, 109, .3); color: var(--red);
+}
+.att-err .btn { margin-top: 8px; padding: 8px 12px; font-size: 12.5px; }
+
+.chip-row { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+.chip {
+  display: inline-flex; align-items: center; gap: 4px; padding: 5px 10px; border-radius: 99px;
+  font-size: 12px; font-weight: 600; background: rgba(147, 166, 188, .14); color: var(--text);
+  border: 1px solid var(--hairline);
+}
+.chip.sel { background: rgba(201, 162, 39, .2); border-color: rgba(201, 162, 39, .55); color: var(--gold-light); }
+button.chip { cursor: pointer; font-family: inherit; }
+.dist-group { margin-top: 12px; }
+.dist-group .gname { font-size: 12px; font-weight: 750; color: var(--gold-light); margin-bottom: 2px; }
+
+.filter-row { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; }
+.filter-row select, .filter-row input {
+  flex: 1; min-width: 110px; padding: 9px 10px; border-radius: 10px; font-size: 13px; font-family: inherit;
+  background: rgba(10, 20, 32, .55); color: var(--text); border: 1px solid var(--hairline);
+}
+.tbl-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+.att-table { width: 100%; border-collapse: collapse; font-size: 12px; min-width: 520px; }
+.att-table th { text-align: left; color: var(--hint); font-weight: 650; padding: 6px 6px; border-bottom: 1px solid var(--hairline); white-space: nowrap; }
+.att-table td { padding: 8px 6px; border-bottom: 1px solid var(--hairline); white-space: nowrap; }
+.att-table tr.clickable { cursor: pointer; }
+.qa-compose input[type=date], .qa-compose input[type=month] { min-height: 40px; }

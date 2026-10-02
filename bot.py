@@ -30,6 +30,8 @@ from telegram.ext import (
 )
 
 import config
+import crm_extras
+import crm_time
 import sheets
 import webserver
 import migrate_sheets_to_postgres
@@ -213,6 +215,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "/dayoff — დასვენების დღის მოთხოვნა\n"
             "/myschedule — შენი კვირის გრაფიკი\n"
             "/clockin — სამუშაო დღის დაწყება\n"
+            "/attendance — დღევანდელი დასწრების სტატუსი\n"
             "/clockout — სამუშაო დღის დასრულება\n"
             "/swapshift — სმენის/ცვლის გაცვლის მოთხოვნა\n"
             "/swapnumber — შიდა ნომრის გაცვლა კოლეგასთან\n"
@@ -638,7 +641,21 @@ async def dayoff_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def dayoff_date(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data["do_date"] = update.message.text.strip()
+    # აქამდე თავისუფალი ტექსტი ("ხვალ", "15/09") ინახებოდა უცვლელად და
+    # ასეთი ჩანაწერი ავტომატურ შემოწმებებში (თვის ჭერი, გაფრთხილებისგან
+    # გათავისუფლება Day off-ის დღეს) ვერ მონაწილეობდა. ახლა თარიღი
+    # მკაცრად მოწმდება და ISO (YYYY-MM-DD) ფორმატით ინახება.
+    day = crm_time.parse_user_date(update.message.text)
+    if not day:
+        await update.message.reply_text(
+            "თარიღი ვერ ამოვიცანი. დაწერეთ ასე: 2026-09-15 (ან 15.09.2026).\n"
+            "უფრო მარტივად — Mini App-ში „შვებულება“ ტაბზე თარიღს კალენდრიდან აირჩევთ."
+        )
+        return DO_DATE
+    if day < crm_time.local_today():
+        await update.message.reply_text("გასული თარიღის დასვენება ვერ მოითხოვება. დაწერეთ მომავალი თარიღი.")
+        return DO_DATE
+    context.user_data["do_date"] = day.strftime("%Y-%m-%d")
     await update.message.reply_text("მიზეზი? (თუ არ გინდათ მითითება, დაწერეთ „-“)")
     return DO_REASON
 
@@ -1341,6 +1358,24 @@ async def clockin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if mode == "off":
         await update.message.reply_text("დღეს თქვენთვის გრაფიკის მიხედვით დასვენების დღეა.")
         return
+    # ოფისის GPS ვერიფიკაცია ჩართულია (ადმინმა კოორდინატი დააყენა) —
+    # დაწყებას ლოკაცია სჭირდება: ბოტი იღებს Telegram-ის "ლოკაციის
+    # გაზიარების" ღილაკით (ან აგენტი იყენებს Mini App-ს).
+    if crm_extras.attendance_settings()["configured"]:
+        att = sheets.get_today_attendance(agent["agent_id"])
+        if att and att.get("clock_in"):
+            await update.message.reply_text("დღეს უკვე დარეგისტრირებული გაქვთ დაწყება.")
+            return
+        context.user_data["await_checkin_geo"] = agent["agent_id"]
+        await update.message.reply_text(
+            "📍 სამუშაოს დასაწყებად გააზიარეთ თქვენი ლოკაცია ქვემოთ მოცემული ღილაკით "
+            "(ან გახსენით Mini App).",
+            reply_markup=ReplyKeyboardMarkup(
+                [[KeyboardButton("📍 ლოკაციის გაზიარება", request_location=True)]],
+                resize_keyboard=True, one_time_keyboard=True,
+            ),
+        )
+        return
     result = sheets.clock_in(agent["agent_id"])
     if result == "already":
         await update.message.reply_text("დღეს უკვე დარეგისტრირებული გაქვთ დაწყება.")
@@ -1349,6 +1384,89 @@ async def clockin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"✅ სამუშაო დღე დაწყებულია ({SCHEDULE_MODE_LABELS.get(mode, mode)}). "
             "ახლა შეგიძლიათ მიიღოთ ახალი კლიენტები."
         )
+
+
+async def on_location(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/clockin-ის შემდეგ გაზიარებული ლოკაცია -> სამუშაოს დაწყება იმავე
+    სერვერული ვერიფიკაციით, რაც Mini App-ში (crm_extras.check_in).
+    მხოლოდ მაშინ მუშაობს, თუ ამ აგენტმა ახლახან /clockin გაუშვა — სხვა
+    შემთხვევაში ლოკაცია იგნორირდება (მუდმივი ტრეკინგი არ ხდება)."""
+    agent_id = context.user_data.pop("await_checkin_geo", None)
+    if not agent_id:
+        return
+    msg = update.message
+    agent = sheets.find_agent_by_chat_id(update.effective_chat.id)
+    if not agent or str(agent.get("agent_id")) != str(agent_id) or not msg or not msg.location:
+        return
+    if getattr(msg, "forward_origin", None) or getattr(msg, "forward_date", None):
+        await msg.reply_text("⚠️ გადაგზავნილი ლოკაცია არ მიიღება — გააზიარეთ თქვენი ახლანდელი ლოკაცია.",
+                             reply_markup=ReplyKeyboardRemove())
+        return
+    loc = msg.location
+    geo = {"lat": float(loc.latitude), "lng": float(loc.longitude),
+           "accuracy": getattr(loc, "horizontal_accuracy", None)}
+    try:
+        res = crm_extras.check_in(agent, geo)
+    except Exception:
+        log.exception("ბოტის check-in ჩავარდა agent_id=%s", agent_id)
+        await msg.reply_text("⚠️ ვერ მოხერხდა. სცადეთ ხელახლა /clockin.", reply_markup=ReplyKeyboardRemove())
+        return
+    if not res.get("ok"):
+        await msg.reply_text(res.get("message", "შეცდომა"), reply_markup=ReplyKeyboardRemove())
+        return
+    if res.get("result") == "already":
+        await msg.reply_text("დღეს უკვე დარეგისტრირებული გაქვთ დაწყება.", reply_markup=ReplyKeyboardRemove())
+        return
+    dist = res.get("distance_m")
+    place = crm_extras.GEO_STATUS_LABELS.get(res.get("geo_status"), "")
+    dist_txt = f" — {dist} მ ოფისიდან" if dist is not None else ""
+    late_txt = "\n🟡 დაგვიანებით დაწყება" if res.get("late") else ""
+    await msg.reply_text(
+        f"✅ სამუშაო დღე დაწყებულია ({SCHEDULE_MODE_LABELS.get(res.get('mode'), res.get('mode'))}).\n"
+        f"{place}{dist_txt}{late_txt}",
+        reply_markup=ReplyKeyboardRemove(),
+    )
+    alert = crm_extras.checkin_alert_text(agent, res)
+    if alert:
+        targets = set(config.ADMIN_CHAT_IDS)
+        lead = None
+        if str(agent.get("role", "")).strip() != "team_lead":
+            team_val = str(agent.get("team", "")).strip()
+            lead = next((x for x in sheets.get_agents()
+                         if str(x.get("role", "")).strip() == "team_lead"
+                         and str(x.get("team", "")).strip() == team_val and team_val), None)
+        if lead and lead.get("telegram_chat_id"):
+            targets.add(int(lead["telegram_chat_id"]))
+        for cid in targets:
+            try:
+                await context.bot.send_message(chat_id=cid, text=alert)
+            except Exception:
+                log.exception("check-in შეტყობინება ვერ გაიგზავნა chat=%s", cid)
+
+
+async def attendance_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/attendance — დღევანდელი დასწრების სტატუსი + Mini App-ის გახსნის ღილაკი."""
+    agent = sheets.find_agent_by_chat_id(update.effective_chat.id)
+    if not agent:
+        await update.message.reply_text("ჯერ დარეგისტრირდით — გამოიყენეთ /start.")
+        return
+    c = crm_extras.attendance_card(agent)
+    lines = ["🕘 სამუშაო დრო", f"სტატუსი: {c['state_label']}"]
+    if c.get("check_in"):
+        place = crm_extras.GEO_STATUS_LABELS.get(c.get("check_in_geo"), "")
+        dist = f" — {c['check_in_distance']} მ" if str(c.get("check_in_distance") or "") else ""
+        lines.append(f"დაწყება: {c['check_in']}" + (" 🟡 დაგვიანებით" if c.get("late") else ""))
+        if place:
+            lines.append(f"ადგილი: {place}{dist}")
+    if c.get("check_out"):
+        lines.append(f"დასრულება: {c['check_out']}")
+    if c.get("hours_text"):
+        lines.append(f"ხანგრძლივობა: {c['hours_text']}")
+    if not c.get("gps_enabled"):
+        lines.append("\nℹ️ ოფისის GPS ვერიფიკაცია ჯერ არ არის ჩართული.")
+    await update.message.reply_text(
+        "\n".join(lines), reply_markup=_webapp_markup("🕘 გახსენი Attendance"),
+    )
 
 
 # ოფისის ცვლაზე (office_morning/office_evening) დღის დასასრულს 3
@@ -1374,9 +1492,8 @@ def _count_myhome_completed_today(agent_id: str) -> int:
     დამოწმებული) MyHome განცხადებების რაოდენობა დღეისთვის — რეგლამენტის
     ანგარიშისთვის, აგენტის ხელით შეყვანილი (და, შესაბამისად,
     შესაძლო არაზუსტი) რიცხვის ნაცვლად."""
-    today = datetime.datetime.now().strftime("%Y-%m-%d")
-    jobs = sheets.get_myhome_jobs(agent_id=agent_id, status="COMPLETED")
-    return sum(1 for j in jobs if str(j.get("completed_at", "")).startswith(today))
+    # თბილისის დღის საზღვრებით (სერვერი UTC-ზეა) — იხ. crm_extras
+    return crm_extras.count_myhome_completed_today(agent_id)
 
 
 async def clockout_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1470,7 +1587,10 @@ async def _finish_clockout(update: Update, context: ContextTypes.DEFAULT_TYPE,
         today = datetime.datetime.now().strftime("%Y-%m-%d")
         detail = f"{today}: {total}/{quota} ({SCHEDULE_MODE_LABELS.get(mode, mode)})"
         result = sheets.add_warning(agent_id, "quota_missed", detail)
-        note = f"\n\n⚠️ დღევანდელი გეგმა ({quota}) ვერ შესრულდა — ჩაეწერა გაფრთხილება."
+        if result.get("skipped"):
+            note = f"\n\n🏖 დღევანდელი გეგმა ({quota}) ვერ შესრულდა, მაგრამ დღეს დამტკიცებული Day off გაქვთ — გაფრთხილება არ ჩაწერილა."
+        else:
+            note = f"\n\n⚠️ დღევანდელი გეგმა ({quota}) ვერ შესრულდა — ჩაეწერა გაფრთხილება."
         await _notify_warning(context, agent, "quota_missed", detail, result)
 
     await update.message.reply_text(f"✅ სამუშაო დღე დასრულებულია. შეყვანილია: {count_display}.{note}")
@@ -1531,15 +1651,16 @@ async def warnings_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_chat.id):
         return
     rows = sheets.get_warnings(days=config.WARNING_WINDOW_DAYS)
+    period_text = "მიმდინარე თვე" if config.WARNING_RESET_MONTHLY else f"ბოლო {config.WARNING_WINDOW_DAYS} დღე"
     if not rows:
-        await update.message.reply_text(f"ბოლო {config.WARNING_WINDOW_DAYS} დღეში გაფრთხილება არ ყოფილა.")
+        await update.message.reply_text(f"{period_text}: გაფრთხილება არ ყოფილა.")
         return
     agents_by_id = {a["agent_id"]: a["name"] for a in sheets.get_agents()}
     by_agent: dict[str, list] = {}
     for r in rows:
         by_agent.setdefault(str(r.get("agent_id")), []).append(r)
 
-    lines = [f"⚠️ გაფრთხილებები (ბოლო {config.WARNING_WINDOW_DAYS} დღე):", ""]
+    lines = [f"⚠️ გაფრთხილებები ({period_text}):", ""]
     for agent_id, warns in sorted(by_agent.items(), key=lambda kv: -len(kv[1])):
         name = agents_by_id.get(agent_id, agent_id)
         active_count = len([w for w in warns if str(w.get("status") or "active") != "dismissed"])
@@ -1828,17 +1949,25 @@ async def check_new_tasks(context: ContextTypes.DEFAULT_TYPE):
         agent = agents_by_id.get(str(t.get("assigned_to")))
         if agent and agent.get("telegram_chat_id"):
             try:
+                # კლიენტის ნომერი ერთხელ: ზოგადი ლიდის სათაური უკვე შეიცავს
+                # ნომერს ("კლიენტი 5xx (ქირა)") — ამ შემთხვევაში ცალკე
+                # "კლიენტი: ..." ხაზს აღარ ვამატებთ (ადრე ნომერი ორჯერ ჩანდა).
                 extra = ""
-                if t.get("client_phone"):
-                    extra += f"\nკლიენტი: {t['client_phone']}"
+                phone = str(t.get("client_phone") or "").strip()
+                if phone and phone not in str(t.get("title") or ""):
+                    extra += f"\nკლიენტი: {phone}"
+                if str(t.get("owner_phone") or "").strip():
+                    extra += f"\nმესაკუთრე: {t['owner_phone']}"
                 if t.get("viewing_time"):
                     extra += f"\nნახვის დრო: {t['viewing_time']}"
+                details = str(t.get("description") or "").strip()
+                details_line = f"\n📝 დეტალი: {details}" if details else ""
                 await context.bot.send_message(
                     chat_id=int(agent["telegram_chat_id"]),
                     text=(
-                        f"🆕 ახალი დავალება: {t['title']}\n"
-                        f"{t.get('description') or ''}"
-                        f"{extra}\n"
+                        f"🆕 ახალი დავალება: {t['title']}"
+                        f"{extra}"
+                        f"{details_line}\n"
                         f"პრიორიტეტი: {t.get('priority') or '-'} | ვადა: {t.get('due_date') or '-'}\n"
                         f"დახურვა: /done_{t['task_id']}"
                     ),
@@ -2004,10 +2133,15 @@ WARNING_LABELS = {
 
 
 async def _notify_warning(context: ContextTypes.DEFAULT_TYPE, agent: dict, w_type: str, detail: str, result: dict):
+    # დამტკიცებული Day off-ის დღეს გაფრთხილება საერთოდ არ იწერება
+    # (sheets.add_warning -> skipped="dayoff") — არავის არაფერი ეგზავნება.
+    if result.get("skipped"):
+        return
     label = WARNING_LABELS.get(w_type, w_type)
+    period_text = "მიმდინარე თვეში" if config.WARNING_RESET_MONTHLY else f"ბოლო {config.WARNING_WINDOW_DAYS} დღეში"
     text_admin = (
         f"⚠️ გაფრთხილება — {agent['name']}: {label}\n{detail}\n"
-        f"ბოლო {config.WARNING_WINDOW_DAYS} დღეში: {result['count']}/{config.WARNING_LIMIT}"
+        f"{period_text}: {result['count']}/{config.WARNING_LIMIT}"
     )
     if result["deactivated"]:
         text_admin += (
@@ -2408,6 +2542,104 @@ async def check_daily_compliance(context: ContextTypes.DEFAULT_TYPE):
                 await _notify_warning(context, a, "quota_missed", detail, result)
 
 
+async def check_missing_checkouts(context: ContextTypes.DEFAULT_TYPE):
+    """ყოველდღე MISSING_CHECKOUT_HOUR-ზე (თბილისის დრო): ვინც დღეს სამუშაო
+    დაიწყო (/clockin ან Mini App), მაგრამ დასრულება არ დაუფიქსირებია —
+    თავად აგენტს მოკლე შეხსენება, თიმლიდერს თავისი გუნდის სია, ადმინს —
+    ყველასი. (გაფრთხილება არ იწერება — უბრალოდ შეტყობინება.)"""
+    try:
+        today = crm_time.local_today().strftime(crm_time.DATE_FMT)
+        rows = [
+            r for r in sheets.get_attendance_records(date_from=today, date_to=today)
+            if r.get("clock_in") and not r.get("clock_out")
+        ]
+        if not rows:
+            return
+        agents_by_id = {str(a.get("agent_id")): a for a in sheets.get_agents()}
+    except Exception:
+        log.exception("missing checkout შემოწმება ჩავარდა")
+        return
+
+    by_lead: dict[str, list[str]] = {}
+    all_names: list[str] = []
+    for r in rows:
+        a = agents_by_id.get(str(r.get("agent_id")))
+        if not a:
+            continue
+        all_names.append(a.get("name", ""))
+        if a.get("telegram_chat_id"):
+            try:
+                await context.bot.send_message(
+                    chat_id=int(a["telegram_chat_id"]),
+                    text="⚠️ დღეს სამუშაოს დასრულება არ დაგიფიქსირებიათ. დააჭირეთ /clockout ან გახსენით Mini App.",
+                )
+            except Exception:
+                log.exception("missing checkout შეხსენება ვერ გაეგზავნა agent_id=%s", a.get("agent_id"))
+        team_val = str(a.get("team", "")).strip()
+        lead = next((x for x in agents_by_id.values()
+                     if str(x.get("role", "")).strip() == "team_lead"
+                     and str(x.get("team", "")).strip() == team_val and team_val
+                     and str(x.get("agent_id")) != str(a.get("agent_id"))), None)
+        if lead and lead.get("telegram_chat_id"):
+            by_lead.setdefault(str(lead["telegram_chat_id"]), []).append(a.get("name", ""))
+    for chat, names in by_lead.items():
+        try:
+            await context.bot.send_message(
+                chat_id=int(chat),
+                text="❗ დასრულება არ დაუფიქსირებიათ ამ აგენტებს:\n" + "\n".join(f"• {n}" for n in names),
+            )
+        except Exception:
+            log.exception("missing checkout თიმლიდერს ვერ გაეგზავნა")
+    for admin_id in config.ADMIN_CHAT_IDS:
+        try:
+            await context.bot.send_message(
+                chat_id=admin_id,
+                text=f"❗ დასრულება არ დაუფიქსირებიათ ({len(all_names)}):\n" + "\n".join(f"• {n}" for n in all_names),
+            )
+        except Exception:
+            log.exception("missing checkout ადმინს ვერ გაეგზავნა")
+
+
+async def remind_district_assignments(context: ContextTypes.DEFAULT_TYPE):
+    """კვირაში ერთხელ (კვირა დღეს 18:00, თბილისი): თიმლიდერს ახსენებს,
+    რომ მომავალი კვირის რაიონები ჯერ არ აქვს განაწილებული რამდენიმე
+    აგენტზე (თუ ყველა უკვე განაწილებულია — არაფერი იგზავნება)."""
+    if crm_time.local_now().weekday() != 6:
+        return
+    try:
+        next_week = crm_time.week_start() + datetime.timedelta(days=7)
+        ws = next_week.strftime(crm_time.DATE_FMT)
+        assigned = {
+            str(r.get("agent_id")) for r in sheets.get_district_assignments(week_start=ws)
+            if str(r.get("districts", "")).strip()
+        }
+        agents = [a for a in sheets.get_agents() if crm_extras._is_active_agent(a)]
+    except Exception:
+        log.exception("რაიონების შეხსენება ჩავარდა")
+        return
+    for lead in agents:
+        if str(lead.get("role", "")).strip() != "team_lead" or not lead.get("telegram_chat_id"):
+            continue
+        team_val = str(lead.get("team", "")).strip()
+        if not team_val:
+            continue
+        missing = [a for a in agents if str(a.get("team", "")).strip() == team_val
+                   and str(a.get("agent_id")) not in assigned]
+        if not missing:
+            continue
+        try:
+            await context.bot.send_message(
+                chat_id=int(lead["telegram_chat_id"]),
+                text=(
+                    f"📍 მომავალი კვირის ({crm_extras.week_label(next_week)}) რაიონები ჯერ არ არის "
+                    f"განაწილებული {len(missing)} აგენტზე. გახსენით Mini App → რაიონები."
+                ),
+                reply_markup=_webapp_markup("📍 რაიონების განაწილება"),
+            )
+        except Exception:
+            log.exception("რაიონების შეხსენება ვერ გაეგზავნა lead=%s", lead.get("agent_id"))
+
+
 async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE):
     """
     გლობალური შეცდომების დამჭერი — თუ რომელიმე ბრძანების დამუშავებისას
@@ -2470,6 +2702,8 @@ def main():
     app.add_handler(CommandHandler("meetings", meetings_list))
     app.add_handler(CommandHandler("myschedule", myschedule))
     app.add_handler(CommandHandler("clockin", clockin_cmd))
+    app.add_handler(CommandHandler("attendance", attendance_cmd))
+    app.add_handler(MessageHandler(filters.LOCATION, on_location))
     app.add_handler(CommandHandler("schedule", schedule_today))
     app.add_handler(CommandHandler("warnings", warnings_list))
     app.add_handler(CommandHandler("reactivate", reactivate_agent))
@@ -2641,6 +2875,14 @@ def main():
         app.job_queue.run_repeating(remind_before_shift_edge, interval=300, first=60)
         app.job_queue.run_repeating(check_manager_notifications, interval=300, first=90)
         app.job_queue.run_repeating(check_myhome_jobs_stale, interval=300, first=150)
+        app.job_queue.run_daily(
+            check_missing_checkouts,
+            time=datetime.time(hour=config.MISSING_CHECKOUT_HOUR, minute=0, tzinfo=ZoneInfo(config.TIMEZONE)),
+        )
+        app.job_queue.run_daily(
+            remind_district_assignments,
+            time=datetime.time(hour=18, minute=0, tzinfo=ZoneInfo(config.TIMEZONE)),
+        )
 
     log.info("ბოტი გაშვებულია...")
     # drop_pending_updates=True: სტარტზე ასუფთავებს დაგროვილ ძველ/გაფუჭებულ

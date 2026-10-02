@@ -47,6 +47,8 @@ const AGENT_TABS = [
   { id: "today", label: "დღეს", icon: "🏠" },
   { id: "tasks", label: "დავალებები", icon: "📋" },
   { id: "kpi", label: "KPI", icon: "📈" },
+  { id: "myattendance", label: "დასწრება", icon: "🕘", lazy: true },
+  { id: "mydayoffs", label: "შვებულება", icon: "🏖️", lazy: true },
   { id: "taskhistory", label: "ისტორია", icon: "📜", lazy: true },
   { id: "meetings", label: "შეხვედრები", icon: "🤝", lazy: true },
   { id: "exclusives", label: "ექსკლუზივები", icon: "🏘️", lazy: true },
@@ -58,6 +60,8 @@ const ADMIN_TABS = [
   { id: "overview", label: "მიმოხილვა", icon: "📊" },
   { id: "team", label: "გუნდი", icon: "🧑‍🤝‍🧑" },
   { id: "ranking", label: "რეიტინგი", icon: "🏆" },
+  { id: "attendance", label: "დასწრება", icon: "🕘", lazy: true },
+  { id: "districts", label: "რაიონები", icon: "📍", lazy: true },
   { id: "agentsmgmt", label: "აგენტები", icon: "🗂️", lazy: true, adminOnly: true },
   { id: "agentrequests", label: "მოთხოვნები", icon: "📥", lazy: true },
   { id: "admintasks", label: "დავალებები", icon: "📄", lazy: true },
@@ -276,10 +280,70 @@ async function api(path, opts) {
     { "Content-Type": "application/json", "X-Telegram-Init-Data": tg ? tg.initData : "" },
     (opts && opts.headers) || {}
   );
-  const res = await fetch(path, Object.assign({}, opts, { headers }));
+  let res;
+  try {
+    res = await fetch(path, Object.assign({}, opts, { headers }));
+  } catch (netErr) {
+    const err = new Error("⚠️ ქსელი მიუწვდომელია — შეამოწმეთ ინტერნეტი და სცადეთ ხელახლა");
+    err.code = "network";
+    throw err;
+  }
   const body = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(body.error || "დაფიქსირდა შეცდომა");
+  if (!res.ok) {
+    const err = new Error(body.error || "დაფიქსირდა შეცდომა");
+    err.code = body.code || "";
+    throw err;
+  }
   return body;
+}
+
+/* ------------------------------------------------ GPS (Attendance) */
+/* ლოკაცია მოითხოვება მხოლოდ "დაწყება"/"დასრულება" ღილაკზე დაჭერისას
+   (ერთჯერადად) — არანაირი ფონური თვალყურის დევნება. მანძილს/სტატუსს
+   სერვერი ითვლის, აქედან მხოლოდ {lat, lng, accuracy} მიდის. */
+function _geoError(code, message) {
+  const e = new Error(message);
+  e.code = code;
+  return e;
+}
+function _browserGeo() {
+  return new Promise((resolve, reject) => {
+    if (!navigator.geolocation) { reject(_geoError("gps_unavailable", "GPS ამ მოწყობილობაზე მიუწვდომელია")); return; }
+    navigator.geolocation.getCurrentPosition(
+      (pos) => resolve({ lat: pos.coords.latitude, lng: pos.coords.longitude, accuracy: pos.coords.accuracy }),
+      (err) => {
+        if (err && err.code === 1) reject(_geoError("gps_denied", "📍 Location permission საჭიროა"));
+        else if (err && err.code === 3) reject(_geoError("gps_timeout", "⏱ მდებარეობის განსაზღვრას დიდი დრო დასჭირდა"));
+        else reject(_geoError("gps_unavailable", "⚠️ მდებარეობის განსაზღვრა ვერ მოხერხდა"));
+      },
+      { enableHighAccuracy: true, timeout: 20000, maximumAge: 0 },
+    );
+  });
+}
+function _telegramGeo() {
+  return new Promise((resolve, reject) => {
+    const lm = tg && tg.LocationManager;
+    if (!lm) { reject(_geoError("gps_unavailable", "GPS მიუწვდომელია")); return; }
+    // callback-ი შეიძლება არასდროს დაბრუნდეს (ძველი კლიენტი/WebView) —
+    // ღილაკი უსასრულოდ რომ არ "გაიჭედოს", 10 წამში ვწყვეტთ.
+    const timer = setTimeout(() => reject(_geoError("gps_timeout", "⏱ მდებარეობის განსაზღვრას დიდი დრო დასჭირდა")), 10000);
+    const ask = () => lm.getLocation((loc) => {
+      clearTimeout(timer);
+      if (!loc) { reject(_geoError("gps_denied", "📍 Location permission საჭიროა")); return; }
+      resolve({ lat: loc.latitude, lng: loc.longitude, accuracy: loc.horizontal_accuracy });
+    });
+    try { lm.isInited ? ask() : lm.init(ask); } catch (e) { reject(_geoError("gps_unavailable", "GPS მიუწვდომელია")); }
+  });
+}
+async function getGeo() {
+  try {
+    return await _browserGeo();
+  } catch (e) {
+    if (tg && tg.LocationManager && (e.code === "gps_denied" || e.code === "gps_unavailable")) {
+      try { return await _telegramGeo(); } catch (e2) { /* ქვემოთ პირველ შეცდომას ვაბრუნებთ */ }
+    }
+    throw e;
+  }
 }
 
 function ring(percent, size = 74, stroke = 8) {
@@ -328,6 +392,64 @@ function statusBadge(mode, clockedIn, clockOut) {
 
 /* ---------------------------------------------------------- AGENT VIEW */
 
+const GEO_LABEL = {
+  OFFICE: "🏢 ოფისში", OUTSIDE_OFFICE: "📍 ოფისის გარეთ",
+  LOCATION_UNRELIABLE: "⚠️ არასანდო ლოკაცია", NOT_CONFIGURED: "—",
+};
+const ATT_STATE_BADGE = {
+  NOT_STARTED: ["amber", "არ დაწყებულა"], ACTIVE: ["green", "მუშაობს"],
+  COMPLETED: ["gray", "დასრულებული"], MISSING_CHECKOUT: ["red", "დასრულება არ დაფიქსირდა"],
+  DAY_OFF: ["gray", "დასვენების დღე"], OFF: ["gray", "დასვენება"],
+};
+function attStateBadge(s) {
+  const [cls, label] = ATT_STATE_BADGE[s] || ["gray", s || "-"];
+  return `<span class="badge ${cls}">${esc(label)}</span>`;
+}
+function fmtDistance(m) {
+  if (m === "" || m == null) return "—";
+  const n = Number(m);
+  if (!isFinite(n)) return "—";
+  return n >= 1000 ? (n / 1000).toFixed(1) + " კმ" : Math.round(n) + " მ";
+}
+
+/* აგენტის დღევანდელი დასწრების ბარათი (მონაცემი /api/dashboard-იდან). */
+function renderAttendanceCard() {
+  const a = state.data && state.data.attendance;
+  if (!a) return "";
+  const geoLine = a.check_in_geo
+    ? `${esc(GEO_LABEL[a.check_in_geo] || a.check_in_geo)}${a.check_in_distance !== "" ? " · " + esc(fmtDistance(a.check_in_distance)) : ""}`
+    : "—";
+  return `<div class="card">
+    <h2>🕘 დასწრება ${attStateBadge(a.state)}</h2>
+    <div class="att-grid">
+      <div class="stat"><div class="num">${esc(a.check_in || "—")}</div><div class="lbl">დაწყება${a.late ? " · 🔴 დაგვიანება" : ""}</div></div>
+      <div class="stat"><div class="num">${esc(a.check_out || "—")}</div><div class="lbl">დასრულება</div></div>
+      <div class="stat"><div class="num" style="font-size:14px">${esc(a.hours_text || "—")}</div><div class="lbl">ნამუშევარი დრო</div></div>
+      <div class="stat"><div class="num" style="font-size:13px">${geoLine}</div><div class="lbl">ლოკაცია დაწყებისას</div></div>
+    </div>
+    ${a.gps_enabled
+      ? `<div class="att-note">📍 დაწყებისა და დასრულებისას ერთჯერადად მოგეთხოვებათ მდებარეობა (ოფისის რადიუსი: ${esc(a.radius_m)} მ). ფონურად ლოკაცია არ მოწმდება.</div>`
+      : `<div class="att-note">ოფისის GPS ვერიფიკაცია ჯერ არ არის ჩართული.</div>`}
+  </div>`;
+}
+
+/* კვირის რაიონები — აგენტი ხედავს ამ კვირის (და უკვე განაწილებულ
+   მომავალი კვირის) რაიონებს. */
+function renderDistrictsCard() {
+  const dd = state.data && state.data.districts;
+  if (!dd) return "";
+  const chips = (list) => `<div class="chip-row">${list.map((x) => `<span class="chip sel">📍 ${esc(x)}</span>`).join("")}</div>`;
+  return `<div class="card">
+    <h2>📍 ამ კვირის რაიონები <span class="cnt">${esc(dd.week_label || "")}</span></h2>
+    ${dd.districts && dd.districts.length
+      ? chips(dd.districts)
+      : `<div class="empty">ამ კვირისთვის რაიონი ჯერ არ არის მინიჭებული</div>`}
+    ${dd.next_districts && dd.next_districts.length
+      ? `<div class="att-note">შემდეგი კვირა (${esc(dd.next_week_label || "")}):</div>${chips(dd.next_districts)}`
+      : ""}
+  </div>`;
+}
+
 function renderToday(d) {
   const t = d.today;
   const isOffice = t.mode === "office_morning" || t.mode === "office_evening";
@@ -367,7 +489,11 @@ function renderToday(d) {
       <button class="btn" id="btnClockIn" ${canClockIn ? "" : "disabled"}>▶️ დაწყება</button>
       <button class="btn secondary" id="btnClockOut" ${canClockOut ? "" : "disabled"}>⏹️ დასრულება</button>
     </div>
+    <div id="attErr" hidden></div>
   </div>
+
+  ${renderAttendanceCard()}
+  ${renderDistrictsCard()}
 
   <div class="card">
     <h2>👥 კლიენტები</h2>
@@ -399,9 +525,9 @@ function renderToday(d) {
 }
 
 const TASK_FIELD_LABELS = [
-  ["title", "სათაური"], ["description", "აღწერა"], ["assigned_to_name", "შემსრულებელი"],
+  ["title", "სათაური"], ["description", "დამატებითი დეტალი"], ["assigned_to_name", "შემსრულებელი"],
   ["priority", "პრიორიტეტი"], ["status", "სტატუსი"], ["lead_type", "ტიპი"],
-  ["due_date", "ვადა"], ["client_phone", "კლიენტის ტელეფონი"],
+  ["due_date", "ვადა"], ["client_phone", "კლიენტის ტელეფონი"], ["owner_phone", "მესაკუთრის ნომერი"],
   ["deal_type", "გარიგება"], ["listing_id", "ლისტინგის ID"], ["viewing_time", "ნახვის დრო"],
   ["created_at", "შექმნის თარიღი"], ["updated_at", "ბოლო განახლება"],
 ];
@@ -430,6 +556,7 @@ function renderTasks(d) {
         <div class="main">
           <div class="title">${esc(t.title || "")}</div>
           <div class="sub">${esc(t.client_phone || t.description || "")}</div>
+          ${t.client_phone && t.description ? `<div class="sub" style="white-space:normal">📝 ${esc(t.description)}</div>` : ""}
           ${t.seen === "yes"
             ? `<div class="sub">✅ მიღებულია</div>`
             : `<button class="btn secondary" data-ack-btn="${esc(t.task_id)}" style="margin-top:6px;padding:7px 10px">✅ მივიღე კლიენტი</button>`}
@@ -500,44 +627,67 @@ function renderKpi(d) {
 function bindAgentActions(d) {
   const btnIn = document.getElementById("btnClockIn");
   const btnOut = document.getElementById("btnClockOut");
-  if (btnIn) btnIn.onclick = async () => {
-    btnIn.disabled = true;
-    try {
-      const res = await api("/api/clockin", { method: "POST" });
-      tg && tg.HapticFeedback && tg.HapticFeedback.notificationOccurred("success");
-      toast(res.result === "already" ? "უკვე დაწყებულია" : "დღე დაიწყო ✅");
-      await load();
-    } catch (e) { toast(e.message); btnIn.disabled = false; }
+  const attBox = document.getElementById("attErr");
+  const showAttError = (e, retry) => {
+    if (!attBox) { toast(e.message); return; }
+    const gpsCodes = ["gps_denied", "gps_unavailable", "gps_timeout", "invalid_location", "location_required"];
+    const help = gpsCodes.includes(e.code)
+      ? "ჩართეთ მდებარეობა (Location) ტელეფონის პარამეტრებში და Telegram-ისთვის, გადით ღია სივრცეში/ფანჯარასთან და სცადეთ ხელახლა. ალტერნატივა: ბოტში გამოიყენეთ /clockin და გააგზავნეთ ლოკაცია."
+      : (e.code === "outside_office" ? "დაწყება შესაძლებელია მხოლოდ ოფისის ტერიტორიიდან." : "");
+    attBox.hidden = false;
+    attBox.className = "att-err";
+    attBox.innerHTML = `${esc(e.message)}${help ? `<div style="margin-top:6px;color:var(--text)">${esc(help)}</div>` : ""}
+      <button class="btn secondary" id="attRetry">🔄 ხელახლა ცდა</button>`;
+    const rb = document.getElementById("attRetry");
+    if (rb && retry) rb.onclick = retry;
   };
+  const clearAttError = () => { if (attBox) { attBox.hidden = true; attBox.innerHTML = ""; } };
+  const gpsEnabled = !!(state.data && state.data.attendance && state.data.attendance.gps_enabled);
+  const busy = (btn, text) => { btn.disabled = true; btn.dataset.label = btn.textContent; btn.textContent = text; };
+  const unbusy = (btn) => { btn.disabled = false; if (btn.dataset.label) btn.textContent = btn.dataset.label; };
+
+  const startDay = async () => {
+    clearAttError();
+    busy(btnIn, gpsEnabled ? "📍 მდებარეობა…" : "…");
+    try {
+      const body = gpsEnabled ? await getGeo() : {};
+      const res = await api("/api/clockin", { method: "POST", body: JSON.stringify(body) });
+      tg && tg.HapticFeedback && tg.HapticFeedback.notificationOccurred("success");
+      toast(res.result === "already" ? "უკვე დაწყებულია" : (res.late ? "დღე დაიწყო (დაგვიანებით) ✅" : "დღე დაიწყო ✅"));
+      await load();
+    } catch (e) {
+      unbusy(btnIn);
+      showAttError(e, startDay);
+    }
+  };
+  if (btnIn) btnIn.onclick = startDay;
   if (btnOut) btnOut.onclick = async () => {
     const isOffice = d.today.mode === "office_morning" || d.today.mode === "office_evening";
-    const hasQuota = !!d.today.quota;
     let body = {};
     if (isOffice) {
+      // MyHome-ის რაოდენობა აღარ იკითხება — სერვერი ავტომატურად ითვლის
+      // რეალურად დადებული განცხადებებიდან; საიტი/ss.ge თვითდეკლარაციაა.
       const site = prompt("რამდენი განცხადება ატვირთეთ დღეს ჩვენს საიტზე?", d.today.site_count || "0");
       if (site === null) return;
-      const myhome = prompt("რამდენი — myhome-ზე?", d.today.myhome_count || "0");
-      if (myhome === null) return;
       const ssge = prompt("რამდენი — ss.ge-ზე?", d.today.ssge_count || "0");
       if (ssge === null) return;
-      body = { site, myhome, ssge };
-    } else if (hasQuota) {
-      const count = prompt("რამდენი განცხადება შეიყვანეთ დღეს?", d.today.count_submitted || "0");
-      if (count === null) return;
-      body = { count };
+      body = { site, ssge };
     }
 
     const doClockout = async (finalBody) => {
-      btnOut.disabled = true;
+      clearAttError();
+      busy(btnOut, gpsEnabled ? "📍 მდებარეობა…" : "…");
       try {
-        const res = await api("/api/clockout", { method: "POST", body: JSON.stringify(finalBody) });
-        if (res.result === "not_in") { toast("ჯერ არ დაგიწყიათ დღე"); btnOut.disabled = false; return; }
+        const geo = gpsEnabled ? await getGeo() : {};
+        const res = await api("/api/clockout", { method: "POST", body: JSON.stringify(Object.assign({}, finalBody, geo)) });
+        if (res.result === "not_in") { toast("ჯერ არ დაგიწყიათ დღე"); unbusy(btnOut); return; }
+        if (res.result === "already_out") { toast("დღე უკვე დასრულებულია"); await load(); return; }
         tg && tg.HapticFeedback && tg.HapticFeedback.notificationOccurred("success");
         toast("დღე დასრულდა ✅");
         await load();
       } catch (e) {
-        toast(e.message);
-        btnOut.disabled = false;
+        unbusy(btnOut);
+        showAttError(e, () => doClockout(finalBody));
         throw e;
       }
     };
@@ -565,7 +715,7 @@ function bindAgentActions(d) {
       return;
     }
 
-    await doClockout(body);
+    try { await doClockout(body); } catch (e) { /* შეცდომა უკვე ნაჩვენებია (attErr) */ }
   };
 }
 
@@ -609,7 +759,8 @@ const TEAM_FIELD_LABELS = [
   ["team", "გუნდი"], ["mode", "დღევანდელი რეჟიმი"], ["count_submitted", "შეყვანილი დღეს (ჯამი)"],
   ["site_count", "საიტი"], ["myhome_count", "myhome"], ["ssge_count", "ss.ge"], ["quota", "დღიური გეგმა"],
   ["clients_today", "კლიენტი დღეს"], ["clients_total", "კლიენტი ჯამურად"], ["assigned", "მიღებული (30დღე)"],
-  ["warnings", "გაფრთხილებები"], ["collaboration", "თანამშრომლობა (ექსკლუზივის გაზიარება)"],
+  ["warnings", "გაფრთხილებები"], ["districts", "ამ კვირის რაიონები"],
+  ["collaboration", "თანამშრომლობა (ექსკლუზივის გაზიარება)"],
 ];
 
 /* გუნდი დაჯგუფებულია მენეჯერის/თიმის მიხედვით (t.team ველით) — ადმინს
@@ -714,9 +865,18 @@ function renderRanking(d) {
    თვის ჭერი (მაქს. N დღეოფი თვეში ერთ აგენტზე) ვიზუალურადაც ჩანს. */
 function renderDayoffs(payload) {
   const p = payload || {};
-  const pending = p.pending || [];
-  const approved = p.approved || [];
-  const rejected = p.rejected || [];
+  const df = state.dayoffDateFilter || "";
+  const byDate = (list) => (df ? list.filter((r) => String(r.date || "").trim() === df) : list);
+  const pending = byDate(p.pending || []);
+  const approved = byDate(p.approved || []);
+  const rejected = byDate(p.rejected || []);
+  const dateFilterCard = `<div class="card">
+    <h2>📅 თარიღით ფილტრი</h2>
+    <div class="qa-compose">
+      <input type="date" id="dayoffDateFilter" value="${esc(df)}" />
+      ${df ? `<button class="btn secondary" id="dayoffDateClear">✖ გაწმენდა</button>` : ""}
+    </div>
+  </div>`;
   const row = (r, withActions) => `
       <div class="list-row clickable" data-detail-id="${esc(r.request_id)}">
         <div class="avatar">${initials(r.agent_name)}</div>
@@ -730,7 +890,7 @@ function renderDayoffs(payload) {
         <button class="btn" data-act="approved" data-id="${esc(r.request_id)}">✅ დამტკიცება</button>
         <button class="btn danger" data-act="rejected" data-id="${esc(r.request_id)}">✖️ უარყოფა</button>
       </div>` : ""}`;
-  return `<div class="card">
+  return dateFilterCard + `<div class="card">
     <h2>⏳ მომლოდინე მოთხოვნები <span class="cnt">${pending.length}</span></h2>
     <div class="sub" style="margin-bottom:8px">მაქსიმუმ ${esc(p.monthly_limit || 3)} დღეოფი, ერთ აგენტზე, კალენდარულ თვეში</div>
     ${pending.length === 0 ? `<div class="empty">მოლოდინში აღარაფერია</div>` : pending.map((r) => row(r, true)).join("")}
@@ -754,6 +914,10 @@ const DAYOFF_FIELD_LABELS = [
 function bindDayoffsActions(payload) {
   const p = payload || {};
   const allRows = [...(p.pending || []), ...(p.approved || []), ...(p.rejected || [])];
+  const dateInput = document.getElementById("dayoffDateFilter");
+  if (dateInput) dateInput.onchange = () => { state.dayoffDateFilter = dateInput.value || ""; renderContent(); };
+  const dateClear = document.getElementById("dayoffDateClear");
+  if (dateClear) dateClear.onclick = () => { state.dayoffDateFilter = ""; renderContent(); };
   document.querySelectorAll("[data-detail-id]").forEach((el) => {
     el.onclick = () => {
       const r = allRows.find((x) => String(x.request_id) === el.dataset.detailId);
@@ -847,10 +1011,17 @@ function renderWarnings(rows) {
       </div>`).join("")}
   </div>`;
 
+  const isLeadView = !!(state.data && state.data.is_team_lead);
   const warnRowHtml = (w) => {
     const statusLabel = WARNING_STATUS_LABEL[w.status] || "";
+    const bucket = _warningBucket(w);
+    // მულტი-მონიშვნა: აქტიურზე (გაუქმების მოთხოვნისთვის) და მომლოდინეზე
+    // (დამტკიცება/უარყოფა — მხოლოდ ადმინი).
+    const selectable = w.warning_id && (bucket === "active" || bucket === "rejected" || (bucket === "pending" && !isLeadView));
+    const pickKind = bucket === "pending" ? "pending" : "active";
     return `
-      <div class="list-row clickable" data-warn-idx="${rows.indexOf(w)}">
+      <div class="list-row clickable chk-row" data-warn-idx="${rows.indexOf(w)}">
+        ${selectable ? `<input type="checkbox" class="chk-pick" data-warn-chk="${esc(w.warning_id)}" data-kind="${pickKind}" ${state.warnSel.has(String(w.warning_id)) ? "checked" : ""} />` : ""}
         <div class="avatar" style="background:linear-gradient(135deg,#f59e0b,#ef4444)">⚠️</div>
         <div class="main">
           <div class="title">${esc(w.agent_name)} — ${esc(WARNING_LABELS[w.type] || w.type)}</div>
@@ -859,16 +1030,18 @@ function renderWarnings(rows) {
         <div class="side sub">${esc((w.created_at || "").split(" ")[0] || "")}</div>
       </div>`;
   };
-  const section = (icon, title, list) => `<div class="card">
+  const section = (icon, title, list, selKind) => `<div class="card">
     <h2>${icon} ${title} <span class="cnt">${list.length}</span></h2>
+    ${selKind && list.length > 1 && (selKind === "active" || !isLeadView)
+      ? `<div style="margin-bottom:8px"><button class="chip" data-sel-all="${selKind}">☑ ყველას მონიშვნა / მოხსნა</button></div>` : ""}
     ${list.length === 0 ? `<div class="empty">ცარიელია</div>` : list.map(warnRowHtml).join("")}
   </div>`;
 
-  return filterBar + agentCardsHtml
-    + section("🕐", "დასადასტურებელი", buckets.pending)
+  return filterBar + agentCardsHtml + `<div id="warnBulk"></div>`
+    + section("🕐", "დასადასტურებელი", buckets.pending, "pending")
     + section("✅", "დადასტურებული (გაუქმებულია)", buckets.dismissed)
     + section("❌", "უარყოფილი (აქტიურად რჩება)", buckets.rejected)
-    + section("⚠️", "აქტიური", buckets.active);
+    + section("⚠️", "აქტიური", buckets.active, "active");
 }
 
 function _warningBucket(w) {
@@ -879,9 +1052,96 @@ function _warningBucket(w) {
   return "active";
 }
 
+/* მულტი-მონიშვნის პანელი: აქტიური გაფრთხილებებისთვის — "გაუქმების
+   მოთხოვნა" (მენეჯერი/ადმინი), მომლოდინეებისთვის — "დამტკიცება/უარყოფა"
+   (მხოლოდ ადმინი). მონიშვნა გადახაზვის გარეშე ახლდება (გვერდი არ
+   "ხტება"). */
+function bindWarningsBulk(rows, isAdmin) {
+  const bar = document.getElementById("warnBulk");
+  if (!bar) return;
+  const kindOf = (id) => {
+    const w = rows.find((x) => String(x.warning_id) === id);
+    return w && _warningBucket(w) === "pending" ? "pending" : "active";
+  };
+  // ფილტრის/სიის ცვლილებისას გაქრობილი ID-ები მონიშვნიდან ამოვიღოთ
+  const present = new Set(rows.map((w) => String(w.warning_id)));
+  state.warnSel.forEach((id) => { if (!present.has(id)) state.warnSel.delete(id); });
+
+  const refresh = () => {
+    const ids = [...state.warnSel];
+    const act = ids.filter((id) => kindOf(id) === "active");
+    const pen = ids.filter((id) => kindOf(id) === "pending");
+    if (!ids.length) { bar.innerHTML = ""; return; }
+    bar.innerHTML = `<div class="bulk-bar">
+      <span class="grow">☑ მონიშნულია: ${ids.length}</span>
+      ${act.length ? `<button class="btn" id="bulkReq">📝 გაუქმების მოთხოვნა (${act.length})</button>` : ""}
+      ${pen.length && isAdmin ? `<button class="btn" id="bulkApprove">✅ დამტკიცება (${pen.length})</button>
+        <button class="btn danger" id="bulkReject">❌ უარყოფა (${pen.length})</button>` : ""}
+      <button class="btn secondary" id="bulkClear">✖</button>
+    </div>`;
+    document.getElementById("bulkClear").onclick = () => {
+      state.warnSel.clear();
+      document.querySelectorAll("[data-warn-chk]").forEach((c) => { c.checked = false; });
+      refresh();
+    };
+    const done = async (fn, okMsg) => {
+      try {
+        const res = await fn();
+        state.warnSel.clear();
+        toast(okMsg(res));
+        delete lazyCache.warnings;
+        await renderContent();
+      } catch (e) { toast(e.message); }
+    };
+    const reqBtn = document.getElementById("bulkReq");
+    if (reqBtn) reqBtn.onclick = async () => {
+      const reason = prompt(`რატომ ითხოვთ ${act.length} გაფრთხილების გაუქმებას? (ერთი მიზეზი ყველასთვის)`);
+      if (!reason || !reason.trim()) return;
+      reqBtn.disabled = true;
+      await done(
+        () => api("/api/warnings/request-dismiss-bulk", { method: "POST", body: JSON.stringify({ warning_ids: act, reason: reason.trim() }) }),
+        (r) => `მოთხოვნა გაიგზავნა ✅ (${r.requested}${r.skipped ? `, გამოტოვებული: ${r.skipped}` : ""})`,
+      );
+    };
+    const decide = (approve) => async () => {
+      if (!confirm(`${approve ? "დამტკიცდეს" : "უარყოფილ იქნეს"} ${pen.length} მოთხოვნა?`)) return;
+      await done(
+        () => api("/api/warnings/decide-dismiss-bulk", { method: "POST", body: JSON.stringify({ warning_ids: pen, approve }) }),
+        (r) => `გადაწყვეტილება შენახულია ✅ (${r.decided})`,
+      );
+    };
+    const ap = document.getElementById("bulkApprove");
+    const rj = document.getElementById("bulkReject");
+    if (ap) ap.onclick = decide(true);
+    if (rj) rj.onclick = decide(false);
+  };
+
+  document.querySelectorAll("[data-warn-chk]").forEach((c) => {
+    c.onclick = (e) => e.stopPropagation();
+    c.onchange = () => {
+      const id = c.dataset.warnChk;
+      if (c.checked) state.warnSel.add(id); else state.warnSel.delete(id);
+      refresh();
+    };
+  });
+  document.querySelectorAll("[data-sel-all]").forEach((b) => {
+    b.onclick = () => {
+      const boxes = [...document.querySelectorAll(`[data-warn-chk][data-kind="${b.dataset.selAll}"]`)];
+      const allOn = boxes.length && boxes.every((c) => c.checked);
+      boxes.forEach((c) => {
+        c.checked = !allOn;
+        if (c.checked) state.warnSel.add(c.dataset.warnChk); else state.warnSel.delete(c.dataset.warnChk);
+      });
+      refresh();
+    };
+  });
+  refresh();
+}
+
 function bindWarningsActions(rows) {
   const isTeamLead = state.role === "admin" && state.data && state.data.is_team_lead;
   const isAdmin = state.role === "admin" && !isTeamLead;
+  bindWarningsBulk(rows, isAdmin);
 
   const agentFilterSel = document.getElementById("warnAgentFilter");
   if (agentFilterSel) {
@@ -983,6 +1243,7 @@ function _clientRowsHtml(rows) {
       <div class="main">
         <div class="title">${esc(c.client_phone)}</div>
         <div class="sub">${esc(c.current_agent_name || "—")} · ${esc(c.status || "-")}${c.deal_type ? " · " + esc(c.deal_type) : ""}</div>
+        <div class="sub">📋 ${c.task_count || 0} · 📝 ${c.report_count || 0} · 📍 ${c.meeting_count || 0}</div>
       </div>
       <div class="side sub">${esc((c.last_activity || "").split(" ")[0] || "")}</div>
     </div>`).join("");
@@ -999,15 +1260,54 @@ function renderClients(rows) {
   </div>`;
 }
 
+/* ერთი ჩანაწერის ყველა არა-ცარიელი ველი — რომ კლიენტზე ჩაწერილი
+   არაფერი დაიმალოს (ტელეფონით ნაპოვნი ნებისმიერი მოქმედება). */
+function _kvLines(d, labels) {
+  return labels
+    .filter(([k]) => d[k] !== undefined && d[k] !== null && String(d[k]).trim() !== "")
+    .map(([k, label]) => `<div class="sub" style="white-space:normal">${esc(label)}: ${esc(d[k])}</div>`)
+    .join("");
+}
+
 function _clientTimelineItemHtml(entry) {
   const d = entry.data;
   if (entry.kind === "task") {
     return `<div class="list-row">
       <div class="avatar">${d.lead_type === "listing" ? "🏠" : "👤"}</div>
-      <div class="main">
-        <div class="title">📋 ${esc(d.title || "დავალება")}</div>
-        <div class="sub">შემსრულებელი: ${esc(d.assigned_to_name || "-")} · სტატუსი: ${esc(d.status || "-")}</div>
+      <div class="main" style="overflow:visible">
+        <div class="title" style="white-space:normal">📋 ${esc(d.title || "დავალება")}</div>
+        <div class="sub" style="white-space:normal">შემსრულებელი: ${esc(d.assigned_to_name || "-")} · სტატუსი: ${esc(d.status || "-")}</div>
+        ${_kvLines(d, [
+          ["description", "დამატებითი დეტალი"], ["client_phone", "კლიენტის ნომერი"], ["owner_phone", "მესაკუთრის ნომერი"],
+          ["listing_id", "ლისტინგი"], ["viewing_time", "ნახვის დრო"], ["deal_type", "გარიგება"], ["priority", "პრიორიტეტი"],
+        ])}
         <div class="sub">${esc(d.created_at || "")}${d.updated_at && d.updated_at !== d.created_at ? " → " + esc(d.updated_at) : ""}</div>
+      </div>
+    </div>`;
+  }
+  if (entry.kind === "exclusive") {
+    return `<div class="list-row">
+      <div class="avatar">🏘️</div>
+      <div class="main" style="overflow:visible">
+        <div class="title" style="white-space:normal">ექსკლუზივი — ${esc(d.agent_name || "-")}</div>
+        ${_kvLines(d, [
+          ["property_type", "ტიპი"], ["deal_type", "გარიგება"], ["location", "მდებარეობა"], ["price", "ფასი"],
+          ["owner_phone", "მესაკუთრის ნომერი"], ["notes", "შენიშვნა"],
+        ])}
+        <div class="sub">${esc(d.created_at || "")}</div>
+      </div>
+    </div>`;
+  }
+  if (entry.kind === "myhome") {
+    return `<div class="list-row">
+      <div class="avatar">🌐</div>
+      <div class="main" style="overflow:visible">
+        <div class="title" style="white-space:normal">MyHome განცხადება — ${esc(d.agent_name || "-")}</div>
+        ${_kvLines(d, [
+          ["status", "სტატუსი"], ["myhome_listing_id", "MyHome ID"], ["owner_number", "მესაკუთრის ნომერი"],
+          ["final_price", "ფასი"], ["address", "მისამართი"], ["error_message", "შეცდომა"],
+        ])}
+        <div class="sub">${esc(d.completed_at || d.created_at || "")}</div>
       </div>
     </div>`;
   }
@@ -1015,8 +1315,8 @@ function _clientTimelineItemHtml(entry) {
     const photos = String(d.file_id || "").split(",").map((s) => s.trim()).filter((s) => s.startsWith("uploads/"));
     return `<div class="list-row">
       <div class="avatar">📝</div>
-      <div class="main">
-        <div class="title">რეპორტი — ${esc(d.agent_name || "-")}</div>
+      <div class="main" style="overflow:visible">
+        <div class="title" style="white-space:normal">რეპორტი — ${esc(d.agent_name || "-")}</div>
         <div class="sub">${esc(d.actions || "-")}</div>
         ${d.notes ? `<div class="sub">${esc(d.notes)}</div>` : ""}
         <div class="sub">${esc(d.created_at || "")}</div>
@@ -1026,9 +1326,10 @@ function _clientTimelineItemHtml(entry) {
   }
   return `<div class="list-row">
     <div class="avatar">📍</div>
-    <div class="main">
-      <div class="title">შეხვედრა — ${esc(d.agent_name || "-")}</div>
-      <div class="sub">${esc(d.address || d.district || "-")}${d.price ? " · " + esc(d.price) : ""}</div>
+    <div class="main" style="overflow:visible">
+      <div class="title" style="white-space:normal">შეხვედრა — ${esc(d.agent_name || "-")}</div>
+      <div class="sub" style="white-space:normal">${esc(d.address || d.district || "-")}${d.price ? " · " + esc(d.price) : ""}</div>
+      ${_kvLines(d, [["owner_phone", "მესაკუთრის ნომერი"], ["client_phone", "კლიენტის ნომერი"], ["district", "რაიონი"], ["condition", "მდგომარეობა"], ["percent", "პროცენტი"]])}
       <div class="sub">${esc(d.meeting_date || "")} ${esc(d.time || "")}</div>
     </div>
   </div>`;
@@ -1062,7 +1363,7 @@ function bindClientRowClicks(rows) {
       document.getElementById("modalClose").onclick = closeDetail;
       backdrop.onclick = (e) => { if (e.target === backdrop) closeDetail(); };
       try {
-        const res = await api(`/api/clients/${encodeURIComponent(c.client_phone)}`);
+        const res = await api(`/api/clients/${encodeURIComponent(c.phone_key || c.client_phone)}`);
         const timeline = res.timeline || [];
         box.innerHTML = `
           <h3>${esc(c.client_phone)}<button class="close" id="modalClose">✕</button></h3>
@@ -1396,12 +1697,15 @@ function renderNewTaskForm(agents) {
         <input type="checkbox" id="ntAssignSelf" />
         <span class="sub" style="margin:0">საკუთარ თავზე დავარეგისტრირო (ავტომატური აგენტის არჩევის გარეშე)</span>
       </label>
+      <textarea id="ntNotes" rows="2" maxlength="1000" placeholder="დამატებითი დეტალი (არასავალდებულო) — აგენტი წაიკითხავს ამ კლიენტზე"></textarea>
     </div>
     <div class="qa-compose" data-kind-fields="listing" ${newTaskKind === "listing" ? "" : "hidden"}>
       <select id="ntAgent">${agentOptions || `<option value="">აგენტი არ არის</option>`}</select>
       <input id="ntListingId" placeholder="ლისტინგის/ბინის ID" />
       <input id="ntListingPhone" placeholder="კლიენტის ტელეფონი" />
+      <input id="ntOwnerPhone" placeholder="მესაკუთრის ნომერი (არასავალდებულო)" inputmode="tel" />
       <input id="ntViewingTime" placeholder="ნახვის დრო (მაგ. ხვალ 12:00)" />
+      <textarea id="ntListingNotes" rows="2" maxlength="1000" placeholder="დამატებითი დეტალი (არასავალდებულო) — აგენტი წაიკითხავს ამ კლიენტზე"></textarea>
     </div>
     <button class="btn" id="ntSubmit" style="margin-top:4px">დამატება</button>
   </div>`;
@@ -1480,6 +1784,7 @@ function bindAdminTasksActions() {
           deal_type: document.getElementById("ntDeal").value,
           priority: document.getElementById("ntPriority").value,
           assign_to_self: !!(assignSelf && assignSelf.checked),
+          notes: (document.getElementById("ntNotes").value || "").trim(),
         };
       } else {
         const agentId = document.getElementById("ntAgent").value;
@@ -1493,6 +1798,8 @@ function bindAdminTasksActions() {
           listing_id: listingId,
           phone,
           viewing_time: (document.getElementById("ntViewingTime").value || "").trim(),
+          owner_phone: (document.getElementById("ntOwnerPhone").value || "").trim(),
+          notes: (document.getElementById("ntListingNotes").value || "").trim(),
         };
       }
       submitBtn.disabled = true;
@@ -2346,8 +2653,9 @@ const AGENT_BOT_COMMAND_GROUPS = [
     ["/cancel", "მიმდინარე ნაბიჯოვანი ბრძანების გაუქმება", "თუ რომელიმე მრავალნაბიჯოვანი ბრძანება (მაგ. /newtask, /addexclusive) შუაში გაგიჭირდათ ან შეცდომით დაიწყეთ — /cancel წყვეტს მას და ბოტს საწყის მდგომარეობაში აბრუნებს."],
   ] },
   { icon: "🕐", title: "ყოველდღიური სამუშაო", items: [
-    ["/clockin", "სამუშაო დღის დაწყება", "აღნიშნავს დღის დაწყების ზუსტ დროს. ოფისის ცვლაზე დაგვიანებით დაწყება (grace-პერიოდის მეტ ხანს) ავტომატურ გაფრთხილებას წარმოშობს — ამიტომ სჯობს დროულად."],
-    ["/clockout", "სამუშაო დღის დასრულება — განცხადებების რაოდენობა + კლიენტის რეპორტი", "დღის ბოლოს გამოსაყენებელია: ითხოვს დღიური გეგმის რიცხვებს (განცხადებები საიტზე/myhome/ss.ge ან ონლაინის შემთხვევაში საერთო რაოდენობა), ხოლო თუ დღეს კონკრეტული კლიენტი გქონდათ მინიჭებული — სავალდებულოდ ითხოვს იმ კლიენტის ანგარიშსაც (რა შესრულდა, დეტალები, სურათებიც კი). ეს უკანასკნელი აღარ იტოვება გამოტოვებას."],
+    ["/clockin", "სამუშაო დღის დაწყება (+ მდებარეობა)", "აღნიშნავს დღის დაწყების ზუსტ დროს. თუ ოფისის GPS ვერიფიკაცია ჩართულია, ბოტი ითხოვს მდებარეობას (ღილაკი „📍 მდებარეობის გაგზავნა“) — მხოლოდ დაწყების მომენტში, ფონური თვალყურის გარეშე. ოფისის ცვლაზე დაგვიანებით დაწყება ავტომატურ გაფრთხილებას წარმოშობს; დამტკიცებულ დასვენების დღეს გაფრთხილება არ იწერება."],
+    ["/attendance", "დღევანდელი დასწრება", "აჩვენებს დღევანდელ დაწყების/დასრულების დროს, ნამუშევარ საათებს და ლოკაციის სტატუსს (ოფისში/ოფისის გარეთ). მენეჯერს/ადმინს — გუნდის დღევანდელ შეჯამებას."],
+    ["/clockout", "სამუშაო დღის დასრულება — განცხადებების რაოდენობა + კლიენტის რეპორტი", "დღის ბოლოს გამოსაყენებელია: ოფისის ცვლაზე ითხოვს საიტისა და ss.ge-ის რიცხვებს (MyHome-ის რაოდენობა ავტომატურად ითვლება რეალურად დადებული განცხადებებიდან), ხოლო თუ დღეს კონკრეტული კლიენტი გქონდათ მინიჭებული — სავალდებულოდ ითხოვს იმ კლიენტის ანგარიშსაც (რა შესრულდა, დეტალები, სურათებიც კი). ეს უკანასკნელი აღარ იტოვება გამოტოვებას."],
     ["/mytasks", "ჩემი მიმდინარე დავალებების ნახვა", "აჩვენებს ყველა დავალებას, რომელიც ამჟამად თქვენზეა მინიჭებული და ჯერ არაა დასრულებული."],
     ["/done (task_id)", "დავალების დასრულებულად მონიშვნა", "კონკრეტული task_id-ის მითითებით დავალებას სრულდება-ს სტატუსში გადაჰყავს — task_id ჩანს /mytasks-ის სიაში."],
   ] },
@@ -2395,7 +2703,9 @@ const MANAGER_MINIAPP_TABS = [
   ["📊", "მიმოხილვა / 🏆 რეიტინგი", "გუნდის შედეგები დღე/კვირა/თვის ჭრილში"],
   ["📥", "მოთხოვნები", "ახალი აგენტის მოწვევის ან არსებულის გათავისუფლების მოთხოვნა — საბოლოო დამტკიცება ადმინთანაა"],
   ["📝", "რეპორტები", "გუნდის რეპორტების ისტორია + ხარისხის შეფასება (1-5), თარიღით/პერიოდით ფილტრი"],
-  ["🗓️", "შვებულებები", "გუნდის დღეოფის მოთხოვნების დამტკიცება/უარყოფა, პლუს ისტორია"],
+  ["🕘", "დასწრება", "გუნდის დღევანდელი დაწყება/დასრულება, ოფისში/გარეთ, დაგვიანება, საათები + ფილტრები და CSV ექსპორტი"],
+  ["📍", "რაიონები", "ყოველკვირეული რაიონების განაწილება აგენტებზე (მულტი-არჩევა) — აგენტი ხედავს დაშბორდზე და იღებს შეტყობინებას"],
+  ["🗓️", "შვებულებები", "გუნდის დღეოფის მოთხოვნების დამტკიცება/უარყოფა (თარიღით ფილტრი), პლუს ისტორია"],
   ["🔁", "სმენის გაცვლა", "გუნდის წევრებს შორის ცვლის გაცვლის მოთხოვნების გადაწყვეტა + ისტორია"],
   ["📄", "დავალებები", "ახალი კლიენტის დამატება და დავალების გუნდში გადაბარება"],
   ["🗞️", "დღის ამბები", "6 პუნქტიანი დღიური შეჯამება გუნდზე"],
@@ -2481,9 +2791,428 @@ function renderRegulations(payload) {
   return limitsCard + regsHtml + guideHtml;
 }
 
+/* ============================================== v4.0 — ახალი ტაბები */
+
+function todayIso() {
+  const d = new Date();
+  const p = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+}
+function addDaysIso(iso, n) {
+  const [y, m, d] = String(iso).split("-").map((x) => parseInt(x, 10));
+  const dt = new Date(Date.UTC(y, (m || 1) - 1, d || 1));
+  dt.setUTCDate(dt.getUTCDate() + n);
+  return dt.toISOString().slice(0, 10);
+}
+function mapsLink(lat, lng) {
+  if (lat === "" || lat == null || lng === "" || lng == null) return "";
+  return `https://www.google.com/maps?q=${encodeURIComponent(lat)},${encodeURIComponent(lng)}`;
+}
+function openExternal(url) {
+  if (tg && tg.openLink) tg.openLink(url); else window.open(url, "_blank");
+}
+const ATT_FIELDS = [
+  ["agent_name", "თანამშრომელი"], ["date", "თარიღი"], ["check_in", "დაწყება"],
+  ["check_in_distance", "დაშორება დაწყებისას (მ)"], ["check_in_accuracy", "სიზუსტე დაწყებისას (მ)"],
+  ["check_out", "დასრულება"], ["check_out_distance", "დაშორება დასრულებისას (მ)"],
+  ["check_out_accuracy", "სიზუსტე დასრულებისას (მ)"], ["hours_text", "ნამუშევარი დრო"], ["note", "შენიშვნა"],
+];
+
+/* ----- აგენტი: შვებულების მოთხოვნა (თარიღის არჩევით) ----- */
+function renderMyDayoffs(p) {
+  p = p || {};
+  const rows = p.rows || [];
+  const min = todayIso();
+  return `<div class="card">
+    <h2>🏖️ შვებულების/Day off მოთხოვნა</h2>
+    <div class="sub" style="margin-bottom:8px">ამ თვეში დამტკიცებული: ${esc(p.approved_this_month || 0)} / ${esc(p.monthly_limit || 3)}</div>
+    <div class="qa-compose">
+      <input type="date" id="doDate" min="${min}" value="${min}" />
+      <textarea id="doReason" rows="2" maxlength="500" placeholder="მიზეზი (არასავალდებულო)"></textarea>
+      <button class="btn" id="doSubmit">📨 მოთხოვნის გაგზავნა</button>
+    </div>
+    <div class="att-note">დამტკიცებულ დასვენების დღეს გაფრთხილება არ ინიშნება.</div>
+  </div>
+  <div class="card">
+    <h2>📜 ჩემი მოთხოვნები <span class="cnt">${rows.length}</span></h2>
+    ${rows.length === 0 ? `<div class="empty">მოთხოვნა ჯერ არ გაქვთ</div>` : rows.map((r) => `
+      <div class="list-row">
+        <div class="avatar">🗓️</div>
+        <div class="main">
+          <div class="title">${esc(r.date)}</div>
+          <div class="sub">${esc(r.reason && r.reason !== "-" ? r.reason : "")}</div>
+        </div>
+        <div class="side sub">${esc(DAYOFF_STATUS_LABEL[r.status] || r.status)}</div>
+      </div>`).join("")}
+  </div>`;
+}
+function bindMyDayoffs() {
+  const btn = document.getElementById("doSubmit");
+  if (!btn) return;
+  btn.onclick = async () => {
+    const date = document.getElementById("doDate").value;
+    if (!date) { toast("აირჩიეთ თარიღი"); return; }
+    btn.disabled = true;
+    try {
+      await api("/api/dayoff/request", {
+        method: "POST",
+        body: JSON.stringify({ date, reason: (document.getElementById("doReason").value || "").trim() }),
+      });
+      tg && tg.HapticFeedback && tg.HapticFeedback.notificationOccurred("success");
+      toast("მოთხოვნა გაიგზავნა ✅");
+      delete lazyCache.mydayoffs;
+      await renderContent();
+    } catch (e) { toast(e.message); btn.disabled = false; }
+  };
+}
+
+/* ----- აგენტი: დასწრების ისტორია (თვე) ----- */
+if (!state.myAttMonth) state.myAttMonth = "";
+function renderMyAttendance(rows) {
+  rows = rows || [];
+  const month = state.myAttMonth || todayIso().slice(0, 7);
+  const totalMin = rows.reduce((s, r) => s + (r.minutes || 0), 0);
+  return `<div class="card">
+    <h2>🕘 დასწრების ისტორია</h2>
+    <div class="qa-compose"><input type="month" id="myAttMonth" value="${esc(month)}" /></div>
+    <div class="att-grid">
+      <div class="stat"><div class="num">${rows.length}</div><div class="lbl">დღე</div></div>
+      <div class="stat"><div class="num" style="font-size:15px">${Math.floor(totalMin / 60)}სთ ${totalMin % 60}წთ</div><div class="lbl">ჯამური დრო</div></div>
+    </div>
+  </div>
+  <div class="card">
+    ${rows.length === 0 ? `<div class="empty">ამ თვეში ჩანაწერი არ არის</div>` : rows.map((r) => `
+      <div class="list-row">
+        <div class="avatar">${r.late ? "🔴" : "🟢"}</div>
+        <div class="main">
+          <div class="title">${esc(r.date)} · ${esc(r.check_in || "—")} → ${esc(r.check_out || "—")}</div>
+          <div class="sub">${esc(r.hours_text || "")} ${r.check_in_geo ? "· " + esc(GEO_LABEL[r.check_in_geo] || r.check_in_geo) : ""}</div>
+        </div>
+        <div class="side">${attStateBadge(r.state)}</div>
+      </div>`).join("")}
+  </div>`;
+}
+function bindMyAttendance() {
+  const m = document.getElementById("myAttMonth");
+  if (m) m.onchange = () => { state.myAttMonth = m.value || ""; delete lazyCache.myattendance; renderContent(); };
+}
+
+/* ----- მენეჯერი/ადმინი: დღის დასწრება ----- */
+if (state.attDate === undefined) Object.assign(state, { attDate: "", attTeam: "", attState: "", attGeo: "", attLate: false });
+const ATT_STATE_FILTER = [
+  ["", "ყველა სტატუსი"], ["NOT_STARTED", "არ დაუწყია"], ["ACTIVE", "მუშაობს"], ["COMPLETED", "დასრულებული"],
+  ["MISSING_CHECKOUT", "დასრულება არ დაუფიქსირებია"], ["DAY_OFF", "დასვენების დღე"],
+];
+const ATT_GEO_FILTER = [
+  ["", "ყველა ლოკაცია"], ["OFFICE", "ოფისში"], ["OUTSIDE_OFFICE", "ოფისის გარეთ"], ["LOCATION_UNRELIABLE", "არასანდო"],
+];
+function renderAttendanceAdmin(p) {
+  p = p || {};
+  const s = p.summary || {};
+  const rows = p.rows || [];
+  const teams = p.teams || [];
+  const set = p.settings || {};
+  const isDirector = "office_latitude" in set; // სერვერი კოორდინატს მხოლოდ ადმინს აძლევს
+  const opts = (list, cur) => list.map(([v, l]) => `<option value="${esc(v)}" ${cur === v ? "selected" : ""}>${esc(l)}</option>`).join("");
+  const stat = (n, l) => `<div class="stat"><div class="num">${esc(n == null ? 0 : n)}</div><div class="lbl">${esc(l)}</div></div>`;
+
+  const filters = `<div class="card">
+    <h2>🔍 ფილტრი</h2>
+    <div class="filter-row">
+      <input type="date" id="attDate" value="${esc(state.attDate || todayIso())}" />
+      ${teams.length ? `<select id="attTeam"><option value="">ყველა გუნდი</option>${teams.map((t) => `<option value="${esc(t.team)}" ${state.attTeam === t.team ? "selected" : ""}>${esc(t.label)}</option>`).join("")}</select>` : ""}
+    </div>
+    <div class="filter-row">
+      <select id="attState">${opts(ATT_STATE_FILTER, state.attState)}</select>
+      <select id="attGeo">${opts(ATT_GEO_FILTER, state.attGeo)}</select>
+    </div>
+    <label class="chk-row" style="font-size:13px"><input type="checkbox" id="attLate" ${state.attLate ? "checked" : ""} /> მხოლოდ დაგვიანებულები</label>
+  </div>`;
+
+  const summary = `<div class="card">
+    <h2>📊 ${esc(s.date || "")}</h2>
+    <div class="grid3">
+      ${stat(s.total, "სულ")}${stat(s.started, "დაიწყო")}${stat(s.not_started, "არ დაუწყია")}
+      ${stat(s.working, "მუშაობს")}${stat(s.completed, "დაასრულა")}${stat(s.missing_checkout, "დასრულების გარეშე")}
+      ${stat(s.office, "ოფისში")}${stat(s.outside, "ოფისის გარეთ")}${stat(s.unreliable, "არასანდო GPS")}
+      ${stat(s.late, "დაგვიანებული")}${stat(s.day_off, "Day off")}
+    </div>
+    ${set.configured === false ? `<div class="att-err">ოფისის კოორდინატი ჯერ არ არის დაყენებული — GPS ვერიფიკაცია გამორთულია.</div>` : ""}
+  </div>`;
+
+  const table = `<div class="card">
+    <h2>👥 თანამშრომლები <span class="cnt">${rows.length}</span></h2>
+    ${rows.length === 0 ? `<div class="empty">ჩანაწერი არ მოიძებნა</div>` : `<div class="tbl-scroll"><table class="att-table">
+      <thead><tr><th>სახელი</th><th>დაწყება</th><th>დასრულება</th><th>სთ</th><th>ლოკაცია</th><th>სტატუსი</th></tr></thead>
+      <tbody>${rows.map((r, i) => `<tr class="clickable" data-att-idx="${i}">
+        <td>${esc(r.agent_name)}${r.late ? " 🔴" : ""}</td>
+        <td>${esc(r.check_in || "—")}</td><td>${esc(r.check_out || "—")}</td>
+        <td>${esc(r.hours_text || "—")}</td>
+        <td>${esc(GEO_LABEL[r.check_in_geo] || "—")}${r.check_in_distance !== "" && r.check_in_distance != null ? " · " + esc(fmtDistance(r.check_in_distance)) : ""}</td>
+        <td>${attStateBadge(r.state)}</td></tr>`).join("")}</tbody></table></div>`}
+  </div>`;
+
+  const monthStart = todayIso().slice(0, 8) + "01";
+  const exportCard = `<div class="card">
+    <h2>📤 CSV ექსპორტი</h2>
+    <div class="filter-row">
+      <input type="date" id="attExFrom" value="${monthStart}" /><input type="date" id="attExTo" value="${todayIso()}" />
+    </div>
+    <button class="btn secondary" id="attExport" style="width:100%">📤 გამომიგზავნე ბოტში (CSV)</button>
+  </div>`;
+
+  const settingsCard = isDirector ? `<div class="card">
+    <h2>⚙️ ოფისი და GPS პარამეტრები</h2>
+    <div class="qa-compose">
+      <input id="stName" placeholder="ოფისის სახელი" value="${esc(set.office_name || "")}" />
+      <input id="stLat" inputmode="decimal" placeholder="განედი (latitude)" value="${esc(set.office_latitude == null ? "" : set.office_latitude)}" />
+      <input id="stLng" inputmode="decimal" placeholder="გრძედი (longitude)" value="${esc(set.office_longitude == null ? "" : set.office_longitude)}" />
+      <button class="btn secondary" id="stHere">📍 ამჟამინდელი ლოკაციის გამოყენება (ოფისიდან დააჭირეთ)</button>
+      <input id="stRadius" inputmode="numeric" placeholder="რადიუსი (მ)" value="${esc(set.office_radius_meters || "")}" />
+      <input id="stAcc" inputmode="numeric" placeholder="მაქს. დასაშვები GPS ცდომილება (მ)" value="${esc(set.max_accuracy_meters || "")}" />
+      <label class="chk-row" style="font-size:13px"><input type="checkbox" id="stOutside" ${set.allow_outside_checkin ? "checked" : ""} /> ოფისის გარედან დაწყების დაშვება (ოფისის ცვლაზე)</label>
+      <button class="btn" id="stSave">💾 შენახვა</button>
+    </div>
+    <div class="att-note">კოორდინატებს ნუ მოიგონებთ — გამოიყენეთ ზუსტი ადგილმდებარეობა. მანძილი/სტატუსი ითვლება სერვერზე.</div>
+  </div>` : "";
+
+  return filters + summary + table + exportCard + settingsCard;
+}
+function bindAttendanceAdmin(p) {
+  const rows = (p && p.rows) || [];
+  const refetch = () => { delete lazyCache.attendance; renderContent(); };
+  const bindSel = (id, key, isCheck) => {
+    const el = document.getElementById(id);
+    if (el) el.onchange = () => { state[key] = isCheck ? el.checked : el.value; refetch(); };
+  };
+  bindSel("attDate", "attDate"); bindSel("attTeam", "attTeam"); bindSel("attState", "attState");
+  bindSel("attGeo", "attGeo"); bindSel("attLate", "attLate", true);
+
+  document.querySelectorAll("[data-att-idx]").forEach((tr) => {
+    tr.onclick = async () => {
+      const r = rows[parseInt(tr.dataset.attIdx, 10)];
+      if (!r) return;
+      const fields = ATT_FIELDS.map(([k, label]) => ({ label, value: r[k] }))
+        .concat([
+          { label: "სტატუსი", value: STATE_LABEL_TEXT(r.state) },
+          { label: "ლოკაცია დაწყებისას", value: GEO_LABEL[r.check_in_geo] || "" },
+          { label: "ლოკაცია დასრულებისას", value: GEO_LABEL[r.check_out_geo] || "" },
+          { label: "დაგვიანება", value: r.late ? "დიახ" : "" },
+        ]);
+      const inLink = mapsLink(r.check_in_lat, r.check_in_lng);
+      const outLink = mapsLink(r.check_out_lat, r.check_out_lng);
+      const extra = `${inLink ? `<button class="btn secondary" id="mapIn" style="margin-top:8px;width:100%">🗺 დაწყების წერტილი რუკაზე</button>` : ""}
+        ${outLink ? `<button class="btn secondary" id="mapOut" style="margin-top:8px;width:100%">🗺 დასრულების წერტილი რუკაზე</button>` : ""}
+        <div class="share-box"><div class="lbl">📆 ამ თვის ისტორია</div><div id="attHist"><div class="empty">იტვირთება…</div></div></div>`;
+      openDetail(r.agent_name, fields, extra);
+      const mi = document.getElementById("mapIn"); if (mi) mi.onclick = () => openExternal(inLink);
+      const mo = document.getElementById("mapOut"); if (mo) mo.onclick = () => openExternal(outLink);
+      try {
+        const month = String(r.date || todayIso()).slice(0, 7);
+        const h = await api(`/api/attendance/history?agent_id=${encodeURIComponent(r.agent_id)}&month=${encodeURIComponent(month)}`);
+        const box = document.getElementById("attHist");
+        if (box) box.innerHTML = (h.rows || []).length ? h.rows.map((x) => `
+          <div class="list-row"><div class="main">
+            <div class="title">${esc(x.date)} · ${esc(x.check_in || "—")} → ${esc(x.check_out || "—")}</div>
+            <div class="sub">${esc(x.hours_text || "")} ${x.late ? "· 🔴 დაგვიანება" : ""} ${x.check_in_geo ? "· " + esc(GEO_LABEL[x.check_in_geo] || "") : ""}</div>
+          </div><div class="side">${attStateBadge(x.state)}</div></div>`).join("") : `<div class="empty">ჩანაწერი არ არის</div>`;
+      } catch (e) {
+        const box = document.getElementById("attHist");
+        if (box) box.innerHTML = `<div class="empty">⚠️ ${esc(e.message)}</div>`;
+      }
+    };
+  });
+
+  const ex = document.getElementById("attExport");
+  if (ex) ex.onclick = async () => {
+    ex.disabled = true;
+    try {
+      await api("/api/attendance/export", {
+        method: "POST",
+        body: JSON.stringify({
+          date_from: document.getElementById("attExFrom").value, date_to: document.getElementById("attExTo").value,
+          team: state.attTeam || "",
+        }),
+      });
+      toast("ფაილი გამოგიგზავნეთ ბოტში ✅");
+    } catch (e) { toast(e.message); }
+    ex.disabled = false;
+  };
+
+  const here = document.getElementById("stHere");
+  if (here) here.onclick = async () => {
+    here.disabled = true;
+    try {
+      const g = await getGeo();
+      document.getElementById("stLat").value = g.lat;
+      document.getElementById("stLng").value = g.lng;
+      toast(`ლოკაცია ჩაიწერა (სიზუსტე ≈ ${Math.round(g.accuracy || 0)} მ) — დააჭირეთ „შენახვა"`);
+    } catch (e) { toast(e.message); }
+    here.disabled = false;
+  };
+  const save = document.getElementById("stSave");
+  if (save) save.onclick = async () => {
+    save.disabled = true;
+    try {
+      await api("/api/attendance/settings", {
+        method: "POST",
+        body: JSON.stringify({
+          office_name: document.getElementById("stName").value,
+          office_latitude: document.getElementById("stLat").value,
+          office_longitude: document.getElementById("stLng").value,
+          office_radius_meters: document.getElementById("stRadius").value,
+          max_accuracy_meters: document.getElementById("stAcc").value,
+          allow_outside_checkin: document.getElementById("stOutside").checked,
+        }),
+      });
+      toast("პარამეტრები შენახულია ✅");
+      refetch();
+    } catch (e) { toast(e.message); save.disabled = false; }
+  };
+}
+function STATE_LABEL_TEXT(s) { return (ATT_STATE_BADGE[s] || [0, s || ""])[1]; }
+
+/* ----- მენეჯერი/ადმინი: კვირის რაიონების განაწილება ----- */
+if (state.distWeek === undefined) Object.assign(state, { distWeek: "", distTeam: "" });
+if (!state.distAgents) state.distAgents = new Set();
+if (!state.distPick) state.distPick = new Set();
+
+function renderDistricts(p) {
+  p = p || {};
+  const agents = p.agents || [];
+  const teams = p.teams || [];
+  const catalog = p.catalog || [];
+  const locked = !!p.is_past;
+  const groups = new Map();
+  agents.forEach((a) => { const k = a.team_label || "—"; if (!groups.has(k)) groups.set(k, []); groups.get(k).push(a); });
+
+  const weekNav = `<div class="card">
+    <h2>📍 კვირის რაიონები <span class="cnt">${esc(p.week_label || "")}</span></h2>
+    <div class="filter-row">
+      <button class="btn secondary" id="dwPrev" style="flex:none;padding:9px 14px">◀</button>
+      <input type="date" id="dwDate" value="${esc(p.week_start || "")}" />
+      <button class="btn secondary" id="dwNext" style="flex:none;padding:9px 14px">▶</button>
+    </div>
+    <div class="sub">${p.is_current ? "✅ მიმდინარე კვირა" : (locked ? "🔒 გასული კვირა — მხოლოდ ნახვა" : "შემდეგი კვირა")}</div>
+    ${teams.length ? `<div class="filter-row" style="margin-top:8px"><select id="dwTeam"><option value="">ყველა გუნდი</option>${teams.map((t) => `<option value="${esc(t.team)}" ${state.distTeam === t.team ? "selected" : ""}>${esc(t.label)}</option>`).join("")}</select></div>` : ""}
+  </div>`;
+
+  const agentsHtml = `<div class="card">
+    <h2>🧑‍🤝‍🧑 აგენტები <span class="cnt">${agents.length}</span></h2>
+    ${agents.length > 1 && !locked ? `<div style="margin-bottom:8px"><button class="chip" id="dwAll">☑ ყველას მონიშვნა / მოხსნა</button></div>` : ""}
+    ${agents.length === 0 ? `<div class="empty">აგენტი არ არის</div>` : [...groups.entries()].map(([label, list]) => `
+      <div class="team-group">
+        <div class="team-group-head"><span class="tg-name">🧑‍💼 ${esc(label)}</span></div>
+        ${list.map((a) => `
+          <div class="list-row chk-row" style="align-items:flex-start">
+            ${locked ? "" : `<input type="checkbox" class="chk-pick" data-dw-agent="${esc(a.agent_id)}" ${state.distAgents.has(String(a.agent_id)) ? "checked" : ""} />`}
+            <div class="main" style="overflow:visible">
+              <div class="title">${esc(a.name)}${a.role === "team_lead" ? " 👑" : ""}</div>
+              <div class="chip-row" data-dw-cur="${esc(a.agent_id)}">${(a.districts || []).length
+                ? a.districts.map((x) => `<span class="chip sel">${esc(x)}</span>`).join("")
+                : `<span class="sub">რაიონი არ არის მინიჭებული</span>`}</div>
+            </div>
+          </div>`).join("")}
+      </div>`).join("")}
+  </div>`;
+
+  const pickerHtml = locked ? "" : `<div class="card">
+    <h2>🗺 რაიონების არჩევა <span class="cnt" id="dwPickCnt">${state.distPick.size}</span></h2>
+    <div class="att-note">მონიშნეთ აგენტები ზემოთ, აქ — რაიონები (რამდენიმე შეიძლება). ჯგუფის სახელზე დაჭერა = მთელი ჯგუფი.</div>
+    ${catalog.map((g) => `<div class="dist-group">
+      <button class="chip" data-dw-d="${esc(g.group)}" style="font-weight:800">${esc(g.group)}</button>
+      <div class="chip-row">${g.districts.map((x) => `<button class="chip" data-dw-d="${esc(x)}">${esc(x)}</button>`).join("")}</div>
+    </div>`).join("")}
+    <div class="actions">
+      <button class="btn" id="dwSave">💾 მინიჭება</button>
+      <button class="btn danger" id="dwClear">🧹 გასუფთავება</button>
+    </div>
+  </div>`;
+  return weekNav + agentsHtml + pickerHtml;
+}
+
+function bindDistricts(p) {
+  p = p || {};
+  const agents = p.agents || [];
+  const refetch = () => { delete lazyCache.districts; renderContent(); };
+  const wk = () => p.week_start || todayIso();
+  const goWeek = (iso) => { state.distWeek = iso; state.distAgents.clear(); state.distPick.clear(); refetch(); };
+  const prev = document.getElementById("dwPrev"); if (prev) prev.onclick = () => goWeek(addDaysIso(wk(), -7));
+  const next = document.getElementById("dwNext"); if (next) next.onclick = () => goWeek(addDaysIso(wk(), 7));
+  const dt = document.getElementById("dwDate"); if (dt) dt.onchange = () => dt.value && goWeek(dt.value);
+  const tm = document.getElementById("dwTeam");
+  if (tm) tm.onchange = () => { state.distTeam = tm.value; state.distAgents.clear(); state.distPick.clear(); refetch(); };
+  if (p.is_past) return;
+
+  const syncChips = () => {
+    document.querySelectorAll("[data-dw-d]").forEach((c) => c.classList.toggle("sel", state.distPick.has(c.dataset.dwD)));
+    const cnt = document.getElementById("dwPickCnt"); if (cnt) cnt.textContent = state.distPick.size;
+  };
+  const loadFromSingle = () => {
+    // ერთი აგენტის მონიშვნისას მისი მიმდინარე რაიონები ავტომატურად ივსება
+    if (state.distAgents.size !== 1) return;
+    const a = agents.find((x) => String(x.agent_id) === [...state.distAgents][0]);
+    state.distPick = new Set((a && a.districts) || []);
+    syncChips();
+  };
+  document.querySelectorAll("[data-dw-agent]").forEach((c) => {
+    c.onchange = () => {
+      const id = c.dataset.dwAgent;
+      if (c.checked) state.distAgents.add(id); else state.distAgents.delete(id);
+      loadFromSingle();
+    };
+  });
+  const all = document.getElementById("dwAll");
+  if (all) all.onclick = () => {
+    const boxes = [...document.querySelectorAll("[data-dw-agent]")];
+    const allOn = boxes.every((c) => c.checked);
+    boxes.forEach((c) => {
+      c.checked = !allOn;
+      if (c.checked) state.distAgents.add(c.dataset.dwAgent); else state.distAgents.delete(c.dataset.dwAgent);
+    });
+    loadFromSingle();
+  };
+  document.querySelectorAll("[data-dw-d]").forEach((c) => {
+    c.onclick = () => {
+      const v = c.dataset.dwD;
+      if (state.distPick.has(v)) state.distPick.delete(v); else state.distPick.add(v);
+      syncChips();
+    };
+  });
+  syncChips();
+
+  const send = async (districts, okMsg) => {
+    if (!state.distAgents.size) { toast("აირჩიეთ მინიმუმ ერთი აგენტი"); return; }
+    try {
+      const res = await api("/api/districts/assign", {
+        method: "POST",
+        body: JSON.stringify({ week: wk(), agent_ids: [...state.distAgents], districts }),
+      });
+      tg && tg.HapticFeedback && tg.HapticFeedback.notificationOccurred("success");
+      toast(`${okMsg} (${res.changed} შეტყობინება გაიგზავნა)`);
+      state.distAgents.clear(); state.distPick.clear();
+      refetch();
+    } catch (e) { toast(e.message); }
+  };
+  const save = document.getElementById("dwSave");
+  if (save) save.onclick = () => {
+    if (!state.distPick.size) { toast("აირჩიეთ მინიმუმ ერთი რაიონი (ან გამოიყენეთ გასუფთავება)"); return; }
+    send([...state.distPick], "რაიონები მიენიჭა ✅");
+  };
+  const clear = document.getElementById("dwClear");
+  if (clear) clear.onclick = () => {
+    if (!state.distAgents.size) { toast("აირჩიეთ მინიმუმ ერთი აგენტი"); return; }
+    if (confirm("ამ კვირისთვის მონიშნული აგენტების რაიონები გასუფთავდეს?")) send([], "გასუფთავდა");
+  };
+}
+
 /* ---------------------------------------------------------- shell */
 
 const LAZY_ENDPOINTS = {
+  mydayoffs: "/api/dayoff/mine",
+  myattendance: "/api/attendance/me/history",
+  attendance: "/api/attendance/overview",
+  districts: "/api/districts",
   exclusives: "/api/exclusives",
   myhomejobs: "/api/myhome-jobs",
   myhomestats: "/api/myhome-jobs/stats",
@@ -2518,6 +3247,7 @@ if (!state.meetingsScope) state.meetingsScope = "team";
 /* გაფრთხილებების ტაბის ფილტრები (აგენტი/მენეჯერი) — client-side. */
 if (!state.warningsAgentFilter) state.warningsAgentFilter = "";
 if (!state.warningsManagerFilter) state.warningsManagerFilter = "";
+if (!state.warnSel) state.warnSel = new Set();
 
 /* `adminOnly` ტაბები (მაგ. აგენტების/მენეჯერების მართვა) დირექტორის
    დონის მოქმედებაა — თიმლიდერს (რომელიც ტექნიკურად იმავე "admin"
@@ -2548,8 +3278,8 @@ function renderTabbar() {
 async function renderContent() {
   const content = document.getElementById("content");
   const d = state.data;
+  renderTabbar(); // ჯერ ტაბის ნაგულისხმევ მნიშვნელობას აყენებს (პირველი ჩატვირთვისას ცარიელი იყო)
   const tab = state.tab[state.role];
-  renderTabbar();
 
   try {
     if (LAZY_ENDPOINTS[tab]) {
@@ -2574,9 +3304,21 @@ async function renderContent() {
             if (state.mhStatsFrom) params.push("date_from=" + encodeURIComponent(state.mhStatsFrom));
             if (state.mhStatsTo) params.push("date_to=" + encodeURIComponent(state.mhStatsTo));
           }
+          if (tab === "myattendance" && state.myAttMonth) params.push("month=" + encodeURIComponent(state.myAttMonth));
+          if (tab === "attendance") {
+            if (state.attDate) params.push("date=" + encodeURIComponent(state.attDate));
+            if (state.attTeam) params.push("team=" + encodeURIComponent(state.attTeam));
+            if (state.attState) params.push("state=" + encodeURIComponent(state.attState));
+            if (state.attGeo) params.push("geo=" + encodeURIComponent(state.attGeo));
+            if (state.attLate) params.push("late=1");
+          }
+          if (tab === "districts") {
+            if (state.distWeek) params.push("week=" + encodeURIComponent(state.distWeek));
+            if (state.distTeam) params.push("team=" + encodeURIComponent(state.distTeam));
+          }
           if (params.length) url += "?" + params.join("&");
           const resp = await api(url);
-          const wholeObjTabs = ["admintasks", "agentsmgmt", "meetings", "taskhistory", "digest", "reports", "dayoffs", "swaps", "regulations"];
+          const wholeObjTabs = ["admintasks", "agentsmgmt", "meetings", "taskhistory", "digest", "reports", "dayoffs", "swaps", "regulations", "mydayoffs", "attendance", "districts"];
           lazyCache[tab] = wholeObjTabs.includes(tab) ? resp : (resp.rows || []);
         } catch (e) {
           content.innerHTML = `<div class="card"><div class="empty">⚠️ ${esc(e.message)}</div></div>`;
@@ -2600,6 +3342,10 @@ async function renderContent() {
       else if (tab === "regulations") { content.innerHTML = renderRegulations(rows); bindRegulationsActions(); }
       else if (tab === "warnings") { content.innerHTML = renderWarnings(rows); bindWarningsActions(rows); }
       else if (tab === "clients") { content.innerHTML = renderClients(rows); bindClientsActions(rows); }
+      else if (tab === "mydayoffs") { content.innerHTML = renderMyDayoffs(rows); bindMyDayoffs(); }
+      else if (tab === "myattendance") { content.innerHTML = renderMyAttendance(rows); bindMyAttendance(); }
+      else if (tab === "attendance") { content.innerHTML = renderAttendanceAdmin(rows); bindAttendanceAdmin(rows); }
+      else if (tab === "districts") { content.innerHTML = renderDistricts(rows); bindDistricts(rows); }
       return;
     }
 

@@ -47,6 +47,12 @@ EXCLUSIVE_SHARES_SHEET_NAME = "ExclusiveShares"
 AGENT_REQUESTS_SHEET_NAME = "AgentRequests"
 MYHOME_JOBS_SHEET_NAME = "MyHomeJobs"
 MYHOME_ACCOUNTS_SHEET_NAME = "MyHomeAccounts"
+# კვირის რაიონების განაწილება (მენეჯერი -> აგენტები)
+DISTRICT_ASSIGNMENTS_SHEET_NAME = "DistrictAssignments"
+# Attendance + GPS: ივენთების ჟურნალი (მხოლოდ check-in/check-out მომენტი,
+# მუდმივი ტრეკინგი არა) და admin-ის რედაქტირებადი პარამეტრები
+ATTENDANCE_GEO_SHEET_NAME = "AttendanceGeo"
+APP_SETTINGS_SHEET_NAME = "AppSettings"
 
 # MyHome სქრეპერის queue-ს ინტეგრაცია: worker.py (გარეთა, ცალკე
 # კომპიუტერზე მომუშავე პროცესი) იძახებს webserver.py-ს "/internal/..."
@@ -71,6 +77,11 @@ DAYOFF_MONTHLY_LIMIT = int(os.environ.get("DAYOFF_MONTHLY_LIMIT", "3"))
 # რამდენი გაფრთხილების მერე ითიშება აგენტი ავტომატურად (30-დღიან ფანჯარაში)
 WARNING_LIMIT = int(os.environ.get("WARNING_LIMIT", "4"))
 WARNING_WINDOW_DAYS = int(os.environ.get("WARNING_WINDOW_DAYS", "30"))
+# გაფრთხილებები ყოველი კალენდარული თვის დასაწყისში ავტომატურად
+# "ნულდება" (აღარ ითვლება ლიმიტში და აღარ ჩანს აგენტის მიმდინარე
+# მრიცხველში) — ჩანაწერები ისტორიისთვის რჩება. "0"/"false"-ზე
+# დაყენებით ბრუნდება ძველი, მხოლოდ მოძრავი WARNING_WINDOW_DAYS ფანჯარა.
+WARNING_RESET_MONTHLY = os.environ.get("WARNING_RESET_MONTHLY", "1").strip().lower() not in ("0", "false", "no")
 # რომელ საათზე მოწმდება დღიური ანგარიშის/გამოცხადების შესრულება
 REPORT_DEADLINE_HOUR = int(os.environ.get("REPORT_DEADLINE_HOUR", "22"))
 # რამდენი წუთის დაგვიანება ითვლება ჯერ კიდევ დასაშვებად (ოფისის ცვლაზე)
@@ -84,6 +95,26 @@ OFFICE_DAILY_QUOTA = int(os.environ.get("OFFICE_DAILY_QUOTA", "20"))
 # ჯერ არ დაუწყია — ონლაინ რეჟიმს ფიქსირებული საწყისი საათი არა აქვს,
 # ამიტომ ეს მხოლოდ ერთხელადი, დღის შუა საათის შეხსენებაა.
 ONLINE_START_REMINDER_HOUR = int(os.environ.get("ONLINE_START_REMINDER_HOUR", "12"))
+
+# --- Attendance + ოფისის GPS ვერიფიკაცია (ახალი მოდული) --------------
+# ყველა ეს მნიშვნელობა ნაგულისხმევია; ადმინს შეუძლია Mini App-იდან
+# ("დასწრება" ტაბი -> პარამეტრები) გადააწეროს (AppSettings ცხრილში
+# ინახება) ან Railway-ის environment variable-ებით შეცვალოს.
+# OFFICE_LATITUDE/OFFICE_LONGITUDE განზრახ ცარიელია — გამოგონილი
+# კოორდინატი არ ჩაიწერა. სანამ ორივე არ დაყენდება, GPS ვერიფიკაცია
+# გამორთულია და დასწრება ძველებურად (GPS-ის გარეშე) მუშაობს.
+OFFICE_NAME = os.environ.get("OFFICE_NAME", "Safe Home Office").strip()
+OFFICE_LATITUDE = os.environ.get("OFFICE_LATITUDE", "").strip()
+OFFICE_LONGITUDE = os.environ.get("OFFICE_LONGITUDE", "").strip()
+OFFICE_RADIUS_METERS = int(os.environ.get("OFFICE_RADIUS_METERS", "100"))
+# GPS სიზუსტე (მეტრი), რომელზე უარესი მონაცემიც არასანდოდ ითვლება
+MAX_ACCEPTABLE_ACCURACY_METERS = int(os.environ.get("MAX_ACCEPTABLE_ACCURACY_METERS", "150"))
+# true -> ოფისის გარედან დაწყება შესაძლებელია, მაგრამ აუცილებლად
+# OUTSIDE_OFFICE-დ ფიქსირდება; false -> ოფისის ცვლაზე გარედან დაწყება
+# შეუძლებელია (ონლაინ დღეზე ეს შეზღუდვა არ მოქმედებს)
+ALLOW_OUTSIDE_CHECKIN = os.environ.get("ALLOW_OUTSIDE_CHECKIN", "1").strip().lower() not in ("0", "false", "no")
+# რომელ საათზე (თბილისის დრო) მოწმდება, ვინ დაივიწყა სამუშაოს დასრულება
+MISSING_CHECKOUT_HOUR = int(os.environ.get("MISSING_CHECKOUT_HOUR", "23"))
 
 # Mini App (ვიზუალური დაშბორდი ტელეგრამშივე). Railway-ზე
 # Settings → Networking → Generate Domain-ით მიღებული საჯარო https

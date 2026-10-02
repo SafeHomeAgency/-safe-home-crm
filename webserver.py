@@ -30,6 +30,8 @@ import urllib.request
 from flask import Flask, jsonify, request, send_from_directory
 
 import config
+import crm_extras
+import crm_time
 import sheets
 
 log = logging.getLogger("safehome-crm-webapp")
@@ -73,7 +75,7 @@ def _save_base64_photos(photos) -> list[str]:
     return saved
 
 
-def _send_telegram_message(chat_id, text: str) -> bool:
+def _send_telegram_message(chat_id, text: str, reply_markup: dict | None = None) -> bool:
     """პირდაპირი, სინქრონული HTTP მოთხოვნა Telegram-ის Bot API-სთან —
     Flask-ის (სინქრონული) მოთხოვნის დამმუშავებლიდან ბოტის (async)
     obj-ის გამოძახება პირდაპირ არ ხერხდება, ამიტომ აქ იგივეს ვაკეთებთ
@@ -86,7 +88,10 @@ def _send_telegram_message(chat_id, text: str) -> bool:
     შეტყობინება სამუდამოდ იკარგება."""
     try:
         url = f"https://api.telegram.org/bot{config.TELEGRAM_BOT_TOKEN}/sendMessage"
-        payload = json.dumps({"chat_id": chat_id, "text": text}).encode()
+        body = {"chat_id": chat_id, "text": text}
+        if reply_markup:
+            body["reply_markup"] = reply_markup
+        payload = json.dumps(body).encode()
         req = urllib.request.Request(
             url, data=payload, headers={"Content-Type": "application/json"}
         )
@@ -95,6 +100,70 @@ def _send_telegram_message(chat_id, text: str) -> bool:
     except Exception:
         log.exception("Telegram შეტყობინების გაგზავნა Mini App-იდან ვერ მოხერხდა")
         return False
+
+
+def _send_telegram_document(chat_id, filename: str, content: bytes, caption: str = "") -> bool:
+    """ფაილის (მაგ. CSV ექსპორტის) გაგზავნა Telegram-ში — Mini App-ის
+    WebView-ში პირდაპირი ჩამოტვირთვა არასანდოა, ამიტომ ფაილს ბოტი
+    აგზავნის მომთხოვნის ჩატში. multipart/form-data ხელით აიგება (გარე
+    ბიბლიოთეკის გარეშე)."""
+    try:
+        import uuid as _uuid
+        boundary = "----sh" + _uuid.uuid4().hex
+        parts = []
+
+        def field(name, value):
+            parts.append(
+                f"--{boundary}\r\nContent-Disposition: form-data; name=\"{name}\"\r\n\r\n{value}\r\n".encode()
+            )
+
+        field("chat_id", str(chat_id))
+        if caption:
+            field("caption", caption)
+        parts.append(
+            (
+                f"--{boundary}\r\nContent-Disposition: form-data; name=\"document\"; "
+                f"filename=\"{filename}\"\r\nContent-Type: text/csv; charset=utf-8\r\n\r\n"
+            ).encode()
+            + content
+            + b"\r\n"
+        )
+        parts.append(f"--{boundary}--\r\n".encode())
+        req = urllib.request.Request(
+            f"https://api.telegram.org/bot{config.TELEGRAM_BOT_TOKEN}/sendDocument",
+            data=b"".join(parts),
+            headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
+        )
+        urllib.request.urlopen(req, timeout=30)
+        return True
+    except Exception:
+        log.exception("Telegram ფაილის გაგზავნა ვერ მოხერხდა")
+        return False
+
+
+def _team_lead_for_team(team: str):
+    team = str(team or "").strip()
+    if not team:
+        return None
+    return next(
+        (x for x in sheets.get_agents()
+         if str(x.get("role", "")).strip() == "team_lead"
+         and str(x.get("team", "")).strip() == team),
+        None,
+    )
+
+
+def _notify_managers_of_agent(agent: dict, text: str, include_admins: bool = True) -> None:
+    """აგენტის თიმლიდერს (თუ ჰყავს და არ არის თავად თიმლიდერი) და
+    ადმინებს უგზავნის შეტყობინებას."""
+    lead = None
+    if str(agent.get("role", "")).strip() != "team_lead":
+        lead = _team_lead_for_team(agent.get("team"))
+    if lead and lead.get("telegram_chat_id"):
+        _send_telegram_message(int(lead["telegram_chat_id"]), text)
+    if include_admins:
+        for admin_id in config.ADMIN_CHAT_IDS:
+            _send_telegram_message(admin_id, text)
 
 
 # ---------------------------------------------------------------- auth
@@ -220,12 +289,33 @@ def api_dashboard():
         except Exception:
             log.exception("admin dashboard ჩავარდა")
             return jsonify(error="მონაცემების ჩატვირთვა ვერ მოხერხდა"), 500
+        # მენეჯერს აგენტის დეტალებში უჩანს, რომელ რაიონზე მუშაობს ამ კვირაში
+        try:
+            ws_now = crm_time.week_start().strftime(crm_time.DATE_FMT)
+            amap = {
+                str(r.get("agent_id")): crm_extras.split_districts(r.get("districts", ""))
+                for r in sheets.get_district_assignments(week_start=ws_now)
+            }
+            for t in payload["admin"].get("team", []):
+                t["districts"] = ", ".join(amap.get(str(t.get("agent_id")), []))
+        except Exception:
+            log.exception("districts team overlay ჩავარდა")
     if agent:
         try:
             payload["agent"] = sheets.get_agent_dashboard(agent["agent_id"], days=days)
         except Exception:
             log.exception("agent dashboard ჩავარდა")
             return jsonify(error="მონაცემების ჩატვირთვა ვერ მოხერხდა"), 500
+        # ახალი ბარათები (Attendance + კვირის რაიონები) — თუ რომელიმე
+        # ვერ ჩაიტვირთა, მთავარი დაშბორდი მაინც სრულად იტვირთება.
+        try:
+            payload["attendance"] = crm_extras.attendance_card(agent)
+        except Exception:
+            log.exception("attendance card ჩავარდა")
+        try:
+            payload["districts"] = _district_week_payload(agent)
+        except Exception:
+            log.exception("districts card ჩავარდა")
     return jsonify(payload)
 
 
@@ -745,6 +835,120 @@ def api_warnings_decide_dismiss():
     return jsonify(ok=True, row=row)
 
 
+def _clean_id_list(value, limit: int = 300) -> list[str]:
+    seen, out = set(), []
+    for v in (value if isinstance(value, list) else []):
+        s = str(v).strip()
+        if s and s not in seen:
+            seen.add(s)
+            out.append(s)
+    return out[:limit]
+
+
+@app.post("/api/warnings/request-dismiss-bulk")
+def api_warnings_request_dismiss_bulk():
+    """მულტი-მონიშვნა: რამდენიმე გაფრთხილების გაუქმების მოთხოვნა ერთად,
+    ერთი მიზეზით. უფლებები/შეზღუდვები იგივეა, რაც ერთეულ
+    `/api/warnings/request-dismiss`-ში (თიმლიდერი — მხოლოდ საკუთარი
+    გუნდის გაფრთხილებებზე; სხვისი გუნდის ID-ები ჩუმად გამოიტოვება და
+    `skipped`-ში ჩაითვლება). ადმინს ერთი შეჯამებული შეტყობინება
+    მიდის და არა N ცალკე."""
+    agent, admin, err = _authed_agent()
+    if err:
+        return err
+    if not (admin or _is_team_lead(agent)):
+        return jsonify(error="მხოლოდ მენეჯერისთვის/თიმლიდერისთვის"), 403
+    body = request.get_json(silent=True) or {}
+    ids = _clean_id_list(body.get("warning_ids"))
+    reason = (body.get("reason") or "").strip()
+    if not ids or not reason:
+        return jsonify(error="მონიშნეთ გაფრთხილებები და მიუთითეთ მიზეზი"), 400
+
+    allowed = set(ids)
+    if not admin:
+        my_team = str(agent.get("team", "")).strip()
+        team_ids = {
+            str(a.get("agent_id")) for a in sheets.get_agents()
+            if str(a.get("team", "")).strip() == my_team
+        }
+        allowed = {
+            str(w.get("warning_id")) for w in sheets.get_warnings()
+            if str(w.get("warning_id")) in set(ids) and str(w.get("agent_id")) in team_ids
+        }
+    requested_by = "admin" if admin else agent.get("agent_id")
+    rows = sheets.request_warning_dismissals_bulk(sorted(allowed), requested_by, reason) if allowed else []
+
+    if rows:
+        by_agent: dict[str, list[dict]] = {}
+        for r in rows:
+            by_agent.setdefault(str(r.get("agent_name") or r.get("agent_id")), []).append(r)
+        requester_name = "ადმინი" if admin else agent.get("name")
+        lines = [f"📝 გაფრთხილებების გაუქმების მოთხოვნა — {requester_name}", f"სულ: {len(rows)}"]
+        for name, items in by_agent.items():
+            kinds = ", ".join(
+                f"{WARNING_TYPE_LABELS.get(i.get('type'), i.get('type'))} ({str(i.get('created_at', '')).split(' ')[0]})"
+                for i in items[:5]
+            )
+            more = f" +{len(items) - 5}" if len(items) > 5 else ""
+            lines.append(f"• {name}: {len(items)} — {kinds}{more}")
+        lines.append(f"მიზეზი: {reason}")
+        text = "\n".join(lines)
+        for admin_id in config.ADMIN_CHAT_IDS:
+            _send_telegram_message(admin_id, text)
+    return jsonify(ok=True, requested=len(rows), skipped=len(ids) - len(rows))
+
+
+@app.post("/api/warnings/decide-dismiss-bulk")
+def api_warnings_decide_dismiss_bulk():
+    """მულტი-მონიშვნა: დირექტორის გადაწყვეტილება (დამტკიცება/უარყოფა)
+    რამდენიმე "dismiss_pending" გაფრთხილებაზე ერთად. თითო აგენტს
+    და თითო მომთხოვნ მენეჯერს ერთი შეჯამებული შეტყობინება მიდის
+    განახლებული მრიცხველით."""
+    _, admin, err = _authed_agent()
+    if err:
+        return err
+    if not admin:
+        return jsonify(error="მხოლოდ ადმინისთვის"), 403
+    body = request.get_json(silent=True) or {}
+    ids = _clean_id_list(body.get("warning_ids"))
+    approve = bool(body.get("approve"))
+    if not ids:
+        return jsonify(error="მონიშნეთ გაფრთხილებები"), 400
+    rows = sheets.decide_warning_dismissals_bulk(ids, approve, decided_by="admin")
+    label = "✅ გაუქმდა" if approve else "❌ უარყოფილია, ძალაშია"
+    agents_by_id = {str(a.get("agent_id")): a for a in sheets.get_agents()}
+
+    per_agent: dict[str, int] = {}
+    per_requester: dict[str, dict[str, int]] = {}
+    for r in rows:
+        aid = str(r.get("agent_id"))
+        per_agent[aid] = per_agent.get(aid, 0) + 1
+        req = str(r.get("dismiss_requested_by") or "")
+        if req:
+            per_requester.setdefault(req, {})
+            per_requester[req][aid] = per_requester[req].get(aid, 0) + 1
+
+    for aid, n in per_agent.items():
+        a = agents_by_id.get(aid)
+        if a and a.get("telegram_chat_id"):
+            _send_telegram_message(
+                int(a["telegram_chat_id"]),
+                f"თქვენი {n} გაფრთხილების გაუქმების მოთხოვნა — {label}.\n"
+                f"მიმდინარე გაფრთხილებების რაოდენობა: {_active_warning_count(aid)}/{config.WARNING_LIMIT}.",
+            )
+    for req_id, agent_counts in per_requester.items():
+        requester = agents_by_id.get(req_id)
+        if requester and requester.get("telegram_chat_id"):
+            lines = [f"თქვენი მოთხოვნა ({sum(agent_counts.values())} გაფრთხილება) — {label}."]
+            for aid, n in agent_counts.items():
+                lines.append(
+                    f"• {(agents_by_id.get(aid) or {}).get('name', aid)}: {n} — "
+                    f"ახლა {_active_warning_count(aid)}/{config.WARNING_LIMIT}"
+                )
+            _send_telegram_message(int(requester["telegram_chat_id"]), "\n".join(lines))
+    return jsonify(ok=True, decided=len(rows), skipped=len(ids) - len(rows))
+
+
 @app.get("/api/agents")
 def api_agents():
     """აგენტების/მენეჯერების მართვის ცხრილი (მხოლოდ ადმინისთვის —
@@ -1077,8 +1281,11 @@ def api_tasks_new():
         if not target_agent_id:
             return jsonify(error="შესაფერისი აქტიური აგენტი ვერ მოიძებნა"), 400
         title = f"კლიენტი {phone} ({deal_type})"
+        # "დამატებითი დეტალი" (არასავალდებულო) — მენეჯერის შენიშვნა, რომელსაც
+        # აგენტი ამ კლიენტზე კითხულობს (ინახება დავალების description-ში).
+        notes = (body.get("notes") or "").strip()[:1000]
         task_id = sheets.create_task(
-            title=title, description="", assigned_to=target_agent_id, priority=priority,
+            title=title, description=notes, assigned_to=target_agent_id, priority=priority,
             due_date="", created_by=created_by, lead_type="general",
             client_phone=phone, deal_type=deal_type,
         )
@@ -1095,11 +1302,17 @@ def api_tasks_new():
         if not admin and (not my_team or str(target.get("team", "")).strip() != my_team):
             return jsonify(error="მხოლოდ საკუთარი გუნდის აგენტზე შეგიძლიათ დამატება"), 403
         title = f"ნახვა: {listing_id}"
-        description = f"ნახვის დრო: {viewing_time}" if viewing_time else ""
+        # ძველად აქ description-ში "ნახვის დრო: ..." იწერებოდა და იმავე
+        # დროს ცალკე viewing_time ველშიც — აგენტის შეტყობინებაში ორჯერ
+        # ჩანდა. ახლა description = მენეჯერის არასავალდებულო
+        # "დამატებითი დეტალი"; ნახვის დრო მხოლოდ viewing_time-შია.
+        description = (body.get("notes") or "").strip()[:1000]
+        owner_phone = (body.get("owner_phone") or "").strip()
         task_id = sheets.create_task(
             title=title, description=description, assigned_to=target_agent_id,
             priority="მაღალი", due_date=viewing_time, created_by=created_by,
             lead_type="listing", client_phone=phone, listing_id=listing_id, viewing_time=viewing_time,
+            owner_phone=owner_phone,
         )
 
     return jsonify(ok=True, task_id=task_id)
@@ -1202,11 +1415,16 @@ def api_tasks_reassign():
         return jsonify(error="დავალება ვერ მოიძებნა"), 404
 
     if to_agent.get("telegram_chat_id"):
-        sent_ok = _send_telegram_message(
-            int(to_agent["telegram_chat_id"]),
-            f"📋 გადმოგეცით დავალება: {row.get('title')}"
-            + (f"\nკლიენტი: {row.get('client_phone')}" if row.get("client_phone") else ""),
-        )
+        title = str(row.get("title") or "")
+        phone = str(row.get("client_phone") or "").strip()
+        msg = f"📋 გადმოგეცით დავალება: {title}"
+        if phone and phone not in title:
+            msg += f"\nკლიენტი: {phone}"
+        if str(row.get("owner_phone") or "").strip():
+            msg += f"\nმესაკუთრე: {row.get('owner_phone')}"
+        if str(row.get("description") or "").strip():
+            msg += f"\n📝 დეტალი: {row.get('description')}"
+        sent_ok = _send_telegram_message(int(to_agent["telegram_chat_id"]), msg)
         # მნიშვნელოვანია: "notified"-ად მხოლოდ მაშინ ვნიშნავთ, თუ
         # გაგზავნა ნამდვილად წარმატებული იყო. თუ ეს ერთხელ (ქსელის
         # ხანმოკლე ჩავარდნით, ან Telegram API-ის დროებითი შეცდომით)
@@ -1320,7 +1538,10 @@ def api_clients():
     if not (admin or _is_team_lead(agent)):
         return jsonify(error="მხოლოდ მენეჯერისთვის/თიმლიდერისთვის"), 403
     team = None if admin else str(agent.get("team", "")).strip()
-    rows = sheets.get_all_clients(team=team)
+    # crm_extras.client_directory — ერთ ნომერს სხვადასხვა ფორმატით
+    # ჩაწერილს (+995/0599/ინტერვალებით) ერთ კლიენტად აერთიანებს და
+    # დავალებების გარდა რეპორტებსა და შეხვედრებსაც ითვალისწინებს.
+    rows = crm_extras.client_directory(team=team)
     return jsonify(rows=rows[:500])
 
 
@@ -1334,14 +1555,14 @@ def api_client_history(phone):
         return err
     if not (admin or _is_team_lead(agent)):
         return jsonify(error="მხოლოდ მენეჯერისთვის/თიმლიდერისთვის"), 403
-    hist = sheets.get_client_history(phone)
+    hist = crm_extras.client_history(phone)
     if not admin:
         my_team = str(agent.get("team", "")).strip()
         team_ids = {
             str(a.get("agent_id")) for a in sheets.get_agents()
             if str(a.get("team", "")).strip() == my_team
         }
-        if not any(str(t.get("assigned_to")) in team_ids for t in hist["tasks"]):
+        if not (hist["agent_ids"] & team_ids):
             return jsonify(error="ეს კლიენტი თქვენს გუნდს არასდროს ჰყოლია"), 403
     timeline = []
     for t in hist["tasks"]:
@@ -1350,6 +1571,10 @@ def api_client_history(phone):
         timeline.append({"kind": "report", "at": r.get("created_at", ""), "data": r})
     for m in hist["meetings"]:
         timeline.append({"kind": "meeting", "at": m.get("timestamp") or m.get("meeting_date", ""), "data": m})
+    for e in hist["exclusives"]:
+        timeline.append({"kind": "exclusive", "at": e.get("created_at", ""), "data": e})
+    for j in hist["myhome_jobs"]:
+        timeline.append({"kind": "myhome", "at": j.get("completed_at") or j.get("created_at", ""), "data": j})
     timeline.sort(key=lambda e: str(e.get("at") or ""), reverse=True)
     return jsonify(phone=phone, timeline=timeline)
 
@@ -1375,6 +1600,12 @@ def api_digest():
 
 @app.post("/api/clockin")
 def api_clockin():
+    """სამუშაოს დაწყება. თუ ოფისის GPS ვერიფიკაცია ჩართულია (ადმინმა
+    ოფისის კოორდინატი დააყენა), body-ში {lat, lng, accuracy} სავალდებულოა
+    — მანძილი/სტატუსი სერვერზე ითვლება. ძველებურად (GPS-ის გარეშე)
+    მუშაობს მანამ, სანამ ოფისის კოორდინატი არ არის დაყენებული. ეს
+    ერთადერთი რეალიზაციაა — `/api/attendance/check-in` იგივე
+    ფუნქციის ალიასია."""
     agent, admin, err = _authed_agent()
     if err:
         return err
@@ -1382,16 +1613,82 @@ def api_clockin():
         return jsonify(error="მხოლოდ დარეგისტრირებული აგენტისთვის"), 403
     if str(agent.get("active", "yes")).lower() == "no":
         return jsonify(error="თქვენი ანგარიში გამორთულია"), 403
-    result = sheets.clock_in(agent["agent_id"])
-    return jsonify(result=result)
+    body = request.get_json(silent=True) or {}
+    geo, geo_err = crm_extras.parse_geo_input(body)
+    if geo_err:
+        return jsonify(error="⚠️ მდებარეობის განსაზღვრა ვერ მოხერხდა. სცადეთ ხელახლა.", code="invalid_location"), 400
+    try:
+        res = crm_extras.check_in(agent, geo)
+    except Exception:
+        log.exception("check-in ჩავარდა agent_id=%s", agent.get("agent_id"))
+        return jsonify(error="⚠️ მონაცემის გაგზავნა ვერ მოხერხდა. სცადეთ ხელახლა.", code="server_error"), 500
+    if not res.get("ok"):
+        status = 403 if res.get("code") == "outside_office" else 400
+        return jsonify(error=res.get("message", "შეცდომა"), code=res.get("code"),
+                       distance_m=res.get("distance_m")), status
+    if res.get("result") == "ok":
+        try:
+            alert = crm_extras.checkin_alert_text(agent, res)
+            if alert:
+                _notify_managers_of_agent(agent, alert)
+        except Exception:
+            log.exception("check-in შეტყობინება ვერ გაიგზავნა")
+    return jsonify(
+        result=res.get("result"), geo_status=res.get("geo_status", ""),
+        distance_m=res.get("distance_m"), late=res.get("late", False),
+        attendance=crm_extras.attendance_card(agent),
+    )
+
+
+app.add_url_rule("/api/attendance/check-in", endpoint="api_attendance_check_in",
+                 view_func=api_clockin, methods=["POST"])
+
+
+def _notify_quota_warning(agent: dict, warn_result: dict, detail: str) -> None:
+    """"quota_missed" გაფრთხილების შეტყობინებები: ადმინებს, აგენტს და
+    აგენტის თიმლიდერს (ადრე ეს კოდი api_clockout-ის შიგნით იყო —
+    უცვლელად გადმოტანილია, რომ Day off-ით გამოტოვების ლოგიკა
+    მარტივად დაემატოს)."""
+    label = "დღიური გეგმა (განცხადებები) ვერ შესრულდა"
+    text_admin = (
+        f"⚠️ გაფრთხილება — {agent['name']}: {label}\n{detail}\n"
+        f"მიმდინარე თვეში: {warn_result['count']}/{config.WARNING_LIMIT}"
+    )
+    if warn_result["deactivated"]:
+        text_admin += (
+            f"\n\n🚫 აგენტი ავტომატურად გამოირთო (მიაღწია "
+            f"{config.WARNING_LIMIT} გაფრთხილებას)."
+        )
+    for admin_id in config.ADMIN_CHAT_IDS:
+        _send_telegram_message(admin_id, text_admin)
+    if agent.get("telegram_chat_id"):
+        agent_text = f"⚠️ მიიღეთ გაფრთხილება: {label}."
+        if warn_result["deactivated"]:
+            agent_text += (
+                "\n\nსამწუხაროდ, გაფრთხილებების ლიმიტს მიაღწიეთ და თქვენი "
+                "ანგარიში დროებით გამოირთო. დაუკავშირდით მენეჯერს."
+            )
+        _send_telegram_message(int(agent["telegram_chat_id"]), agent_text)
+    team_val = str(agent.get("team", "")).strip()
+    if team_val and str(agent.get("role", "")).strip() != "team_lead":
+        lead = _team_lead_for_team(team_val)
+        if lead and lead.get("telegram_chat_id"):
+            _send_telegram_message(
+                int(lead["telegram_chat_id"]),
+                f"⚠️ თქვენი გუნდიდან — {agent['name']}: {label}\n{detail}",
+            )
 
 
 @app.post("/api/clockout")
 def api_clockout():
-    """ოფისის ცვლაზე body-ში მოდის {site, myhome, ssge} (თითოეული
-    ცალკე რიცხვი — ჯამი ავტომატურად ითვლება), ონლაინზე კი უბრალოდ
-    {count}. თუ ჯამი დღიურ გეგმაზე ნაკლებია — ავტომატურად ემატება
-    "quota_missed" გაფრთხილება, ისევე როგორც ბოტის /clockout-ში."""
+    """სამუშაო დღის დასრულება. ოფისის ცვლაზე body-ში მოდის {site, ssge}
+    (საიტი და ss.ge — აგენტის თვითდეკლარაცია); MyHome-ის რაოდენობა და
+    ონლაინ დღის საერთო რიცხვი **აღარ მოდის აგენტისგან** — სერვერი
+    ავტომატურად, რეალურად დადებული (COMPLETED) განცხადებებიდან ითვლის.
+    თუ GPS ვერიფიკაცია ჩართულია — body-ში {lat, lng, accuracy}
+    სავალდებულოა. თუ ჯამი დღიურ გეგმაზე ნაკლებია — ავტომატურად ემატება
+    "quota_missed" გაფრთხილება (Day off-ზე — არა), ისევე როგორც
+    ბოტის /clockout-ში."""
     agent, admin, err = _authed_agent()
     if err:
         return err
@@ -1399,6 +1696,15 @@ def api_clockout():
         return jsonify(error="მხოლოდ დარეგისტრირებული აგენტისთვის"), 403
     body = request.get_json(silent=True) or {}
     agent_id = agent["agent_id"]
+
+    # Attendance + GPS: დღის დახურვამდე (არაფრის ჩაწერამდე) ვამოწმებთ
+    # ლოკაციას — თუ GPS ჩართულია და არ გამოუგზავნია, დღე არ იხურება.
+    geo, geo_err = crm_extras.parse_geo_input(body)
+    if geo_err:
+        return jsonify(error="⚠️ მდებარეობის განსაზღვრა ვერ მოხერხდა. სცადეთ ხელახლა.", code="invalid_location"), 400
+    pre = crm_extras.check_out_precheck(agent, geo)
+    if pre:
+        return jsonify(error=pre["message"], code=pre["code"]), 400
 
     # მკაცრი წესი: თუ დღეს ამ აგენტს ჰქონდა მინიჭებული/გადაბარებული
     # კლიენტი (ნებისმიერი დავალება, შექმნილი დღეს), დღის დახურვამდე
@@ -1428,8 +1734,12 @@ def api_clockout():
             except (TypeError, ValueError):
                 return 0
 
+        # MyHome-ის რაოდენობა აღარ არის აგენტის ხელით შეყვანილი (შეეძლო
+        # რეალურზე მეტის მითითება) — ავტომატურად, ნამდვილად დადებული
+        # (worker.py-ს მიერ COMPLETED) განცხადებებიდან ითვლება.
+        myhome = crm_extras.count_myhome_completed_today(agent_id)
         if mode in ("office_morning", "office_evening"):
-            site, myhome, ssge = _as_int(body.get("site")), _as_int(body.get("myhome")), _as_int(body.get("ssge"))
+            site, ssge = _as_int(body.get("site")), _as_int(body.get("ssge"))
             # იხ. bot.py-ის იგივე ლოგიკის კომენტარი: ერთი და იგივე
             # განცხადება ერთდროულად იტვირთება საიტზე და myhome-ზე,
             # ამიტომ ჯამი = max(site, myhome), ss.ge ჯერჯერობით მხოლოდ
@@ -1437,48 +1747,25 @@ def api_clockout():
             total = max(site, myhome)
             sheets.set_daily_count(agent_id, total, site=site, myhome=myhome, ssge=ssge)
         else:
-            total = _as_int(body.get("count"))
+            total = myhome
             sheets.set_daily_count(agent_id, total)
+
+        # დასრულების ლოკაციის ივენთი (თუ გამოგზავნა) — clock_out უკვე
+        # წარმატებულია, ამიტომ მხოლოდ ახლა ვწერთ.
+        try:
+            crm_extras.record_check_out(agent, geo)
+        except Exception:
+            log.exception("check-out ივენთი ვერ ჩაიწერა agent_id=%s", agent_id)
 
         quota = sheets.quota_for_mode(mode)
         if quota and total < quota:
             today = datetime.datetime.now().strftime("%Y-%m-%d")
             detail = f"{today}: {total}/{quota} (Mini App-იდან)"
             warn_result = sheets.add_warning(agent_id, "quota_missed", detail)
-            label = "დღიური გეგმა (განცხადებები) ვერ შესრულდა"
-            text_admin = (
-                f"⚠️ გაფრთხილება — {agent['name']}: {label}\n{detail}\n"
-                f"ბოლო {config.WARNING_WINDOW_DAYS} დღეში: "
-                f"{warn_result['count']}/{config.WARNING_LIMIT}"
-            )
-            if warn_result["deactivated"]:
-                text_admin += (
-                    f"\n\n🚫 აგენტი ავტომატურად გამოირთო (მიაღწია "
-                    f"{config.WARNING_LIMIT} გაფრთხილებას)."
-                )
-            for admin_id in config.ADMIN_CHAT_IDS:
-                _send_telegram_message(admin_id, text_admin)
-            if agent.get("telegram_chat_id"):
-                agent_text = f"⚠️ მიიღეთ გაფრთხილება: {label}."
-                if warn_result["deactivated"]:
-                    agent_text += (
-                        "\n\nსამწუხაროდ, გაფრთხილებების ლიმიტს მიაღწიეთ და თქვენი "
-                        "ანგარიში დროებით გამოირთო. დაუკავშირდით მენეჯერს."
-                    )
-                _send_telegram_message(int(agent["telegram_chat_id"]), agent_text)
-            team_val = str(agent.get("team", "")).strip()
-            if team_val and str(agent.get("role", "")).strip() != "team_lead":
-                lead = next(
-                    (x for x in sheets.get_agents()
-                     if str(x.get("role", "")).strip() == "team_lead"
-                     and str(x.get("team", "")).strip() == team_val),
-                    None,
-                )
-                if lead and lead.get("telegram_chat_id"):
-                    _send_telegram_message(
-                        int(lead["telegram_chat_id"]),
-                        f"⚠️ თქვენი გუნდიდან — {agent['name']}: {label}\n{detail}",
-                    )
+            # დამტკიცებული Day off დღეს -> გაფრთხილება არ იწერება
+            # (skipped) და არავის ეგზავნება შეტყობინება.
+            if not warn_result.get("skipped"):
+                _notify_quota_warning(agent, warn_result, detail)
 
         # "კლიენტი გყავდათ დღეს?" კითხვის პასუხი Mini App-იდან — თუ
         # agent-მა ტელეფონი/მოქმედებები შეავსო, ავტომატურად იქმნება
@@ -1496,7 +1783,194 @@ def api_clockout():
                 )
             except Exception:
                 log.exception("Mini App clockout client report ვერ შეიქმნა agent_id=%s", agent_id)
-    return jsonify(result=result)
+    return jsonify(result=result, attendance=crm_extras.attendance_card(agent))
+
+
+app.add_url_rule("/api/attendance/check-out", endpoint="api_attendance_check_out",
+                 view_func=api_clockout, methods=["POST"])
+
+
+# ------------------------------------------------ Attendance + GPS (v4.0)
+# უფლებები (ყველა შემოწმება სერვერზეა, frontend-ის დამალვა უფლებას არ
+# ცვლის): აგენტი — მხოლოდ საკუთარი; თიმლიდერი — მხოლოდ საკუთარი გუნდი
+# (query-ის `team` იგნორირდება); ადმინი — ყველა (`?team=` ფილტრით).
+
+def _requester_chat_id():
+    parsed = _validate_init_data(request.headers.get("X-Telegram-Init-Data", ""))
+    return (parsed or {}).get("user", {}).get("id")
+
+
+def _attendance_manager_scope(agent, admin):
+    """(team_filter, error_response). ადმინი: None ან ?team=; თიმლიდერი:
+    საკუთარი გუნდი."""
+    if admin:
+        return (request.args.get("team") or None), None
+    if _is_team_lead(agent):
+        team = str(agent.get("team", "")).strip()
+        if not team:
+            return None, (jsonify(error="ჯერ არ გაქვთ საკუთარი გუნდი მინიჭებული"), 400)
+        return team, None
+    return None, (jsonify(error="მხოლოდ მენეჯერისთვის/ადმინისთვის"), 403)
+
+
+@app.get("/api/attendance/me/today")
+def api_attendance_me_today():
+    agent, admin, err = _authed_agent()
+    if err:
+        return err
+    if not agent:
+        return jsonify(error="მხოლოდ დარეგისტრირებული აგენტისთვის"), 403
+    return jsonify(attendance=crm_extras.attendance_card(agent))
+
+
+@app.get("/api/attendance/me/history")
+def api_attendance_me_history():
+    agent, admin, err = _authed_agent()
+    if err:
+        return err
+    if not agent:
+        return jsonify(error="მხოლოდ დარეგისტრირებული აგენტისთვის"), 403
+    return jsonify(rows=crm_extras.attendance_history(agent, request.args.get("month", "")))
+
+
+@app.get("/api/attendance/overview")
+def api_attendance_overview():
+    """დღის დასწრება (ცხრილი + შეჯამება) ფილტრებით: date, team (მხოლოდ
+    ადმინი), agent_id, state, geo, late=1."""
+    agent, admin, err = _authed_agent()
+    if err:
+        return err
+    team, scope_err = _attendance_manager_scope(agent, admin)
+    if scope_err:
+        return scope_err
+    agent_id = request.args.get("agent_id") or None
+    if agent_id and not admin:
+        target = next((a for a in sheets.get_agents() if str(a.get("agent_id")) == str(agent_id)), None)
+        if not target or str(target.get("team", "")).strip() != team:
+            return jsonify(error="მხოლოდ საკუთარი გუნდის აგენტი"), 403
+    data = crm_extras.attendance_overview(
+        request.args.get("date", ""), team=team, agent_id=agent_id,
+        state=request.args.get("state", ""), geo=request.args.get("geo", ""),
+        late_only=request.args.get("late") in ("1", "true", "yes"),
+    )
+    teams = []
+    if admin:
+        seen = {}
+        for a in sheets.get_agents():
+            t = str(a.get("team", "")).strip()
+            if t and t not in seen:
+                lead = _team_lead_for_team(t)
+                seen[t] = (lead or {}).get("name") or t
+        teams = [{"team": k, "label": v} for k, v in sorted(seen.items(), key=lambda kv: kv[1])]
+    return jsonify(
+        summary=data["summary"], rows=data["rows"], teams=teams,
+        settings=_attendance_settings_public(admin),
+    )
+
+
+app.add_url_rule("/api/attendance/team/today", endpoint="api_attendance_team_today",
+                 view_func=api_attendance_overview, methods=["GET"])
+app.add_url_rule("/api/attendance/admin/today", endpoint="api_attendance_admin_today",
+                 view_func=api_attendance_overview, methods=["GET"])
+
+
+@app.get("/api/attendance/history")
+def api_attendance_history():
+    """ერთი აგენტის თვის დასწრების ისტორია მენეჯერისთვის/ადმინისთვის."""
+    agent, admin, err = _authed_agent()
+    if err:
+        return err
+    team, scope_err = _attendance_manager_scope(agent, admin)
+    if scope_err:
+        return scope_err
+    target_id = request.args.get("agent_id")
+    target = next((a for a in sheets.get_agents() if str(a.get("agent_id")) == str(target_id)), None)
+    if not target:
+        return jsonify(error="აგენტი ვერ მოიძებნა"), 404
+    if not admin and str(target.get("team", "")).strip() != team:
+        return jsonify(error="მხოლოდ საკუთარი გუნდის აგენტი"), 403
+    return jsonify(rows=crm_extras.attendance_history(target, request.args.get("month", "")),
+                   agent_name=target.get("name"))
+
+
+@app.post("/api/attendance/export")
+def api_attendance_export():
+    """დასწრების CSV ექსპორტი — ფაილს ბოტი აგზავნის მომთხოვნის
+    Telegram ჩატში (Mini App-ის WebView-ში პირდაპირი ჩამოტვირთვა
+    არასანდოა). body: {date_from, date_to, team?}."""
+    agent, admin, err = _authed_agent()
+    if err:
+        return err
+    team, scope_err = _attendance_manager_scope(agent, admin)
+    if scope_err:
+        return scope_err
+    body = request.get_json(silent=True) or {}
+    d_to = crm_time.parse_user_date(body.get("date_to", "")) or crm_time.local_today()
+    d_from = crm_time.parse_user_date(body.get("date_from", "")) or d_to.replace(day=1)
+    if admin and body.get("team"):
+        team = str(body.get("team"))
+    chat_id = _requester_chat_id()
+    if not chat_id:
+        return jsonify(error="ჩატი ვერ განისაზღვრა"), 400
+    csv_text = crm_extras.attendance_csv(
+        d_from.strftime(crm_time.DATE_FMT), d_to.strftime(crm_time.DATE_FMT), team=team,
+    )
+    fname = f"attendance_{d_from.strftime(crm_time.DATE_FMT)}_{d_to.strftime(crm_time.DATE_FMT)}.csv"
+    ok = _send_telegram_document(
+        chat_id, fname, csv_text.encode("utf-8-sig"),
+        caption=f"📤 დასწრება {d_from.strftime(crm_time.DATE_FMT)} → {d_to.strftime(crm_time.DATE_FMT)}",
+    )
+    if not ok:
+        return jsonify(error="ფაილის გაგზავნა ვერ მოხერხდა"), 502
+    return jsonify(ok=True)
+
+
+def _attendance_settings_public(admin: bool) -> dict:
+    """ადმინს ეძლევა სრული პარამეტრები (ოფისის კოორდინატი რედაქტირებისთვის),
+    სხვას — მხოლოდ ის, რაც ინტერფეისს სჭირდება (კოორდინატი არა)."""
+    s = crm_extras.attendance_settings()
+    out = {
+        "configured": s["configured"],
+        "office_radius_meters": s["office_radius_meters"],
+        "max_accuracy_meters": s["max_accuracy_meters"],
+        "allow_outside_checkin": s["allow_outside_checkin"],
+    }
+    if admin:
+        out.update({
+            "office_name": s["office_name"],
+            "office_latitude": s["office_latitude"],
+            "office_longitude": s["office_longitude"],
+        })
+    return out
+
+
+@app.get("/api/attendance/settings")
+def api_attendance_settings_get():
+    agent, admin, err = _authed_agent()
+    if err:
+        return err
+    if not admin:
+        return jsonify(error="მხოლოდ ადმინისთვის"), 403
+    return jsonify(settings=_attendance_settings_public(True))
+
+
+@app.post("/api/attendance/settings")
+def api_attendance_settings_set():
+    """ოფისის/ვერიფიკაციის პარამეტრები (მხოლოდ ადმინი). ინახება
+    AppSettings-ში და მაშინვე მოქმედებს, restart არ სჭირდება."""
+    agent, admin, err = _authed_agent()
+    if err:
+        return err
+    if not admin:
+        return jsonify(error="მხოლოდ ადმინისთვის"), 403
+    body = request.get_json(silent=True) or {}
+    cleaned, bad = crm_extras.validate_settings_input(body)
+    if bad:
+        return jsonify(error=bad), 400
+    who = "admin"
+    for key, value in cleaned.items():
+        sheets.set_app_setting(key, value, updated_by=who)
+    return jsonify(ok=True, settings=_attendance_settings_public(True))
 
 
 @app.get("/api/questions")
@@ -1676,6 +2150,222 @@ def api_dayoff_decide():
             f"თქვენი Day off მოთხოვნა ({row.get('date')}) — {label}",
         )
     return jsonify(ok=True, row=row)
+
+
+@app.get("/api/dayoff/mine")
+def api_dayoff_mine():
+    """აგენტის საკუთარი Day off მოთხოვნები (ისტორია) + თვის ჭერი."""
+    agent, admin, err = _authed_agent()
+    if err:
+        return err
+    if not agent:
+        return jsonify(error="მხოლოდ დარეგისტრირებული აგენტისთვის"), 403
+    rows = [r for r in sheets.get_dayoff_requests() if str(r.get("agent_id")) == str(agent["agent_id"])]
+    rows.sort(key=lambda r: str(r.get("created_at", "")), reverse=True)
+    month_key = crm_time.local_today().strftime("%Y-%m")
+    approved_now = sheets.approved_dayoffs_count_this_month(agent["agent_id"], month_key + "-01")
+    return jsonify(rows=rows[:60], monthly_limit=config.DAYOFF_MONTHLY_LIMIT, approved_this_month=approved_now)
+
+
+@app.post("/api/dayoff/request")
+def api_dayoff_request():
+    """Day off მოთხოვნა Mini App-იდან — თარიღის არჩევით (<input type=date>).
+    ძველი ბოტის /dayoff თავისუფალ ტექსტს იღებდა ("ხვალ", "15/09") და
+    ასეთი ჩანაწერი ვერც ერთ ავტომატურ შემოწმებაში ვერ მონაწილეობდა —
+    აქ თარიღი სერვერზე მკაცრად მოწმდება და ISO (YYYY-MM-DD) ფორმატით
+    ინახება."""
+    agent, admin, err = _authed_agent()
+    if err:
+        return err
+    if not agent:
+        return jsonify(error="მხოლოდ დარეგისტრირებული აგენტისთვის"), 403
+    if str(agent.get("active", "yes")).lower() == "no":
+        return jsonify(error="თქვენი ანგარიში გამორთულია"), 403
+    body = request.get_json(silent=True) or {}
+    day = crm_time.parse_user_date(body.get("date", ""))
+    reason = (body.get("reason") or "").strip()[:500]
+    if not day:
+        return jsonify(error="აირჩიეთ სწორი თარიღი"), 400
+    today = crm_time.local_today()
+    if day < today:
+        return jsonify(error="გასული თარიღის დასვენება ვერ მოითხოვება"), 400
+    if (day - today).days > 120:
+        return jsonify(error="ძალიან შორეული თარიღია (მაქს. 120 დღე)"), 400
+    day_str = day.strftime(crm_time.DATE_FMT)
+    for r in sheets.get_dayoff_requests():
+        if str(r.get("agent_id")) == str(agent["agent_id"]) \
+                and str(r.get("status")) in ("pending", "approved") \
+                and crm_time.parse_user_date(r.get("date", "")) == day:
+            return jsonify(error="ამ თარიღზე მოთხოვნა უკვე არსებობს"), 409
+
+    request_id = sheets.create_dayoff_request(agent["agent_id"], day_str, reason or "-")
+    text = (
+        f"🏖 Day off მოთხოვნა: {agent.get('name')}\n"
+        f"თარიღი: {day_str}\nმიზეზი: {reason or '-'}"
+    )
+    buttons = {"inline_keyboard": [[
+        {"text": "✅ დამტკიცება", "callback_data": f"do_ok:{request_id}"},
+        {"text": "❌ უარყოფა", "callback_data": f"do_no:{request_id}"},
+    ]]}
+    for admin_id in config.ADMIN_CHAT_IDS:
+        _send_telegram_message(admin_id, text, reply_markup=buttons)
+    lead = _team_lead_for_team(agent.get("team")) if str(agent.get("role", "")).strip() != "team_lead" else None
+    if lead and lead.get("telegram_chat_id") and int(lead["telegram_chat_id"]) not in config.ADMIN_CHAT_IDS:
+        _send_telegram_message(
+            int(lead["telegram_chat_id"]),
+            text + "\n\nდასამტკიცებლად გახსენით Mini App → შვებულებები.",
+        )
+    return jsonify(ok=True, request_id=request_id, date=day_str)
+
+
+# ------------------------------------------- კვირის რაიონების განაწილება
+# მენეჯერი (თიმლიდერი — საკუთარი გუნდი; ადმინი — ყველა) ყოველ კვირას
+# ანაწილებს რაიონებს აგენტებზე (მულტი-არჩევით), აგენტი კი თავის
+# დაშბორდზე იმ კვირის განმავლობაში ხედავს და Telegram-ში იღებს
+# შეტყობინებას. კვირა = ორშაბათიდან კვირამდე (თბილისის კალენდრით).
+
+def _agent_districts_for(agent_id, week_start_str) -> list[str]:
+    rows = sheets.get_district_assignments(week_start=week_start_str, agent_id=agent_id)
+    return crm_extras.split_districts(rows[0].get("districts", "")) if rows else []
+
+
+def _district_week_payload(agent: dict) -> dict:
+    """აგენტის დაშბორდისთვის: ამ კვირის (და, თუ უკვე განაწილებულია,
+    მომავალი კვირის) რაიონები."""
+    this_week = crm_time.week_start()
+    next_week = this_week + datetime.timedelta(days=7)
+    ws_now = this_week.strftime(crm_time.DATE_FMT)
+    ws_next = next_week.strftime(crm_time.DATE_FMT)
+    return {
+        "week_start": ws_now,
+        "week_label": crm_extras.week_label(this_week),
+        "districts": _agent_districts_for(agent["agent_id"], ws_now),
+        "next_week_label": crm_extras.week_label(next_week),
+        "next_districts": _agent_districts_for(agent["agent_id"], ws_next),
+    }
+
+
+@app.get("/api/districts")
+def api_districts():
+    """მენეჯერის ხედვა: არჩეული კვირის (`?week=` — ნებისმიერი თარიღი იმ
+    კვირიდან) აგენტები და მათი უკვე მინიჭებული რაიონები + რაიონების
+    კატალოგი (ჯგუფებად). ადმინს შეუძლია `?team=` ფილტრი."""
+    agent, admin, err = _authed_agent()
+    if err:
+        return err
+    if not (admin or _is_team_lead(agent)):
+        return jsonify(error="მხოლოდ მენეჯერისთვის/ადმინისთვის"), 403
+    day = crm_time.parse_user_date(request.args.get("week", "")) or crm_time.local_today()
+    ws = crm_time.week_start(day)
+    ws_str = ws.strftime(crm_time.DATE_FMT)
+    all_agents = [a for a in sheets.get_agents() if crm_extras._is_active_agent(a)]
+    if admin:
+        team_filter = request.args.get("team") or None
+    else:
+        team_filter = str(agent.get("team", "")).strip()
+        if not team_filter:
+            return jsonify(error="ჯერ არ გაქვთ საკუთარი გუნდი მინიჭებული"), 400
+    members = [a for a in all_agents if team_filter is None or str(a.get("team", "")).strip() == team_filter]
+    assignments = {str(r.get("agent_id")): r for r in sheets.get_district_assignments(week_start=ws_str)}
+    leads = {
+        str(a.get("team", "")).strip(): a.get("name", "")
+        for a in all_agents if str(a.get("role", "")).strip() == "team_lead"
+    }
+    rows = []
+    for a in members:
+        aid = str(a.get("agent_id"))
+        t = str(a.get("team", "")).strip()
+        rows.append({
+            "agent_id": aid, "name": a.get("name"), "team": t,
+            "team_label": f"{leads.get(t)}-ის გუნდი" if leads.get(t) else (t or "დაუნაწილებელი"),
+            "role": a.get("role", "agent"),
+            "districts": crm_extras.split_districts((assignments.get(aid) or {}).get("districts", "")),
+            "assigned_by_name": (assignments.get(aid) or {}).get("assigned_by_name", ""),
+            "updated_at": (assignments.get(aid) or {}).get("updated_at", ""),
+        })
+    rows.sort(key=lambda r: (r["team_label"], r["name"] or ""))
+    teams = []
+    if admin:
+        seen = {}
+        for a in all_agents:
+            t = str(a.get("team", "")).strip()
+            if t and t not in seen:
+                seen[t] = f"{leads.get(t)}-ის გუნდი" if leads.get(t) else t
+        teams = [{"team": k, "label": v} for k, v in sorted(seen.items(), key=lambda kv: kv[1])]
+    this_week = crm_time.week_start()
+    return jsonify(
+        week_start=ws_str, week_label=crm_extras.week_label(ws),
+        is_current=(ws == this_week), is_past=(ws < this_week),
+        catalog=crm_extras.districts_catalog(), agents=rows, teams=teams,
+    )
+
+
+@app.post("/api/districts/assign")
+def api_districts_assign():
+    """body: {week, agent_ids:[...], districts:[...]} — ერთი ან რამდენიმე
+    აგენტისთვის (მულტი-არჩევით) კვირის რაიონების ჩაწერა/გადაწერა
+    (ცარიელი districts = გასუფთავება). თიმლიდერი მხოლოდ საკუთარი
+    გუნდის აგენტებზე ანაწილებს (სერვერი ამოწმებს); წარსული კვირის
+    შეცვლა არ შეიძლება. შეცვლილი აგენტი იღებს Telegram შეტყობინებას."""
+    agent, admin, err = _authed_agent()
+    if err:
+        return err
+    if not (admin or _is_team_lead(agent)):
+        return jsonify(error="მხოლოდ მენეჯერისთვის/ადმინისთვის"), 403
+    body = request.get_json(silent=True) or {}
+    day = crm_time.parse_user_date(body.get("week", "")) or crm_time.local_today()
+    ws = crm_time.week_start(day)
+    if ws < crm_time.week_start():
+        return jsonify(error="გასული კვირის რაიონების შეცვლა არ შეიძლება"), 400
+    agent_ids = _clean_id_list(body.get("agent_ids"), 100)
+    raw = body.get("districts") if isinstance(body.get("districts"), list) else []
+    districts = crm_extras.clean_districts(raw)
+    if len(districts) != len({str(x).strip() for x in raw if str(x).strip()}):
+        return jsonify(error="უცნობი რაიონი სიაში"), 400
+    if not agent_ids:
+        return jsonify(error="აირჩიეთ აგენტი"), 400
+
+    agents_by_id = {str(a.get("agent_id")): a for a in sheets.get_agents()}
+    my_team = str(agent.get("team", "")).strip() if not admin else None
+    for aid in agent_ids:
+        target = agents_by_id.get(aid)
+        if not target or not crm_extras._is_active_agent(target):
+            return jsonify(error="აგენტი ვერ მოიძებნა ან აღარაა აქტიური"), 400
+        if not admin and (not my_team or str(target.get("team", "")).strip() != my_team):
+            return jsonify(error="მხოლოდ საკუთარი გუნდის აგენტებზე შეგიძლიათ განაწილება"), 403
+
+    ws_str = ws.strftime(crm_time.DATE_FMT)
+    assigned_by = "admin" if admin else str(agent.get("agent_id"))
+    assigned_by_name = "ადმინი" if admin else str(agent.get("name") or "")
+    label = crm_extras.week_label(ws)
+    changed = 0
+    for aid in agent_ids:
+        before = _agent_districts_for(aid, ws_str)
+        sheets.set_district_assignment(ws_str, aid, districts, assigned_by, assigned_by_name)
+        if before == districts:
+            continue
+        changed += 1
+        chat = agents_by_id[aid].get("telegram_chat_id")
+        if chat:
+            if districts:
+                msg = (
+                    f"📍 ამ კვირის ({label}) განმავლობაში ხართ შემდეგი რაიონების "
+                    f"მიმართულებით:\n{', '.join(districts)}\n\nგისურვებთ წარმატებას! 🍀"
+                )
+            else:
+                msg = f"📍 ამ კვირის ({label}) რაიონების განაწილება გაუქმდა — დაგაზუსტებთ მენეჯერი."
+            _send_telegram_message(int(chat), msg)
+    return jsonify(ok=True, changed=changed, total=len(agent_ids), week_start=ws_str)
+
+
+@app.get("/api/districts/mine")
+def api_districts_mine():
+    agent, admin, err = _authed_agent()
+    if err:
+        return err
+    if not agent:
+        return jsonify(error="მხოლოდ დარეგისტრირებული აგენტისთვის"), 403
+    return jsonify(_district_week_payload(agent))
 
 
 # --------------------------------------------------- internal (worker.py)

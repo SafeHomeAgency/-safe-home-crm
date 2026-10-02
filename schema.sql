@@ -385,3 +385,55 @@ ALTER TABLE myhome_jobs ADD COLUMN IF NOT EXISTS address TEXT NOT NULL DEFAULT '
 ALTER TABLE myhome_jobs ADD COLUMN IF NOT EXISTS district TEXT NOT NULL DEFAULT '';
 ALTER TABLE myhome_jobs ADD COLUMN IF NOT EXISTS city TEXT NOT NULL DEFAULT '';
 ALTER TABLE myhome_jobs ADD COLUMN IF NOT EXISTS owner_number TEXT NOT NULL DEFAULT '';
+
+-- =====================================================================
+-- v4.0: დავალებაში მესაკუთრის ნომერი, კვირის რაიონების განაწილება,
+-- Attendance + GPS ივენთების ჟურნალი, admin-ის რედაქტირებადი პარამეტრები.
+-- ყველაფერი დამატებაა (IF NOT EXISTS) — არსებული ცხრილები/მონაცემები
+-- არ იცვლება.
+-- =====================================================================
+
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS owner_phone TEXT NOT NULL DEFAULT '';
+
+CREATE TABLE IF NOT EXISTS district_assignments (
+    assignment_id        TEXT PRIMARY KEY,
+    week_start           TEXT NOT NULL DEFAULT '',
+    agent_id             TEXT NOT NULL DEFAULT '',
+    agent_name           TEXT NOT NULL DEFAULT '',
+    team                 TEXT NOT NULL DEFAULT '',
+    districts            TEXT NOT NULL DEFAULT '',
+    assigned_by          TEXT NOT NULL DEFAULT '',
+    assigned_by_name     TEXT NOT NULL DEFAULT '',
+    created_at           TEXT NOT NULL DEFAULT '',
+    updated_at           TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_district_assignments_week ON district_assignments (week_start, team);
+CREATE INDEX IF NOT EXISTS idx_district_assignments_agent ON district_assignments (agent_id, week_start);
+
+CREATE TABLE IF NOT EXISTS attendance_geo (
+    event_id             TEXT PRIMARY KEY,
+    agent_id             TEXT NOT NULL DEFAULT '',
+    agent_name           TEXT NOT NULL DEFAULT '',
+    team                 TEXT NOT NULL DEFAULT '',
+    date                 TEXT NOT NULL DEFAULT '',
+    event                TEXT NOT NULL DEFAULT '',
+    at_utc               TEXT NOT NULL DEFAULT '',
+    lat                  TEXT NOT NULL DEFAULT '',
+    lng                  TEXT NOT NULL DEFAULT '',
+    accuracy             TEXT NOT NULL DEFAULT '',
+    distance_m           TEXT NOT NULL DEFAULT '',
+    geo_status           TEXT NOT NULL DEFAULT '',
+    mode                 TEXT NOT NULL DEFAULT '',
+    late                 TEXT NOT NULL DEFAULT 'no',
+    note                 TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_attendance_geo_date ON attendance_geo (date, geo_status);
+CREATE INDEX IF NOT EXISTS idx_attendance_geo_agent_date ON attendance_geo (agent_id, date);
+CREATE INDEX IF NOT EXISTS idx_attendance_geo_team_date ON attendance_geo (team, date);
+
+CREATE TABLE IF NOT EXISTS app_settings (
+    key                  TEXT PRIMARY KEY,
+    value                TEXT NOT NULL DEFAULT '',
+    updated_at           TEXT NOT NULL DEFAULT '',
+    updated_by           TEXT NOT NULL DEFAULT ''
+);

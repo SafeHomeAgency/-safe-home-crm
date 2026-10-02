@@ -44,7 +44,7 @@ CREATE TABLE tasks (
     updated_at TEXT DEFAULT '', notified TEXT DEFAULT 'no', lead_type TEXT DEFAULT '',
     client_phone TEXT DEFAULT '', deal_type TEXT DEFAULT '', listing_id TEXT DEFAULT '',
     viewing_time TEXT DEFAULT '', assigned_to_name TEXT DEFAULT '',
-    seen TEXT DEFAULT 'no', seen_at TEXT DEFAULT ''
+    seen TEXT DEFAULT 'no', seen_at TEXT DEFAULT '', owner_phone TEXT DEFAULT ''
 );
 CREATE TABLE reports (
     report_id TEXT PRIMARY KEY, agent_id TEXT DEFAULT '', client_phone TEXT DEFAULT '',
@@ -129,6 +129,29 @@ CREATE TABLE agent_requests (
     status TEXT DEFAULT 'pending', created_at TEXT DEFAULT '', decided_at TEXT DEFAULT '',
     decided_by TEXT DEFAULT ''
 );
+CREATE TABLE myhome_jobs (
+    job_id TEXT PRIMARY KEY, agent_id TEXT DEFAULT '', agent_name TEXT DEFAULT '', team TEXT DEFAULT '',
+    manager_label TEXT DEFAULT '', myhome_listing_id TEXT DEFAULT '', cooperation_percent TEXT DEFAULT '',
+    final_price TEXT DEFAULT '', notes TEXT DEFAULT '', status TEXT DEFAULT 'QUEUED',
+    error_message TEXT DEFAULT '', retry_count TEXT DEFAULT '0', created_at TEXT DEFAULT '',
+    started_at TEXT DEFAULT '', completed_at TEXT DEFAULT '', deal_type TEXT DEFAULT '',
+    address TEXT DEFAULT '', district TEXT DEFAULT '', city TEXT DEFAULT '', owner_number TEXT DEFAULT ''
+);
+CREATE TABLE district_assignments (
+    assignment_id TEXT PRIMARY KEY, week_start TEXT DEFAULT '', agent_id TEXT DEFAULT '',
+    agent_name TEXT DEFAULT '', team TEXT DEFAULT '', districts TEXT DEFAULT '',
+    assigned_by TEXT DEFAULT '', assigned_by_name TEXT DEFAULT '', created_at TEXT DEFAULT '',
+    updated_at TEXT DEFAULT ''
+);
+CREATE TABLE attendance_geo (
+    event_id TEXT PRIMARY KEY, agent_id TEXT DEFAULT '', agent_name TEXT DEFAULT '', team TEXT DEFAULT '',
+    date TEXT DEFAULT '', event TEXT DEFAULT '', at_utc TEXT DEFAULT '', lat TEXT DEFAULT '',
+    lng TEXT DEFAULT '', accuracy TEXT DEFAULT '', distance_m TEXT DEFAULT '', geo_status TEXT DEFAULT '',
+    mode TEXT DEFAULT '', late TEXT DEFAULT 'no', note TEXT DEFAULT ''
+);
+CREATE TABLE app_settings (
+    key TEXT PRIMARY KEY, value TEXT DEFAULT '', updated_at TEXT DEFAULT '', updated_by TEXT DEFAULT ''
+);
 """
 
 
@@ -141,6 +164,8 @@ def _reset_db():
         DROP TABLE IF EXISTS shift_swaps; DROP TABLE IF EXISTS exclusives;
         DROP TABLE IF EXISTS questions; DROP TABLE IF EXISTS exclusive_shares;
         DROP TABLE IF EXISTS audit_log; DROP TABLE IF EXISTS agent_requests;
+        DROP TABLE IF EXISTS myhome_jobs; DROP TABLE IF EXISTS district_assignments;
+        DROP TABLE IF EXISTS attendance_geo; DROP TABLE IF EXISTS app_settings;
     """)
     _conn.executescript(_TEST_SCHEMA)
     _conn.commit()

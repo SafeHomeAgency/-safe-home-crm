@@ -12,6 +12,7 @@ import gspread
 from google.oauth2.service_account import Credentials
 
 import config
+import crm_time
 
 _SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
@@ -138,6 +139,7 @@ TASKS_HEADERS = [
     "priority", "due_date", "created_by", "created_at", "updated_at",
     "notified", "lead_type", "client_phone", "deal_type", "listing_id",
     "viewing_time", "assigned_to_name", "seen", "seen_at",
+    "owner_phone",
 ]
 REPORTS_HEADERS = [
     "report_id", "agent_id", "client_phone", "actions", "notes",
@@ -235,6 +237,25 @@ MYHOME_JOBS_HEADERS = [
 # email/password მხოლოდ worker.py-ს მანქანაზეა ლოკალურად.
 MYHOME_ACCOUNTS_HEADERS = ["team", "manager_label", "manager_name", "updated_at"]
 
+# კვირის რაიონების განაწილება: ერთი სტრიქონი = ერთი აგენტი ერთ კვირაში
+# (week_start = ორშაბათის თარიღი, YYYY-MM-DD). districts — "|"-ით
+# გამოყოფილი რაიონების სია.
+DISTRICT_ASSIGNMENTS_HEADERS = [
+    "assignment_id", "week_start", "agent_id", "agent_name", "team",
+    "districts", "assigned_by", "assigned_by_name", "created_at", "updated_at",
+]
+
+# Attendance + GPS ივენთების ჟურნალი: ერთი სტრიქონი = ერთი check-in/
+# check-out. at_utc — ზუსტი UTC დრო (ISO), date — თბილისის დღე.
+ATTENDANCE_GEO_HEADERS = [
+    "event_id", "agent_id", "agent_name", "team", "date", "event", "at_utc",
+    "lat", "lng", "accuracy", "distance_m", "geo_status", "mode", "late",
+    "note",
+]
+
+# admin-ის მიერ რედაქტირებადი პარამეტრები (key/value)
+APP_SETTINGS_HEADERS = ["key", "value", "updated_at", "updated_by"]
+
 
 def _get_client():
     """
@@ -305,6 +326,9 @@ def ensure_sheets():
         (config.AGENT_REQUESTS_SHEET_NAME, AGENT_REQUESTS_HEADERS, 500),
         (config.MYHOME_JOBS_SHEET_NAME, MYHOME_JOBS_HEADERS, 1000),
         (config.MYHOME_ACCOUNTS_SHEET_NAME, MYHOME_ACCOUNTS_HEADERS, 50),
+        (config.DISTRICT_ASSIGNMENTS_SHEET_NAME, DISTRICT_ASSIGNMENTS_HEADERS, 500),
+        (config.ATTENDANCE_GEO_SHEET_NAME, ATTENDANCE_GEO_HEADERS, 3000),
+        (config.APP_SETTINGS_SHEET_NAME, APP_SETTINGS_HEADERS, 50),
     ]
     for name, headers, rows in sheets_to_ensure:
         try:
@@ -373,6 +397,18 @@ def _myhome_jobs_ws():
 
 def _myhome_accounts_ws():
     return _worksheet(config.MYHOME_ACCOUNTS_SHEET_NAME)
+
+
+def _district_assignments_ws():
+    return _worksheet(config.DISTRICT_ASSIGNMENTS_SHEET_NAME)
+
+
+def _attendance_geo_ws():
+    return _worksheet(config.ATTENDANCE_GEO_SHEET_NAME)
+
+
+def _app_settings_ws():
+    return _worksheet(config.APP_SETTINGS_SHEET_NAME)
 
 
 def _now():
@@ -622,7 +658,7 @@ def create_task(title: str, description: str, assigned_to: str,
                  priority: str, due_date: str, created_by: str,
                  lead_type: str = "", client_phone: str = "",
                  deal_type: str = "", listing_id: str = "",
-                 viewing_time: str = "") -> str:
+                 viewing_time: str = "", owner_phone: str = "") -> str:
     with _lock:
         task_id = uuid.uuid4().hex[:8]
         now = _now()
@@ -630,7 +666,7 @@ def create_task(title: str, description: str, assigned_to: str,
             task_id, title, description, assigned_to, "New",
             priority, due_date, created_by, now, now, "no",
             lead_type, client_phone, deal_type, listing_id, viewing_time,
-            agent_name_by_id(assigned_to), "no", "",
+            agent_name_by_id(assigned_to), "no", "", owner_phone,
         ])
         _invalidate(config.TASKS_SHEET_NAME)
         return task_id
@@ -1119,7 +1155,8 @@ def clock_in(agent_id: str) -> str:
 
 
 def clock_out(agent_id: str) -> str:
-    """აბრუნებს 'ok' / 'not_in' (ჯერ არ დაწყებულა)."""
+    """აბრუნებს 'ok' / 'not_in' (ჯერ არ დაწყებულა) / 'already_out'
+    (დღეს უკვე დასრულებულია — დასრულების დრო არ გადაიწერება)."""
     with _lock:
         ws = _attendance_ws()
         today = _today_str()
@@ -1128,6 +1165,8 @@ def clock_out(agent_id: str) -> str:
             if str(r.get("agent_id")) == str(agent_id) and str(r.get("date")) == today:
                 if not r.get("clock_in"):
                     return "not_in"
+                if r.get("clock_out"):
+                    return "already_out"
                 ws.update_cell(idx, ATTENDANCE_HEADERS.index("clock_out") + 1, _now())
                 _invalidate(config.ATTENDANCE_SHEET_NAME)
                 return "ok"
@@ -1177,6 +1216,21 @@ def get_today_attendance_all() -> list[dict]:
     return [r for r in rows if str(r.get("date")) == today]
 
 
+def get_attendance_records(agent_id: str | None = None, date_from: str = "",
+                            date_to: str = "") -> list[dict]:
+    """Attendance ჩანაწერები დიაპაზონით (YYYY-MM-DD, ორივე ბოლო
+    ჩათვლით) — დასწრების ისტორიისა და მენეჯერის/ადმინის ხედვისთვის."""
+    with _lock:
+        rows = list(_cached_records(config.ATTENDANCE_SHEET_NAME))
+    if agent_id:
+        rows = [r for r in rows if str(r.get("agent_id")) == str(agent_id)]
+    if date_from:
+        rows = [r for r in rows if str(r.get("date", "")) >= date_from]
+    if date_to:
+        rows = [r for r in rows if str(r.get("date", "")) <= date_to]
+    return rows
+
+
 def is_clocked_in_today(agent_id: str) -> bool:
     r = get_today_attendance(agent_id)
     return bool(r and r.get("clock_in") and not r.get("clock_out"))
@@ -1212,15 +1266,45 @@ def has_warning_today(agent_id: str, type_: str) -> bool:
     )
 
 
+def _warning_cutoff(days: int) -> datetime.datetime:
+    """`days`-იანი მოძრავი ფანჯრის საწყისი წერტილი, მაგრამ თუ
+    WARNING_RESET_MONTHLY ჩართულია (ნაგულისხმევი) — არასდროს უფრო
+    ადრე, ვიდრე მიმდინარე კალენდარული თვის (თბილისის) 1 რიცხვი 00:00:
+    ახალი თვის დაწყებისთანავე წინა თვის გაფრთხილებები ავტომატურად
+    აღარ ითვლება (არც ლიმიტში, არც მრიცხველში) — ჩანაწერები
+    ისტორიისთვის უცვლელად რჩება. ყველა გამოძახება, რომელიც
+    `days=config.WARNING_WINDOW_DAYS`-ს გადასცემს, ავტომატურად იღებს ამ
+    ქცევას — ცალკე job/წაშლა არ სჭირდება."""
+    cutoff = datetime.datetime.now() - datetime.timedelta(days=days)
+    if config.WARNING_RESET_MONTHLY:
+        cutoff = max(cutoff, crm_time.local_month_start_server_naive())
+    return cutoff
+
+
 def get_warnings(agent_id: str | None = None, days: int | None = None) -> list[dict]:
     with _lock:
         rows = _cached_records(config.WARNINGS_SHEET_NAME)
     if agent_id:
         rows = [r for r in rows if str(r.get("agent_id")) == str(agent_id)]
     if days:
-        cutoff = datetime.datetime.now() - datetime.timedelta(days=days)
+        cutoff = _warning_cutoff(days)
         rows = [r for r in rows if (_parse_dt(r.get("created_at", "")) or cutoff) >= cutoff]
     return rows
+
+
+def _has_approved_dayoff(agent_id: str, day=None) -> bool:
+    """აქვს თუ არა აგენტს მითითებულ (ნაგულისხმევად დღევანდელ, თბილისის)
+    დღეზე დამტკიცებული Day off. თარიღი შეიძლება ძველი ჩანაწერებისთვის
+    თავისუფალი ტექსტით იყოს ჩაწერილი — crm_time.parse_user_date
+    რამდენიმე გავრცელებულ ფორმატს ცნობს."""
+    day = day or crm_time.local_today()
+    for r in get_dayoff_requests(status="approved"):
+        if str(r.get("agent_id")) != str(agent_id):
+            continue
+        d = crm_time.parse_user_date(r.get("date", ""))
+        if d == day:
+            return True
+    return False
 
 
 def add_warning(agent_id: str, type_: str, detail: str = "") -> dict:
@@ -1229,7 +1313,17 @@ def add_warning(agent_id: str, type_: str, detail: str = "") -> dict:
     ჯამურ რაოდენობას — თუ WARNING_LIMIT-ს მიაღწია, აგენტი ავტომატურად
     გამოირთვება (active=no).
     აბრუნებს: {"warning_id", "count", "deactivated": bool}
+
+    თუ აგენტს დღეს დამტკიცებული Day off აქვს — გაფრთხილება საერთოდ არ
+    იწერება და შედეგში `skipped="dayoff"` ბრუნდება (გამომძახებლები ამ
+    შემთხვევაში შეტყობინებას აღარ აგზავნიან).
     """
+    if _has_approved_dayoff(agent_id):
+        current = len([
+            w for w in get_warnings(agent_id=agent_id, days=config.WARNING_WINDOW_DAYS)
+            if str(w.get("status") or "active") != "dismissed"
+        ])
+        return {"warning_id": "", "count": current, "deactivated": False, "skipped": "dayoff"}
     with _lock:
         warning_id = uuid.uuid4().hex[:8]
         _warnings_ws().append_row([
@@ -1288,6 +1382,73 @@ def decide_warning_dismissal(warning_id: str, approve: bool, decided_by: str) ->
         ws.update_cell(cell.row, WARNINGS_HEADERS.index("dismiss_decided_at") + 1, _now())
         _invalidate(config.WARNINGS_SHEET_NAME)
         return dict(zip(WARNINGS_HEADERS, ws.row_values(cell.row)))
+
+
+def request_warning_dismissals_bulk(warning_ids: list, requested_by: str, reason: str) -> list[dict]:
+    """ბევრი გაფრთხილების გაუქმების მოთხოვნა ერთად (მულტი-მონიშვნა) —
+    **ერთი** Google Sheets-ის batch გამოძახებით (თითო-თითოს განახლება
+    ათეულობით წერას გამოიწვევდა და API-ს წუთიან ლიმიტს გადააჭარბებდა).
+    აბრუნებს მხოლოდ რეალურად განახლებული ("active" -> "dismiss_pending")
+    სტრიქონებს."""
+    wanted = {str(w) for w in warning_ids}
+    out: list[dict] = []
+    with _lock:
+        ws = _warnings_ws()
+        records = _cached_records(config.WARNINGS_SHEET_NAME)
+        requester_name = agent_name_by_id(requested_by)
+        now = _now()
+        updates = []
+        for idx, r in enumerate(records, start=2):
+            if str(r.get("warning_id")) not in wanted:
+                continue
+            if str(r.get("status") or "active") != "active":
+                continue
+            updates.append({
+                "range": f"G{idx}:K{idx}",
+                "values": [["dismiss_pending", reason, requested_by, requester_name, now]],
+            })
+            row = dict(r)
+            row.update(status="dismiss_pending", dismiss_reason=reason,
+                       dismiss_requested_by=requested_by,
+                       dismiss_requested_by_name=requester_name, dismiss_requested_at=now)
+            out.append(row)
+        if updates:
+            ws.batch_update(updates)
+            _invalidate(config.WARNINGS_SHEET_NAME)
+    return out
+
+
+def decide_warning_dismissals_bulk(warning_ids: list, approve: bool, decided_by: str) -> list[dict]:
+    """დირექტორის გადაწყვეტილება ბევრ "dismiss_pending" გაფრთხილებაზე
+    ერთად (ერთი batch გამოძახებით)."""
+    wanted = {str(w) for w in warning_ids}
+    new_status = "dismissed" if approve else "active"
+    out: list[dict] = []
+    with _lock:
+        ws = _warnings_ws()
+        records = _cached_records(config.WARNINGS_SHEET_NAME)
+        now = _now()
+        updates = []
+        for idx, r in enumerate(records, start=2):
+            if str(r.get("warning_id")) not in wanted:
+                continue
+            if str(r.get("status") or "active") != "dismiss_pending":
+                continue
+            updates.append({
+                "range": f"G{idx}:M{idx}",
+                "values": [[
+                    new_status, r.get("dismiss_reason", ""), r.get("dismiss_requested_by", ""),
+                    r.get("dismiss_requested_by_name", ""), r.get("dismiss_requested_at", ""),
+                    decided_by, now,
+                ]],
+            })
+            row = dict(r)
+            row.update(status=new_status, dismiss_decided_by=decided_by, dismiss_decided_at=now)
+            out.append(row)
+        if updates:
+            ws.batch_update(updates)
+            _invalidate(config.WARNINGS_SHEET_NAME)
+    return out
 
 
 # ---------- სმენების/ნომრის გაცვლა ----------
@@ -2082,7 +2243,7 @@ def search_myhome_jobs(query: str = "", deal_type: str = "", status: str = "",
     q = (query or "").strip().lower()
     if q:
         search_fields = ("myhome_listing_id", "address", "district", "city",
-                          "agent_name", "notes", "team")
+                          "agent_name", "notes", "team", "owner_number")
         rows = [
             r for r in rows
             if q in " ".join(str(r.get(f, "")) for f in search_fields).lower()
@@ -2122,3 +2283,106 @@ def get_myhome_job_stats(team: str | None = None, date_from: str = "",
         if status_key in ("completed", "failed", "processing", "queued"):
             entry[status_key] += 1
     return sorted(by_agent.values(), key=lambda e: -e["total"])
+
+
+# ---------- კვირის რაიონების განაწილება (მენეჯერი -> აგენტი) ----------
+
+def get_district_assignments(week_start: str | None = None, team: str | None = None,
+                              agent_id: str | None = None) -> list[dict]:
+    """week_start — ორშაბათის თარიღი (YYYY-MM-DD). ფილტრები ოპციონალურია."""
+    with _lock:
+        rows = list(_cached_records(config.DISTRICT_ASSIGNMENTS_SHEET_NAME))
+    if week_start:
+        rows = [r for r in rows if str(r.get("week_start", "")).strip() == str(week_start).strip()]
+    if team:
+        rows = [r for r in rows if str(r.get("team", "")).strip() == str(team).strip()]
+    if agent_id:
+        rows = [r for r in rows if str(r.get("agent_id")) == str(agent_id)]
+    return rows
+
+
+def set_district_assignment(week_start: str, agent_id: str, districts: list,
+                             assigned_by: str, assigned_by_name: str = "") -> dict:
+    """ერთი აგენტის ერთი კვირის რაიონების ჩაწერა/გადაწერა (upsert:
+    იგივე კვირა+აგენტი -> იგივე სტრიქონი განახლდება). `districts` —
+    რაიონების სია (ცარიელი სია = გასუფთავება)."""
+    joined = "|".join(str(d).strip() for d in (districts or []) if str(d).strip())
+    agent = next((a for a in get_agents() if str(a.get("agent_id")) == str(agent_id)), {})
+    team = str(agent.get("team", "")).strip()
+    with _lock:
+        ws = _district_assignments_ws()
+        records = _cached_records(config.DISTRICT_ASSIGNMENTS_SHEET_NAME)
+        for idx, r in enumerate(records, start=2):
+            if (str(r.get("week_start", "")).strip() == str(week_start).strip()
+                    and str(r.get("agent_id")) == str(agent_id)):
+                row = [
+                    r.get("assignment_id"), week_start, agent_id, agent.get("name", ""), team,
+                    joined, assigned_by, assigned_by_name, r.get("created_at") or _now(), _now(),
+                ]
+                ws.update(f"A{idx}", [row])
+                _invalidate(config.DISTRICT_ASSIGNMENTS_SHEET_NAME)
+                return dict(zip(DISTRICT_ASSIGNMENTS_HEADERS, row))
+        row = [
+            uuid.uuid4().hex[:8], week_start, agent_id, agent.get("name", ""), team,
+            joined, assigned_by, assigned_by_name, _now(), _now(),
+        ]
+        ws.append_row(row)
+        _invalidate(config.DISTRICT_ASSIGNMENTS_SHEET_NAME)
+        return dict(zip(DISTRICT_ASSIGNMENTS_HEADERS, row))
+
+
+# ---------- Attendance + GPS ივენთების ჟურნალი ----------
+
+def add_attendance_geo_event(agent_id: str, event: str, lat: str, lng: str,
+                              accuracy: str, distance_m: str, geo_status: str,
+                              mode: str = "", late: str = "no", note: str = "") -> dict:
+    """ერთი check-in/check-out ივენთის ჩაწერა (მხოლოდ ამ მომენტის
+    მონაცემი — მუდმივი location history არ ინახება). დრო — სერვერის
+    ზუსტი UTC (at_utc), date — თბილისის დღე."""
+    agent = next((a for a in get_agents() if str(a.get("agent_id")) == str(agent_id)), {})
+    row = [
+        uuid.uuid4().hex[:8], agent_id, agent.get("name", ""), str(agent.get("team", "")).strip(),
+        crm_time.local_today().strftime(crm_time.DATE_FMT), event, crm_time.iso_utc_now(),
+        str(lat), str(lng), str(accuracy), str(distance_m), geo_status, mode, late, note,
+    ]
+    with _lock:
+        _attendance_geo_ws().append_row(row)
+        _invalidate(config.ATTENDANCE_GEO_SHEET_NAME)
+    return dict(zip(ATTENDANCE_GEO_HEADERS, row))
+
+
+def get_attendance_geo_events(agent_id: str | None = None, team: str | None = None,
+                               date_from: str = "", date_to: str = "") -> list[dict]:
+    with _lock:
+        rows = list(_cached_records(config.ATTENDANCE_GEO_SHEET_NAME))
+    if agent_id:
+        rows = [r for r in rows if str(r.get("agent_id")) == str(agent_id)]
+    if team:
+        rows = [r for r in rows if str(r.get("team", "")).strip() == str(team).strip()]
+    if date_from:
+        rows = [r for r in rows if str(r.get("date", "")) >= date_from]
+    if date_to:
+        rows = [r for r in rows if str(r.get("date", "")) <= date_to]
+    return rows
+
+
+# ---------- admin-ის რედაქტირებადი პარამეტრები (key/value) ----------
+
+def get_app_settings() -> dict:
+    with _lock:
+        rows = _cached_records(config.APP_SETTINGS_SHEET_NAME)
+    return {str(r.get("key")): str(r.get("value", "")) for r in rows if str(r.get("key", "")).strip()}
+
+
+def set_app_setting(key: str, value: str, updated_by: str = "") -> None:
+    key = str(key).strip()
+    with _lock:
+        ws = _app_settings_ws()
+        records = _cached_records(config.APP_SETTINGS_SHEET_NAME)
+        for idx, r in enumerate(records, start=2):
+            if str(r.get("key", "")).strip() == key:
+                ws.update(f"A{idx}", [[key, str(value), _now(), updated_by]])
+                _invalidate(config.APP_SETTINGS_SHEET_NAME)
+                return
+        ws.append_row([key, str(value), _now(), updated_by])
+        _invalidate(config.APP_SETTINGS_SHEET_NAME)

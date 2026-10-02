@@ -22,6 +22,7 @@ import threading
 import uuid
 
 import config
+import crm_time
 import db
 
 log = logging.getLogger("safehome-crm-sheets-pg")
@@ -38,6 +39,7 @@ TASKS_HEADERS = [
     "priority", "due_date", "created_by", "created_at", "updated_at",
     "notified", "lead_type", "client_phone", "deal_type", "listing_id",
     "viewing_time", "assigned_to_name", "seen", "seen_at",
+    "owner_phone",
 ]
 REPORTS_HEADERS = [
     "report_id", "agent_id", "client_phone", "actions", "notes",
@@ -98,6 +100,16 @@ MYHOME_JOBS_HEADERS = [
     "owner_number",
 ]
 MYHOME_ACCOUNTS_HEADERS = ["team", "manager_label", "manager_name", "updated_at"]
+DISTRICT_ASSIGNMENTS_HEADERS = [
+    "assignment_id", "week_start", "agent_id", "agent_name", "team",
+    "districts", "assigned_by", "assigned_by_name", "created_at", "updated_at",
+]
+ATTENDANCE_GEO_HEADERS = [
+    "event_id", "agent_id", "agent_name", "team", "date", "event", "at_utc",
+    "lat", "lng", "accuracy", "distance_m", "geo_status", "mode", "late",
+    "note",
+]
+APP_SETTINGS_HEADERS = ["key", "value", "updated_at", "updated_by"]
 
 
 # --------------------------------------------------------------- helpers
@@ -373,7 +385,7 @@ def create_task(title: str, description: str, assigned_to: str,
                  priority: str, due_date: str, created_by: str,
                  lead_type: str = "", client_phone: str = "",
                  deal_type: str = "", listing_id: str = "",
-                 viewing_time: str = "") -> str:
+                 viewing_time: str = "", owner_phone: str = "") -> str:
     with _lock:
         task_id = uuid.uuid4().hex[:8]
         now = _now()
@@ -381,7 +393,7 @@ def create_task(title: str, description: str, assigned_to: str,
             task_id, title, description, assigned_to, "New",
             priority, due_date, created_by, now, now, "no",
             lead_type, client_phone, deal_type, listing_id, viewing_time,
-            agent_name_by_id(assigned_to), "no", "",
+            agent_name_by_id(assigned_to), "no", "", owner_phone,
         ])
         return task_id
 
@@ -810,6 +822,8 @@ def clock_out(agent_id: str) -> str:
         )
         if not row or not row.get("clock_in"):
             return "not_in"
+        if row.get("clock_out"):
+            return "already_out"
         db.execute(
             "UPDATE attendance SET clock_out = %s WHERE attendance_id = %s",
             (_now(), row["attendance_id"]),
@@ -857,6 +871,20 @@ def get_today_attendance_all() -> list[dict]:
         return db.query_all("SELECT * FROM attendance WHERE date = %s", (today,))
 
 
+def get_attendance_records(agent_id: str | None = None, date_from: str = "",
+                            date_to: str = "") -> list[dict]:
+    """იხ. sheets_gspread.py-ის იგივე ფუნქცია."""
+    with _lock:
+        rows = db.query_all("SELECT * FROM attendance")
+    if agent_id:
+        rows = [r for r in rows if str(r.get("agent_id")) == str(agent_id)]
+    if date_from:
+        rows = [r for r in rows if str(r.get("date", "")) >= date_from]
+    if date_to:
+        rows = [r for r in rows if str(r.get("date", "")) <= date_to]
+    return rows
+
+
 def is_clocked_in_today(agent_id: str) -> bool:
     r = get_today_attendance(agent_id)
     return bool(r and r.get("clock_in") and not r.get("clock_out"))
@@ -883,18 +911,45 @@ def has_warning_today(agent_id: str, type_: str) -> bool:
     return any(str(r.get("created_at", "")).startswith(today) for r in rows)
 
 
+def _warning_cutoff(days: int) -> datetime.datetime:
+    """იხ. sheets_gspread.py-ის იგივე ფუნქციის დოკუმენტაცია — მოძრავი
+    `days` ფანჯარა, მაგრამ არასდროს უფრო ადრე, ვიდრე მიმდინარე
+    კალენდარული თვის (თბილისის) დასაწყისი (WARNING_RESET_MONTHLY)."""
+    cutoff = datetime.datetime.now() - datetime.timedelta(days=days)
+    if config.WARNING_RESET_MONTHLY:
+        cutoff = max(cutoff, crm_time.local_month_start_server_naive())
+    return cutoff
+
+
 def get_warnings(agent_id: str | None = None, days: int | None = None) -> list[dict]:
     with _lock:
         rows = db.query_all("SELECT * FROM warnings")
     if agent_id:
         rows = [r for r in rows if str(r.get("agent_id")) == str(agent_id)]
     if days:
-        cutoff = datetime.datetime.now() - datetime.timedelta(days=days)
+        cutoff = _warning_cutoff(days)
         rows = [r for r in rows if (_parse_dt(r.get("created_at", "")) or cutoff) >= cutoff]
     return rows
 
 
+def _has_approved_dayoff(agent_id: str, day=None) -> bool:
+    """იხ. sheets_gspread.py-ის იგივე ფუნქცია."""
+    day = day or crm_time.local_today()
+    for r in get_dayoff_requests(status="approved"):
+        if str(r.get("agent_id")) != str(agent_id):
+            continue
+        if crm_time.parse_user_date(r.get("date", "")) == day:
+            return True
+    return False
+
+
 def add_warning(agent_id: str, type_: str, detail: str = "") -> dict:
+    if _has_approved_dayoff(agent_id):
+        current = len([
+            w for w in get_warnings(agent_id=agent_id, days=config.WARNING_WINDOW_DAYS)
+            if str(w.get("status") or "active") != "dismissed"
+        ])
+        return {"warning_id": "", "count": current, "deactivated": False, "skipped": "dayoff"}
     with _lock:
         warning_id = uuid.uuid4().hex[:8]
         _insert("warnings", WARNINGS_HEADERS,
@@ -950,6 +1005,45 @@ def decide_warning_dismissal(warning_id: str, approve: bool, decided_by: str) ->
     _audit("decide_warning_dismissal", "warning", warning_id,
            new_value={"status": new_status, "decided_by": decided_by})
     return row
+
+
+def request_warning_dismissals_bulk(warning_ids: list, requested_by: str, reason: str) -> list[dict]:
+    """იხ. sheets_gspread.py-ის იგივე ფუნქცია (მულტი-მონიშვნა)."""
+    out: list[dict] = []
+    with _lock:
+        requester_name = agent_name_by_id(requested_by)
+        for wid in {str(w) for w in warning_ids}:
+            row = db.query_one("SELECT * FROM warnings WHERE warning_id = %s", (wid,))
+            if not row or str(row.get("status") or "active") != "active":
+                continue
+            db.execute(
+                "UPDATE warnings SET status = %s, dismiss_reason = %s, dismiss_requested_by = %s, "
+                "dismiss_requested_by_name = %s, dismiss_requested_at = %s WHERE warning_id = %s",
+                ("dismiss_pending", reason, requested_by, requester_name, _now(), wid),
+            )
+            out.append(db.query_one("SELECT * FROM warnings WHERE warning_id = %s", (wid,)))
+    return out
+
+
+def decide_warning_dismissals_bulk(warning_ids: list, approve: bool, decided_by: str) -> list[dict]:
+    """იხ. sheets_gspread.py-ის იგივე ფუნქცია (მულტი-მონიშვნა)."""
+    new_status = "dismissed" if approve else "active"
+    out: list[dict] = []
+    with _lock:
+        for wid in {str(w) for w in warning_ids}:
+            row = db.query_one("SELECT * FROM warnings WHERE warning_id = %s", (wid,))
+            if not row or str(row.get("status") or "active") != "dismiss_pending":
+                continue
+            db.execute(
+                "UPDATE warnings SET status = %s, dismiss_decided_by = %s, dismiss_decided_at = %s "
+                "WHERE warning_id = %s",
+                (new_status, decided_by, _now(), wid),
+            )
+            out.append(db.query_one("SELECT * FROM warnings WHERE warning_id = %s", (wid,)))
+    for r in out:
+        _audit("decide_warning_dismissal", "warning", r.get("warning_id"),
+               new_value={"status": new_status, "decided_by": decided_by})
+    return out
 
 
 # ---------- სმენების/ნომრის გაცვლა ----------
@@ -1695,7 +1789,7 @@ def search_myhome_jobs(query: str = "", deal_type: str = "", status: str = "",
     q = (query or "").strip().lower()
     if q:
         search_fields = ("myhome_listing_id", "address", "district", "city",
-                          "agent_name", "notes", "team")
+                          "agent_name", "notes", "team", "owner_number")
         rows = [
             r for r in rows
             if q in " ".join(str(r.get(f, "")) for f in search_fields).lower()
@@ -1735,3 +1829,102 @@ def get_myhome_job_stats(team: str | None = None, date_from: str = "",
         if status_key in ("completed", "failed", "processing", "queued"):
             entry[status_key] += 1
     return sorted(by_agent.values(), key=lambda e: -e["total"])
+
+
+# ---------- კვირის რაიონების განაწილება (მენეჯერი -> აგენტი) ----------
+
+def get_district_assignments(week_start: str | None = None, team: str | None = None,
+                              agent_id: str | None = None) -> list[dict]:
+    """იხ. sheets_gspread.py-ის იგივე ფუნქცია."""
+    with _lock:
+        rows = db.query_all("SELECT * FROM district_assignments")
+    if week_start:
+        rows = [r for r in rows if str(r.get("week_start", "")).strip() == str(week_start).strip()]
+    if team:
+        rows = [r for r in rows if str(r.get("team", "")).strip() == str(team).strip()]
+    if agent_id:
+        rows = [r for r in rows if str(r.get("agent_id")) == str(agent_id)]
+    return rows
+
+
+def set_district_assignment(week_start: str, agent_id: str, districts: list,
+                             assigned_by: str, assigned_by_name: str = "") -> dict:
+    """იხ. sheets_gspread.py-ის იგივე ფუნქცია (upsert კვირა+აგენტზე)."""
+    joined = "|".join(str(d).strip() for d in (districts or []) if str(d).strip())
+    agent = next((a for a in get_agents() if str(a.get("agent_id")) == str(agent_id)), {})
+    team = str(agent.get("team", "")).strip()
+    with _lock:
+        existing = db.query_one(
+            "SELECT * FROM district_assignments WHERE week_start = %s AND agent_id = %s",
+            (week_start, agent_id),
+        )
+        if existing:
+            db.execute(
+                "UPDATE district_assignments SET agent_name = %s, team = %s, districts = %s, "
+                "assigned_by = %s, assigned_by_name = %s, updated_at = %s WHERE assignment_id = %s",
+                (agent.get("name", ""), team, joined, assigned_by, assigned_by_name, _now(),
+                 existing["assignment_id"]),
+            )
+            return db.query_one(
+                "SELECT * FROM district_assignments WHERE assignment_id = %s",
+                (existing["assignment_id"],),
+            )
+        assignment_id = uuid.uuid4().hex[:8]
+        _insert("district_assignments", DISTRICT_ASSIGNMENTS_HEADERS, [
+            assignment_id, week_start, agent_id, agent.get("name", ""), team,
+            joined, assigned_by, assigned_by_name, _now(), _now(),
+        ])
+        return db.query_one(
+            "SELECT * FROM district_assignments WHERE assignment_id = %s", (assignment_id,)
+        )
+
+
+# ---------- Attendance + GPS ივენთების ჟურნალი ----------
+
+def add_attendance_geo_event(agent_id: str, event: str, lat: str, lng: str,
+                              accuracy: str, distance_m: str, geo_status: str,
+                              mode: str = "", late: str = "no", note: str = "") -> dict:
+    """იხ. sheets_gspread.py-ის იგივე ფუნქცია."""
+    agent = next((a for a in get_agents() if str(a.get("agent_id")) == str(agent_id)), {})
+    row = [
+        uuid.uuid4().hex[:8], agent_id, agent.get("name", ""), str(agent.get("team", "")).strip(),
+        crm_time.local_today().strftime(crm_time.DATE_FMT), event, crm_time.iso_utc_now(),
+        str(lat), str(lng), str(accuracy), str(distance_m), geo_status, mode, late, note,
+    ]
+    with _lock:
+        _insert("attendance_geo", ATTENDANCE_GEO_HEADERS, row)
+    return dict(zip(ATTENDANCE_GEO_HEADERS, row))
+
+
+def get_attendance_geo_events(agent_id: str | None = None, team: str | None = None,
+                               date_from: str = "", date_to: str = "") -> list[dict]:
+    with _lock:
+        rows = db.query_all("SELECT * FROM attendance_geo")
+    if agent_id:
+        rows = [r for r in rows if str(r.get("agent_id")) == str(agent_id)]
+    if team:
+        rows = [r for r in rows if str(r.get("team", "")).strip() == str(team).strip()]
+    if date_from:
+        rows = [r for r in rows if str(r.get("date", "")) >= date_from]
+    if date_to:
+        rows = [r for r in rows if str(r.get("date", "")) <= date_to]
+    return rows
+
+
+# ---------- admin-ის რედაქტირებადი პარამეტრები (key/value) ----------
+
+def get_app_settings() -> dict:
+    with _lock:
+        rows = db.query_all("SELECT * FROM app_settings")
+    return {str(r.get("key")): str(r.get("value", "")) for r in rows if str(r.get("key", "")).strip()}
+
+
+def set_app_setting(key: str, value: str, updated_by: str = "") -> None:
+    key = str(key).strip()
+    with _lock:
+        rc = db.execute(
+            "UPDATE app_settings SET value = %s, updated_at = %s, updated_by = %s WHERE key = %s",
+            (str(value), _now(), updated_by, key),
+        )
+        if not rc:
+            _insert("app_settings", APP_SETTINGS_HEADERS, [key, str(value), _now(), updated_by])
