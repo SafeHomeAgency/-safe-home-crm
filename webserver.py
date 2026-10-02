@@ -2717,6 +2717,15 @@ def uploaded_report_photo(filename):
     return resp
 
 
+# CRM 2.0 (P2.3): /api/crm2/... — ახალი endpoint-ები, არსებულს არ ცვლის
+import crm2_api  # noqa: E402
+
+crm2_api.register(
+    app, authed=_authed_agent, is_team_lead=_is_team_lead, audit=_audit,
+    rate_limited=rate_limited, get_agents=lambda: sheets.get_agents(),
+)
+
+
 def run():
     """ბლოკავს — bot.py იძახებს ცალკე thread-ში."""
     log.info("Mini App ვებ-სერვერი ეშვება პორტზე %s", config.PORT)
