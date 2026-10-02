@@ -177,6 +177,32 @@ def count_myhome_completed_today(agent_id: str) -> int:
     return total
 
 
+def _is_invalid_listing_job(j: dict) -> bool:
+    """მუდმივი "ლისტინგი წაშლილია/არ არსებობს" (LISTING_UNAVAILABLE) — ამას აგენტის
+    არასწორი/გაუქმებული ID იწვევს და არა ჩვენი სისტემა; ასეთი job არ ითვლება."""
+    return str(j.get("status")) == "FAILED" and (
+        str(j.get("failure_stage") or "") == "permanent"
+        or "LISTING_UNAVAILABLE" in str(j.get("error_message") or "")
+    )
+
+
+def count_myhome_submitted_today(agent_id: str) -> int:
+    """რამდენი MyHome განცხადება **გაგზავნა/შეიყვანა აგენტმა** დღეს (თბილისის დღე) —
+    სტატუსის მიუხედავად (QUEUED / PROCESSING / COMPLETED / FAILED). ამით აგენტს არ ვაზარალებთ
+    იმით, რომ დადება ჩვენთან ჯერ რიგშია, ან ჩვენი მხრიდან ჩავარდა (ტექნიკური შეცდომა).
+
+    ერთადერთი გამონაკლისი: მუდმივად არარსებული/წაშლილი ლისტინგის ID (LISTING_UNAVAILABLE) —
+    ეს აგენტის შეყვანილი არასწორი ID-ია და მუშაობად არ ითვლება (რომ ყალბი ID-ებით
+    რიცხვის გაბერვა შეუძლებელი იყოს). დუბლიკატი (იგივე აგენტი+ID+დღე) job-ად საერთოდ არ იქმნება."""
+    start, end = crm_time.local_day_bounds_server_naive()
+    total = 0
+    for j in sheets.get_myhome_jobs(agent_id=agent_id):
+        created = crm_time.parse_server_dt(j.get("created_at"))
+        if created and start <= created < end and not _is_invalid_listing_job(j):
+            total += 1
+    return total
+
+
 # ====================================================================
 # 3. რაიონები (კვირის განაწილებისთვის)
 # ====================================================================

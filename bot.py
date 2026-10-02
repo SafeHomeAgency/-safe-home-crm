@@ -1507,8 +1507,11 @@ def _count_myhome_completed_today(agent_id: str) -> int:
     დამოწმებული) MyHome განცხადებების რაოდენობა დღეისთვის — რეგლამენტის
     ანგარიშისთვის, აგენტის ხელით შეყვანილი (და, შესაბამისად,
     შესაძლო არაზუსტი) რიცხვის ნაცვლად."""
-    # თბილისის დღის საზღვრებით (სერვერი UTC-ზეა) — იხ. crm_extras
-    return crm_extras.count_myhome_completed_today(agent_id)
+    # თბილისის დღის საზღვრებით (სერვერი UTC-ზეა) — იხ. crm_extras.
+    # ახლა ითვლის **აგენტის მიერ გაგზავნილ** განცხადებებს (სტატუსის მიუხედავად;
+    # არარსებული ლისტინგის ID-ის გარდა), რომ რიგში/ჩვენი მხრიდან ჩავარდნილი
+    # განცხადება აგენტს არ დაუკლოს. ფუნქციის სახელი ისტორიულია.
+    return crm_extras.count_myhome_submitted_today(agent_id)
 
 
 async def clockout_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):

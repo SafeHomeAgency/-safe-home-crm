@@ -1730,19 +1730,21 @@ def client_counts(agent_id: str) -> dict:
     """კლიენტების რაოდენობა (დღეს/ჯამურად) — "კლიენტი" აქ ნიშნავს
     აგენტზე მინიჭებულ დავალებას/ლიდს (Tasks), მომხმარებლის
     განმარტებით (და არა /clientreport-ის რეპორტს)."""
-    today_str = _today_str()
+    today_local = crm_time.local_today().strftime(crm_time.DATE_FMT)
     agent_tasks = [t for t in get_tasks() if str(t.get("assigned_to")) == str(agent_id)]
-    today_count = sum(1 for t in agent_tasks if str(t.get("created_at", "")).startswith(today_str))
+    today_count = sum(1 for t in agent_tasks
+                      if crm_time.business_date_of_server_naive(t.get("created_at", "")) == today_local)
     return {"today": today_count, "total": len(agent_tasks)}
 
 
 def get_today_client_phones(agent_id: str) -> list[str]:
     """იხ. sheets_postgres.py-ის იგივე ფუნქციის დოკუმენტაცია."""
-    today_str = _today_str()
+    # თბილისის დღე (არა სერვერის UTC თარიღი): task-ის created_at სერვერის naive დროა
+    today_local = crm_time.local_today().strftime(crm_time.DATE_FMT)
     tasks = [
         t for t in get_tasks()
         if str(t.get("assigned_to")) == str(agent_id)
-        and str(t.get("created_at", "")).startswith(today_str)
+        and crm_time.business_date_of_server_naive(t.get("created_at", "")) == today_local
         and str(t.get("client_phone", "")).strip()
     ]
     out = []

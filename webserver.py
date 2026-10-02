@@ -1823,7 +1823,10 @@ def api_clockout():
     # კლიენტის ანგარიშის შევსება სავალდებულოა — "გამოტოვება" აღარ
     # შეიძლება მხოლოდ თვითონ აგენტის სიტყვის მიხედვით. სერვერი თავად
     # ამოწმებს (client_counts), აგენტის თვითდეკლარაციას აღარ ენდობა.
-    had_client_today = sheets.client_counts(agent_id).get("today", 0) > 0
+    # იგივე პირობა, რასაც Mini App აჩვენებს (`today.client_phones`): კლიენტის რეპორტი
+    # სავალდებულოა მხოლოდ მაშინ, თუ დღეს (თბილისის დღე) აგენტზე რეალურად გადაბარდა
+    # ტელეფონიანი კლიენტი. ახალ აგენტს / კლიენტის გარეშე დღეს დღის დახურვა არ ეკეტება.
+    had_client_today = bool(sheets.get_today_client_phones(agent_id))
     cr = body.get("client_report")
     cr_valid = (
         isinstance(cr, dict)
@@ -1849,7 +1852,9 @@ def api_clockout():
         # MyHome-ის რაოდენობა აღარ არის აგენტის ხელით შეყვანილი (შეეძლო
         # რეალურზე მეტის მითითება) — ავტომატურად, ნამდვილად დადებული
         # (worker.py-ს მიერ COMPLETED) განცხადებებიდან ითვლება.
-        myhome = crm_extras.count_myhome_completed_today(agent_id)
+        # დათვლა = რამდენი განცხადება გაგზავნა აგენტმა (სტატუსის მიუხედავად;
+        # არარსებული ლისტინგის ID-ის გარდა) — არა მხოლოდ უკვე დადებულები.
+        myhome = crm_extras.count_myhome_submitted_today(agent_id)
         if mode in ("office_morning", "office_evening"):
             site, ssge = _as_int(body.get("site")), _as_int(body.get("ssge"))
             # იხ. bot.py-ის იგივე ლოგიკის კომენტარი: ერთი და იგივე
