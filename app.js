@@ -2268,9 +2268,9 @@ function renderMyHomeJobs(rows, role) {
       <div class="qa-compose">
         <input id="mhListingId" type="text" inputmode="numeric" placeholder="MyHome ID (მაგ. 20134412)">
         <input id="mhOwnerNumber" type="text" inputmode="tel" placeholder="მესაკუთრის ნომერი (სავალდებულო)">
-        <input id="mhPercent" type="text" inputmode="decimal" placeholder="თანამშრომლობის % (არასავალდებულო)">
+        <input id="mhPercent" type="text" inputmode="decimal" placeholder="თანამშრომლობის საკომისიო % — გადავა ბაზაში (არასავალდებულო)">
         <input id="mhPrice" type="text" inputmode="decimal" placeholder="საბოლოო ფასი (არასავალდებულო)">
-        <textarea id="mhNotes" placeholder="შენიშვნა (არასავალდებულო)"></textarea>
+        <textarea id="mhNotes" placeholder="შეზღუდვები / შენიშვნა — გადავა ბაზაში (არასავალდებულო)"></textarea>
         <button class="btn" id="mhSubmit">დამატება</button>
       </div>
     </div>`;
