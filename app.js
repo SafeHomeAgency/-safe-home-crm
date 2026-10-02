@@ -55,6 +55,7 @@ const AGENT_TABS = [
   { id: "myhomejobs", label: "MyHome", icon: "🏘️", lazy: true },
   { id: "questions", label: "კითხვები", icon: "💬", lazy: true },
   { id: "regulations", label: "ინსტრუქცია", icon: "📘", lazy: true },
+  { id: "crm2", label: "CRM", icon: "🗃️", lazy: true },
 ];
 const ADMIN_TABS = [
   { id: "overview", label: "მიმოხილვა", icon: "📊" },
@@ -78,6 +79,7 @@ const ADMIN_TABS = [
   { id: "myhomestats", label: "MyHome სტატისტიკა", icon: "📊", lazy: true },
   { id: "questions", label: "კითხვები", icon: "💬", lazy: true },
   { id: "regulations", label: "ინსტრუქცია/წესები", icon: "📘", lazy: true },
+  { id: "crm2", label: "CRM", icon: "🗃️", lazy: true },
 ];
 
 const PERIODS = [
@@ -3271,6 +3273,7 @@ const LAZY_ENDPOINTS = {
   regulations: "/api/regulations",
   warnings: "/api/warnings",
   clients: "/api/clients",
+  crm2: "/api/crm2/clients",
 };
 /* ტაბები, რომელთა endpoint-საც სჭირდება ?period=day|week|month —
    period-ის შეცვლისას load() ისედაც წმენდს lazyCache-ს მთლიანად,
@@ -3290,6 +3293,168 @@ if (!state.meetingsScope) state.meetingsScope = "team";
 if (!state.warningsAgentFilter) state.warningsAgentFilter = "";
 if (!state.warningsManagerFilter) state.warningsManagerFilter = "";
 if (!state.warnSel) state.warnSel = new Set();
+
+/* ===================================================== CRM 2.0 (P2.3b) =====
+   ახალი "CRM" ტაბი: კლიენტების სია → ბარათი (ისტორია, follow-up-ები, შენიშვნა).
+   მონაცემი: /api/crm2/... (ხილვადობა სერვერზეა: ადმინი ყველა / თიმლიდერი გუნდი /
+   აგენტი მხოლოდ საკუთარი). არსებულ ტაბებს არ ეხება. */
+const CRM2_STATUS_LABELS = {
+  new: "ახალი", contacted: "დაკავშირებული", viewing: "ჩვენება", negotiation: "მოლაპარაკება",
+  won: "დაიხურა ✅", lost: "დაიკარგა", inactive: "პასიური",
+};
+const CRM2_ACT_ICONS = { call: "📞", meeting: "📍", note: "📝", task: "📋", report: "📝", job: "🌐", system: "⚙️" };
+
+/* UTC ISO (…Z) -> მოკლე ლოკალური დრო (თბილისი) */
+function _crm2Time(iso) {
+  if (!iso) return "";
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return String(iso);
+  return d.toLocaleString("ka-GE", { timeZone: "Asia/Tbilisi", day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" });
+}
+
+function _crm2RowsHtml(rows) {
+  if (!rows.length) return `<div class="empty">კლიენტი ვერ მოიძებნა</div>`;
+  return rows.map((c, i) => `
+    <div class="list-row clickable" data-crm2-idx="${i}">
+      <div class="avatar">${c.overdue_followups ? "⏰" : "👤"}</div>
+      <div class="main">
+        <div class="title">${esc(c.name || c.phone_raw || c.phone_norm)}</div>
+        <div class="sub">${esc(c.phone_raw || c.phone_norm)} · ${esc(CRM2_STATUS_LABELS[c.status] || c.status || "-")}</div>
+        <div class="sub">${esc(c.assigned_agent_name || "—")}${c.open_followups ? ` · ⏳ ${c.open_followups}${c.overdue_followups ? ` (⚠️ ვადაგადაცილებული ${c.overdue_followups})` : ""}` : ""}</div>
+      </div>
+      <div class="side sub">${esc(_crm2Time(c.last_activity_at))}</div>
+    </div>`).join("");
+}
+
+function renderCrm2(rows) {
+  rows = rows || [];
+  return `<div class="card">
+    <h2>🗃️ CRM — კლიენტები <span class="cnt">${rows.length}</span></h2>
+    <div class="qa-compose">
+      <input id="crm2Search" placeholder="ძებნა — სახელი ან ტელეფონი" />
+    </div>
+    <div id="crm2List">${_crm2RowsHtml(rows)}</div>
+  </div>`;
+}
+
+function bindCrm2Actions(rows) {
+  rows = rows || [];
+  const input = document.getElementById("crm2Search");
+  const bindRows = (list) => {
+    document.querySelectorAll("[data-crm2-idx]").forEach((el) => {
+      el.onclick = () => openCrm2Card(list[parseInt(el.dataset.crm2Idx, 10)]);
+    });
+  };
+  if (input) {
+    input.oninput = () => {
+      const q = input.value.trim().toLowerCase();
+      let digits = q.replace(/\D/g, "");
+      if (digits.startsWith("995") && digits.length > 3) digits = digits.slice(3);
+      else if (digits.startsWith("0") && digits.length > 1) digits = digits.slice(1);
+      const list = !q ? rows : rows.filter((c) =>
+        String(c.name || "").toLowerCase().includes(q)
+        || (digits && String(c.phone_norm || "").includes(digits)));
+      document.getElementById("crm2List").innerHTML = _crm2RowsHtml(list);
+      bindRows(list);
+    };
+  }
+  bindRows(rows);
+}
+
+function _crm2CardHtml(res) {
+  const c = res.client || {};
+  const open = (res.followups || []).filter((f) => f.status === "open")
+    .sort((a, b) => String(a.due_at).localeCompare(String(b.due_at)));
+  const nowIso = new Date().toISOString();
+  const fuHtml = open.length ? open.map((f) => `
+    <div class="list-row">
+      <div class="avatar">${String(f.due_at) < nowIso ? "⚠️" : "⏳"}</div>
+      <div class="main" style="overflow:visible">
+        <div class="title" style="white-space:normal">${esc(f.next_action)}</div>
+        <div class="sub">${esc(_crm2Time(f.due_at))} · ${esc(f.agent_name || "")}</div>
+      </div>
+      <button class="btn secondary" data-fu-done="${esc(f.followup_id)}" style="padding:7px 10px">✅</button>
+    </div>`).join("") : `<div class="empty">ღია follow-up არ არის</div>`;
+  const tl = res.timeline || [];
+  const tlHtml = tl.length ? tl.map((a) => `
+    <div class="list-row">
+      <div class="avatar">${CRM2_ACT_ICONS[a.type] || "•"}</div>
+      <div class="main" style="overflow:visible">
+        <div class="title" style="white-space:normal">${esc(a.summary)}</div>
+        <div class="sub">${esc(a.agent_name || "")} · ${esc(_crm2Time(a.created_at))}</div>
+      </div>
+    </div>`).join("") : `<div class="empty">ისტორია ცარიელია</div>`;
+  return `
+    <h3>${esc(c.name || c.phone_raw || c.phone_norm)}<button class="close" id="modalClose">✕</button></h3>
+    <div class="field"><div class="k">ტელეფონი</div><div class="v">${esc(c.phone_raw || c.phone_norm)}</div></div>
+    <div class="field"><div class="k">სტატუსი · აგენტი</div><div class="v">${esc(CRM2_STATUS_LABELS[c.status] || c.status || "-")} · ${esc(c.assigned_agent_name || "—")}</div></div>
+    <h3 style="margin-top:14px">⏳ Follow-up-ები</h3>
+    ${fuHtml}
+    <div class="qa-compose">
+      <input id="fuAction" maxlength="500" placeholder="შემდეგი ქმედება (მაგ. დარეკე თავიდან)" />
+      <input id="fuDue" type="date" />
+      <button class="btn" id="fuAdd">➕ Follow-up-ის დამატება</button>
+    </div>
+    <h3 style="margin-top:14px">📝 შენიშვნა</h3>
+    <div class="qa-compose">
+      <textarea id="crm2Note" maxlength="2000" placeholder="რა მოხდა კლიენტთან?"></textarea>
+      <button class="btn secondary" id="crm2NoteAdd">💾 შენიშვნის შენახვა</button>
+    </div>
+    <h3 style="margin-top:14px">🕘 ისტორია</h3>
+    ${tlHtml}`;
+}
+
+async function openCrm2Card(c) {
+  if (!c) return;
+  const backdrop = document.getElementById("modalBackdrop");
+  const box = document.getElementById("modalBox");
+  box.innerHTML = `<h3>${esc(c.name || c.phone_raw || c.phone_norm)}<button class="close" id="modalClose">✕</button></h3><div class="empty">იტვირთება…</div>`;
+  backdrop.hidden = false;
+  document.getElementById("modalClose").onclick = closeDetail;
+  backdrop.onclick = (e) => { if (e.target === backdrop) closeDetail(); };
+
+  const refresh = async () => {
+    const res = await api(`/api/crm2/clients/${encodeURIComponent(c.client_id)}`);
+    box.innerHTML = _crm2CardHtml(res);
+    document.getElementById("modalClose").onclick = () => { closeDetail(); delete lazyCache.crm2; renderContent(); };
+    box.querySelectorAll("[data-fu-done]").forEach((b) => {
+      b.onclick = async () => {
+        b.disabled = true;
+        try {
+          await api(`/api/crm2/followups/${encodeURIComponent(b.dataset.fuDone)}/close`, { method: "POST", body: JSON.stringify({ status: "done" }) });
+          toast("✅ დაიხურა");
+          await refresh();
+        } catch (e) { toast(e.message || "შეცდომა"); b.disabled = false; }
+      };
+    });
+    document.getElementById("fuAdd").onclick = async () => {
+      const action = (document.getElementById("fuAction").value || "").trim();
+      const due = document.getElementById("fuDue").value;
+      if (!action) { toast("ჩაწერეთ შემდეგი ქმედება"); return; }
+      if (!due) { toast("აირჩიეთ თარიღი"); return; }
+      const btn = document.getElementById("fuAdd");
+      btn.disabled = true;
+      try {
+        await api(`/api/crm2/clients/${encodeURIComponent(c.client_id)}/followups`, { method: "POST", body: JSON.stringify({ next_action: action, due_at: due }) });
+        toast("✅ დაემატა");
+        await refresh();
+      } catch (e) { toast(e.message || "შეცდომა"); btn.disabled = false; }
+    };
+    document.getElementById("crm2NoteAdd").onclick = async () => {
+      const text = (document.getElementById("crm2Note").value || "").trim();
+      if (!text) { toast("ჩაწერეთ ტექსტი"); return; }
+      const btn = document.getElementById("crm2NoteAdd");
+      btn.disabled = true;
+      try {
+        await api(`/api/crm2/clients/${encodeURIComponent(c.client_id)}/notes`, { method: "POST", body: JSON.stringify({ text }) });
+        toast("✅ შენახულია");
+        await refresh();
+      } catch (e) { toast(e.message || "შეცდომა"); btn.disabled = false; }
+    };
+  };
+  try { await refresh(); }
+  catch (e) { box.innerHTML += `<div class="empty">⚠️ ${esc(e.message)}</div>`; }
+}
 
 /* `adminOnly` ტაბები (მაგ. აგენტების/მენეჯერების მართვა) დირექტორის
    დონის მოქმედებაა — თიმლიდერს (რომელიც ტექნიკურად იმავე "admin"
@@ -3385,6 +3550,7 @@ async function renderContent() {
       else if (tab === "regulations") { content.innerHTML = renderRegulations(rows); bindRegulationsActions(); }
       else if (tab === "warnings") { content.innerHTML = renderWarnings(rows); bindWarningsActions(rows); }
       else if (tab === "clients") { content.innerHTML = renderClients(rows); bindClientsActions(rows); }
+      else if (tab === "crm2") { content.innerHTML = renderCrm2(rows); bindCrm2Actions(rows); }
       else if (tab === "mydayoffs") { content.innerHTML = renderMyDayoffs(rows); bindMyDayoffs(); }
       else if (tab === "myattendance") { content.innerHTML = renderMyAttendance(rows); bindMyAttendance(); }
       else if (tab === "attendance") { content.innerHTML = renderAttendanceAdmin(rows); bindAttendanceAdmin(rows); }
