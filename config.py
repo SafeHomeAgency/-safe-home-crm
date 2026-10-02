@@ -67,6 +67,57 @@ MYHOME_WORKER_API_KEY = os.environ.get("MYHOME_WORKER_API_KEY", "").strip()
 MYHOME_JOB_STALE_MINUTES = int(os.environ.get("MYHOME_JOB_STALE_MINUTES", "15"))
 MYHOME_JOB_MAX_RETRIES = int(os.environ.get("MYHOME_JOB_MAX_RETRIES", "3"))
 
+
+def _int_list(name: str, default: str) -> list[int]:
+    out = []
+    for part in os.environ.get(name, default).split(","):
+        part = part.strip()
+        if part.isdigit():
+            out.append(int(part))
+    return out or [int(x) for x in default.split(",")]
+
+
+# --- PHASE 1.5: უსაფრთხოება და სტაბილურობა -----------------------------
+# Telegram initData-ს მაქსიმალური ასაკი (წამი). Mini App-ი initData-ს
+# გახსნისას იღებს და სესიის განმავლობაში იგივეს აგზავნის (Telegram მას ღია
+# აპში არ ანახლებს), ამიტომ 24 საათი; გაჟონილი სათაური მაქს. ამდენ ხანს
+# მოქმედებს და არა სამუდამოდ. შესამცირებლად: Railway Variables.
+INITDATA_MAX_AGE_SECONDS = int(os.environ.get("TELEGRAM_INITDATA_MAX_AGE_SECONDS", "86400"))
+# რამდენი წამით "მომავალში" დაშვებულია auth_date (საათების უმნიშვნელო სხვაობა)
+INITDATA_FUTURE_SKEW_SECONDS = int(os.environ.get("TELEGRAM_INITDATA_FUTURE_SKEW_SECONDS", "60"))
+
+# worker heartbeat: რამდენი წამის შემდეგ ითვლება worker stale/offline
+WORKER_HEARTBEAT_STALE_SECONDS = int(os.environ.get("WORKER_HEARTBEAT_STALE_SECONDS", "300"))
+# FAILED job-ის ავტომატური განმეორების დაყოვნება (წუთები) ცდების მიხედვით:
+# 1-ლი განმეორება -> 2 წთ, მე-2 -> 10 წთ, მე-3 -> 30 წთ
+MYHOME_RETRY_BACKOFF_MINUTES = _int_list("MYHOME_RETRY_BACKOFF_MINUTES", "2,10,30")
+# Sheets-ზე job-ის დაკავების შემდეგ რამდენ წამს ველოდებით გადამოწმებამდე
+# (ტრანზაქციის არარსებობის კომპენსაცია; იხ. sheets_gspread.claim_next_myhome_job)
+MYHOME_CLAIM_SETTLE_SECONDS = float(os.environ.get("MYHOME_CLAIM_SETTLE_SECONDS", "1.0"))
+
+# AuditLog (Sheets): ბუფერიდან ჩაწერის ინტერვალი (წამი)
+AUDIT_LOG_SHEET_NAME = "AuditLog"
+WORKER_HEARTBEAT_SHEET_NAME = "WorkerHeartbeat"
+AUDIT_FLUSH_SECONDS = float(os.environ.get("AUDIT_FLUSH_SECONDS", "3"))
+
+# ატვირთული ფოტოების საქაღალდე. Railway Volume-ის შემთხვევაში მიუთითეთ
+# Volume-ის mount path (მაგ. /data/uploads) — წინააღმდეგ შემთხვევაში ფაილები
+# ეფემერულ დისკზეა და redeploy-ზე იკარგება. ცარიელი = ძველი ქცევა.
+UPLOADS_DIR_OVERRIDE = os.environ.get("UPLOADS_DIR", "").strip()
+
+# Rate limiting (პროცესის შიდა, არა განაწილებული!): bucket -> (მოთხოვნა, წამი)
+# ლიმიტები განზრახ ფართოა — რეალურ აგენტს არ უნდა შეუშალოს ხელი.
+RATE_LIMITS = {
+    "auth_fail":    (30, 60),    # IP-ზე: წარუმატებელი ავტორიზაციები
+    "job_create":   (20, 60),    # მომხმარებელზე: MyHome job-ის შექმნა
+    "worker":       (240, 60),   # worker-ის endpoint-ები (poll ~2/წთ + heartbeat)
+    "clockout":     (10, 60),    # დღის დახურვა (ფოტო-ატვირთვა base64-ით)
+    "bulk_notify":  (30, 60),    # შეტყობინებების გამომწვევი მასობრივი endpoint-ები
+    "photo":        (240, 60),   # ფოტოების ჩამოტვირთვა
+    "export":       (6, 60),     # CSV ექსპორტი (Telegram-ში ფაილის გაგზავნა)
+}
+RATE_LIMIT_ENABLED = os.environ.get("RATE_LIMIT_ENABLED", "1").strip().lower() not in ("0", "false", "no")
+
 # თვეში მაქსიმუმ რამდენჯერ შეუძლია აგენტს სმენის გაცვლის მოთხოვნა
 SHIFT_SWAP_MONTHLY_LIMIT = int(os.environ.get("SHIFT_SWAP_MONTHLY_LIMIT", "2"))
 

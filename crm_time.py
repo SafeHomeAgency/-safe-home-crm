@@ -107,10 +107,35 @@ def parse_user_date(text: str) -> datetime.date | None:
     return None
 
 
+def business_date(moment: datetime.datetime | None = None) -> str:
+    """ბიზნეს-დღე (YYYY-MM-DD) თბილისის დროით (Asia/Tbilisi) — არა UTC-ით:
+    ახალი ბიზნეს-დღე 00:00-ზე იწყება თბილისში. `moment` — timezone-aware
+    datetime (ნაგულისხმევი: ახლა)."""
+    m = moment or datetime.datetime.now(datetime.timezone.utc)
+    return m.astimezone(tz()).strftime(DATE_FMT)
+
+
+def business_date_of_server_naive(value) -> str:
+    """ცხრილში `_now()`-ით ჩაწერილი (სერვერის naive) დროის ბიზნეს-დღე
+    თბილისის დროით; ვერ წაიკითხა -> ცარიელი."""
+    dt = parse_server_dt(value)
+    return server_naive_to_local(dt).strftime(DATE_FMT) if dt else ""
+
+
 def iso_utc_now() -> str:
     """ზუსტი UTC timestamp (ISO, წამებით) — GPS/ატენდანსის ივენთებისთვის,
     სადაც დროის ზონებს შორის გაურკვევლობა დაუშვებელია."""
     return datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def seconds_since_utc_iso(value) -> float | None:
+    """რამდენი წამი გავიდა `iso_utc_now()`-ით ჩაწერილი დროიდან (None —
+    ცარიელი/არასწორი მნიშვნელობა). worker heartbeat-ისთვის."""
+    try:
+        dt = datetime.datetime.strptime(str(value).strip(), "%Y-%m-%dT%H:%M:%SZ")
+    except (ValueError, TypeError):
+        return None
+    return (datetime.datetime.now(datetime.timezone.utc) - dt.replace(tzinfo=datetime.timezone.utc)).total_seconds()
 
 
 def utc_iso_to_local(value: str) -> datetime.datetime | None:

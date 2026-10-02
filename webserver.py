@@ -29,16 +29,58 @@ import urllib.request
 
 from flask import Flask, jsonify, request, send_from_directory
 
+import functools
+
 import config
 import crm_extras
+import crm_security
 import crm_time
 import sheets
 
 log = logging.getLogger("safehome-crm-webapp")
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-UPLOADS_DIR = os.path.join(BASE_DIR, "uploads", "reports")
+# UPLOADS_DIR env (Railway Volume mount path) — ცარიელი = ძველი ადგილი
+UPLOADS_DIR = config.UPLOADS_DIR_OVERRIDE or os.path.join(BASE_DIR, "uploads", "reports")
 os.makedirs(UPLOADS_DIR, exist_ok=True)
+
+_rate_limiter = crm_security.RateLimiter()
+
+
+def _client_ip() -> str:
+    """Railway proxy-ს უკან რეალური IP — X-Forwarded-For-ის პირველი მისამართი."""
+    fwd = request.headers.get("X-Forwarded-For", "")
+    return (fwd.split(",")[0].strip() if fwd else (request.remote_addr or "")) or "unknown"
+
+
+def _rate_check(bucket: str, identity) -> tuple | None:
+    """None = დაშვებულია; სხვა შემთხვევაში (jsonify-response, 429)."""
+    if not config.RATE_LIMIT_ENABLED:
+        return None
+    limit, window = config.RATE_LIMITS[bucket]
+    ok, retry_after = _rate_limiter.check((bucket, str(identity)), limit, window)
+    if ok:
+        return None
+    resp = jsonify(error="ძალიან ბევრი მოთხოვნა — სცადეთ ცოტა ხანში", code="rate_limited")
+    resp.headers["Retry-After"] = str(retry_after)
+    return resp, 429
+
+
+def rate_limited(bucket: str):
+    """decorator: მომხმარებელზე (Telegram ID, თუ initData ვალიდურია; სხვა
+    შემთხვევაში IP) ითვლის მოთხოვნებს `config.RATE_LIMITS[bucket]`-ით.
+    პროცესის შიდა limiter-ია (იხ. crm_security.RateLimiter)."""
+    def deco(fn):
+        @functools.wraps(fn)
+        def wrapper(*args, **kwargs):
+            parsed = _validate_init_data(request.headers.get("X-Telegram-Init-Data", ""), quiet=True)
+            identity = (parsed or {}).get("user", {}).get("id") or _client_ip()
+            blocked = _rate_check(bucket, identity)
+            if blocked:
+                return blocked
+            return fn(*args, **kwargs)
+        return wrapper
+    return deco
 
 app = Flask(__name__)
 
@@ -168,37 +210,34 @@ def _notify_managers_of_agent(agent: dict, text: str, include_admins: bool = Tru
 
 # ---------------------------------------------------------------- auth
 
-def _validate_init_data(init_data: str) -> dict | None:
+def _validate_init_data(init_data: str, quiet: bool = False) -> dict | None:
     """ამოწმებს Telegram-ის Mini App `initData`-ს ხელმოწერას. წარმატების
     შემთხვევაში აბრუნებს {"user": {...}} dict-ს, წინააღმდეგ შემთხვევაში
     None-ს."""
-    if not init_data or not config.TELEGRAM_BOT_TOKEN:
+    # PHASE 1.5: HMAC + auth_date ვადა (crm_security.validate_init_data).
+    # ლოგში მხოლოდ მოკლე მიზეზი იწერება — initData/hash არასდროს.
+    user, reason = crm_security.validate_init_data(
+        init_data, config.TELEGRAM_BOT_TOKEN,
+        config.INITDATA_MAX_AGE_SECONDS, config.INITDATA_FUTURE_SKEW_SECONDS,
+    )
+    if user is None:
+        if not quiet and reason not in ("missing",):
+            log.warning("initData უარყოფილია: %s", reason)
         return None
-    try:
-        pairs = urllib.parse.parse_qsl(init_data, keep_blank_values=True)
-        data = dict(pairs)
-        received_hash = data.pop("hash", None)
-        if not received_hash:
-            return None
-        check_string = "\n".join(f"{k}={v}" for k, v in sorted(data.items()))
-        secret_key = hmac.new(b"WebAppData", config.TELEGRAM_BOT_TOKEN.encode(), hashlib.sha256).digest()
-        computed_hash = hmac.new(secret_key, check_string.encode(), hashlib.sha256).hexdigest()
-        if not hmac.compare_digest(computed_hash, received_hash):
-            return None
-        user = json.loads(data.get("user", "{}"))
-        return {"user": user}
-    except Exception:
-        log.exception("initData ვალიდაცია ჩავარდა")
-        return None
+    return {"user": user["user"], "auth_date": user["auth_date"]}
 
 
 def _authed_agent():
     """მოთხოვნიდან ამოწმებს initData-ს და აბრუნებს
-    (agent_or_None, is_admin, error_response_or_None)."""
+    (agent_or_None, is_admin, error_response_or_None). წარუმატებელი
+    ავტორიზაციები IP-ზე რიცხვდება (rate limit `auth_fail`)."""
     init_data = request.headers.get("X-Telegram-Init-Data", "")
     parsed = _validate_init_data(init_data)
     if not parsed:
-        return None, False, (jsonify(error="ავტორიზაცია ვერ დადასტურდა"), 401)
+        blocked = _rate_check("auth_fail", _client_ip())
+        if blocked:
+            return None, False, blocked
+        return None, False, (jsonify(error="ავტორიზაცია ვერ დადასტურდა", code="auth_failed"), 401)
     chat_id = parsed["user"].get("id")
     if chat_id is None:
         return None, False, (jsonify(error="მომხმარებელი ვერ მოიძებნა"), 401)
@@ -213,6 +252,22 @@ def _authed_agent():
 
 def _is_team_lead(agent) -> bool:
     return bool(agent) and str(agent.get("role", "")).strip() == "team_lead"
+
+
+def _audit(agent, admin: bool, action: str, entity_type: str = "", entity_id: str = "",
+           job_id: str = "", metadata: dict | None = None, result: str = "ok") -> None:
+    """PHASE 1.5: ქმედების ჩაწერა AuditLog-ში **რეალური Telegram ID-ით**
+    (არა ლიტერალური "admin"-ით). ბიზნეს-ველები (`created_by`/`decided_by`...)
+    უცვლელია — მათზე ლოგიკა დამოკიდებულია. audit-ის ჩავარდნა ძირითად
+    ოპერაციას არასდროს აჩერებს."""
+    try:
+        role = "admin" if admin else (str((agent or {}).get("role") or "agent"))
+        sheets.add_audit_event(
+            _requester_chat_id(), role, action, entity_type, str(entity_id or ""),
+            str(job_id or ""), metadata or {}, result,
+        )
+    except Exception:
+        log.exception("audit ჩაწერა ვერ მოხერხდა (%s)", action)
 
 
 WARNING_TYPE_LABELS = {
@@ -353,6 +408,7 @@ def api_colleagues():
 
 
 @app.post("/api/exclusives/share")
+@rate_limited("bulk_notify")
 def api_exclusives_share():
     """ექსკლუზივის გაზიარება კოლეგასთან — თანამშრომლობის კვალის
     ჩაწერით (v3.10): თუ კლიენტი დაინტერესდა კოლეგის ბინით, აგენტს
@@ -412,10 +468,17 @@ def api_myhome_jobs():
         rows = sheets.get_myhome_jobs(agent_id=agent["agent_id"])
     else:
         return jsonify(error="ავტორიზაცია საჭიროა"), 403
-    return jsonify(rows=rows)
+    payload = {"rows": rows}
+    if admin:
+        try:
+            payload["workers"] = worker_status_list()
+        except Exception:
+            log.exception("worker status ვერ ჩაიტვირთა")
+    return jsonify(payload)
 
 
 @app.post("/api/myhome-jobs")
+@rate_limited("job_create")
 def api_myhome_jobs_create():
     """აგენტი Mini App-იდან შეაქვს MyHome ID (+ %, ფასი, შენიშვნა) —
     queue-ში ემატება "QUEUED" job. worker.py (ცალკე კომპიუტერზე)
@@ -448,11 +511,11 @@ def api_myhome_jobs_create():
             error="თქვენი გუნდისთვის MyHome ანგარიში ჯერ არაა მიბმული — მიმართეთ ადმინს"
         ), 409
 
-    existing = sheets.find_active_myhome_job(listing_id)
-    if existing:
-        return jsonify(error="ეს MyHome ID უკვე რიგშია/მუშავდება", row=existing), 409
-
-    job_id = sheets.create_myhome_job(agent["agent_id"], {
+    # ბიზნეს-წესი (PHASE 1.5): უნიკალურია `agent_id + myhome_id + ბიზნეს-დღე
+    # (Asia/Tbilisi)`. გლობალური დუბლიკატის აკრძალვა **არ არის**: იგივე ID
+    # შეუძლია სხვა აგენტსაც (სხვა ფასზე შეთანხმებით), ან იგივე აგენტს —
+    # ხვალ. ფასი გასაღების ნაწილი არ არის. შემოწმება+შექმნა ერთად (სერვერზე).
+    job_id, existing = sheets.create_myhome_job_once_per_day(agent["agent_id"], {
         "team": team,
         "manager_label": account.get("manager_label", ""),
         "myhome_listing_id": listing_id,
@@ -461,7 +524,14 @@ def api_myhome_jobs_create():
         "notes": str(body.get("notes") or "").strip(),
         "owner_number": owner_number,
     })
+    if job_id is None:
+        hint = " (ჩავარდნილის გასაშვებად გამოიყენეთ „ხელახლა ცდა“)" if (existing or {}).get("status") == "FAILED" else ""
+        return jsonify(error="ამ MyHome ID-ს დღეს უკვე შეიყვანეთ — ერთსა და იმავე ID-ს ერთი აგენტი "
+                             "დღეში ერთხელ შეიყვანს" + hint,
+                       code="duplicate_today", row=existing), 409
     row = sheets.find_myhome_job(job_id)
+    _audit(agent, admin, "myhome_job_create", "myhome_job", job_id, job_id,
+           {"myhome_listing_id": listing_id, "team": team})
     if agent.get("telegram_chat_id"):
         _send_telegram_message(
             int(agent["telegram_chat_id"]),
@@ -541,9 +611,20 @@ def api_myhome_jobs_retry():
             return jsonify(error="ავტორიზაცია საჭიროა"), 403
     if row.get("status") not in ("FAILED", "PROCESSING"):
         return jsonify(error="მხოლოდ ჩავარდნილი/გაჭედილი job-ის ხელახლა გაშვება შეიძლება"), 400
+    if row.get("status") == "PROCESSING":
+        # PHASE 1.5: ახლა მიმდინარე (ცოცხალი) job ხელით არ უნდა დაბრუნდეს
+        # queue-ში — worker მას ამუშავებს და მეორე დაკავება განცხადებას
+        # გააორმაგებდა. "გაჭედილია" მხოლოდ STALE ვადის შემდეგ.
+        started = crm_time.parse_server_dt(row.get("started_at") or row.get("created_at"))
+        age_min = (datetime.datetime.now() - started).total_seconds() / 60 if started else 10**6
+        if age_min < config.MYHOME_JOB_STALE_MINUTES:
+            return jsonify(error="job ახლა მუშავდება — დაელოდეთ დასრულებას (გაჭედილად "
+                                 f"{config.MYHOME_JOB_STALE_MINUTES} წუთის შემდეგ ითვლება)"), 409
     updated = sheets.retry_myhome_job(job_id)
     if not updated:
-        return jsonify(error="ვერ განახლდა"), 500
+        return jsonify(error="ვერ განახლდა"), 409
+    _audit(agent, admin, "myhome_job_retry_manual", "myhome_job", job_id, job_id,
+           {"previous_status": row.get("status"), "retry_count": row.get("retry_count")})
     return jsonify(ok=True, row=updated)
 
 
@@ -734,6 +815,7 @@ def api_warnings():
 
 
 @app.post("/api/warnings/request-dismiss")
+@rate_limited("bulk_notify")
 def api_warnings_request_dismiss():
     """მენეჯერი ითხოვს კონკრეტული გაფრთხილების გაუქმებას — მაგ. თუ
     გაფრთხილება (ხშირად "quota_missed"/"late_report") იმიტომ დაეწერა,
@@ -765,6 +847,8 @@ def api_warnings_request_dismiss():
     row = sheets.request_warning_dismissal(warning_id, requested_by, reason)
     if not row:
         return jsonify(error="ეს გაფრთხილება უკვე მოთხოვნილი/გაუქმებულია"), 400
+    _audit(agent, admin, "warning_dismiss_request", "warning", warning_id,
+           metadata={"reason": reason[:200]})
 
     # ხაზგასმა: ბოტმა "სმენის დამთხვევის" კონტექსტი დირექტორის
     # თვალწინ რომ დადოს — თუ ამ თარიღზე ამ აგენტს შეხვედრა
@@ -794,6 +878,7 @@ def api_warnings_request_dismiss():
 
 
 @app.post("/api/warnings/decide-dismiss")
+@rate_limited("bulk_notify")
 def api_warnings_decide_dismiss():
     """დირექტორის საბოლოო გადაწყვეტილება — დამტკიცებისას აგენტისა და
     მომთხოვნი მენეჯერისთვის ეცნობება ახალი (განახლებული)
@@ -811,6 +896,8 @@ def api_warnings_decide_dismiss():
     row = sheets.decide_warning_dismissal(warning_id, approve, decided_by="admin")
     if not row:
         return jsonify(error="ვერ მოიძებნა ან უკვე გადაწყვეტილია"), 404
+    _audit(None, admin, "warning_dismiss_decide", "warning", warning_id,
+           metadata={"approve": approve, "agent_id": row.get("agent_id")})
 
     agent_id = str(row.get("agent_id"))
     new_count = _active_warning_count(agent_id)
@@ -846,6 +933,7 @@ def _clean_id_list(value, limit: int = 300) -> list[str]:
 
 
 @app.post("/api/warnings/request-dismiss-bulk")
+@rate_limited("bulk_notify")
 def api_warnings_request_dismiss_bulk():
     """მულტი-მონიშვნა: რამდენიმე გაფრთხილების გაუქმების მოთხოვნა ერთად,
     ერთი მიზეზით. უფლებები/შეზღუდვები იგივეა, რაც ერთეულ
@@ -877,6 +965,8 @@ def api_warnings_request_dismiss_bulk():
         }
     requested_by = "admin" if admin else agent.get("agent_id")
     rows = sheets.request_warning_dismissals_bulk(sorted(allowed), requested_by, reason) if allowed else []
+    _audit(agent, admin, "warning_dismiss_request_bulk", "warning", ",".join(sorted(allowed)[:20]),
+           metadata={"reason": reason[:200], "requested": len(rows)})
 
     if rows:
         by_agent: dict[str, list[dict]] = {}
@@ -899,6 +989,7 @@ def api_warnings_request_dismiss_bulk():
 
 
 @app.post("/api/warnings/decide-dismiss-bulk")
+@rate_limited("bulk_notify")
 def api_warnings_decide_dismiss_bulk():
     """მულტი-მონიშვნა: დირექტორის გადაწყვეტილება (დამტკიცება/უარყოფა)
     რამდენიმე "dismiss_pending" გაფრთხილებაზე ერთად. თითო აგენტს
@@ -915,6 +1006,8 @@ def api_warnings_decide_dismiss_bulk():
     if not ids:
         return jsonify(error="მონიშნეთ გაფრთხილებები"), 400
     rows = sheets.decide_warning_dismissals_bulk(ids, approve, decided_by="admin")
+    _audit(None, admin, "warning_dismiss_decide_bulk", "warning", ",".join(ids[:20]),
+           metadata={"approve": approve, "requested": len(ids), "decided": len(rows)})
     label = "✅ გაუქმდა" if approve else "❌ უარყოფილია, ძალაშია"
     agents_by_id = {str(a.get("agent_id")): a for a in sheets.get_agents()}
 
@@ -1020,6 +1113,7 @@ def api_agents_rekey_team():
     if not target or str(target.get("role", "")).strip() != "team_lead":
         return jsonify(error="მხოლოდ თიმლიდერისთვის"), 400
     sheets.set_agent_team(agent_id, agent_id)
+    _audit(None, admin, "agent_rekey_team", "agent", agent_id)
     return jsonify(ok=True)
 
 
@@ -1041,6 +1135,7 @@ def api_agents_delete():
     ok = sheets.delete_agent(agent_id)
     if not ok:
         return jsonify(error="ვერ მოიძებნა"), 404
+    _audit(None, admin, "agent_delete", "agent", agent_id)
     return jsonify(ok=True)
 
 
@@ -1065,6 +1160,9 @@ def api_agents_assign():
     target = next((a for a in all_agents if str(a.get("agent_id")) == str(agent_id)), None)
     if not target:
         return jsonify(error="აგენტი ვერ მოიძებნა"), 404
+
+    _audit(None, admin, "agent_assign", "agent", agent_id,
+           metadata={"mode": mode, "manager_id": body.get("manager_id")})
 
     if mode == "independent":
         sheets.set_agent_role(agent_id, "agent")
@@ -1136,6 +1234,7 @@ def api_agents_active():
     ok = sheets.set_agent_active(agent_id, active)
     if not ok:
         return jsonify(error="აგენტი ვერ მოიძებნა"), 404
+    _audit(None, admin, "agent_set_active", "agent", agent_id, metadata={"active": active})
     return jsonify(ok=True)
 
 
@@ -1225,6 +1324,8 @@ def api_agent_requests_decide():
     if status not in ("approved", "rejected") or not request_id:
         return jsonify(error="არასწორი მოთხოვნა"), 400
     row = sheets.decide_agent_request(request_id, status, decided_by="admin")
+    _audit(None, admin, "agent_request_decide", "agent_request", request_id,
+           metadata={"status": status, "ok": bool(row)})
     if not row:
         return jsonify(error="ვერ მოიძებნა ან უკვე გადაწყვეტილია"), 404
 
@@ -1242,6 +1343,7 @@ def api_agent_requests_decide():
 
 
 @app.post("/api/tasks/new")
+@rate_limited("bulk_notify")
 def api_tasks_new():
     """ახალი კლიენტის/ლიდის დამატება Mini App-იდან — იგივე ორი
     სცენარი, რაც აქამდე მხოლოდ ბოტის /newtask ბრძანებით შეეძლო
@@ -1315,6 +1417,7 @@ def api_tasks_new():
             owner_phone=owner_phone,
         )
 
+    _audit(agent, admin, "task_create", "task", task_id, metadata={"kind": kind})
     return jsonify(ok=True, task_id=task_id)
 
 
@@ -1413,6 +1516,7 @@ def api_tasks_reassign():
     row = sheets.reassign_task(task_id, to_agent_id, actor_agent_id=actor)
     if not row:
         return jsonify(error="დავალება ვერ მოიძებნა"), 404
+    _audit(agent, admin, "task_reassign", "task", task_id, metadata={"to_agent_id": to_agent_id})
 
     if to_agent.get("telegram_chat_id"):
         title = str(row.get("title") or "")
@@ -1680,6 +1784,7 @@ def _notify_quota_warning(agent: dict, warn_result: dict, detail: str) -> None:
 
 
 @app.post("/api/clockout")
+@rate_limited("clockout")
 def api_clockout():
     """სამუშაო დღის დასრულება. ოფისის ცვლაზე body-ში მოდის {site, ssge}
     (საიტი და ss.ge — აგენტის თვითდეკლარაცია); MyHome-ის რაოდენობა და
@@ -1894,6 +1999,7 @@ def api_attendance_history():
 
 
 @app.post("/api/attendance/export")
+@rate_limited("export")
 def api_attendance_export():
     """დასწრების CSV ექსპორტი — ფაილს ბოტი აგზავნის მომთხოვნის
     Telegram ჩატში (Mini App-ის WebView-ში პირდაპირი ჩამოტვირთვა
@@ -1970,6 +2076,8 @@ def api_attendance_settings_set():
     who = "admin"
     for key, value in cleaned.items():
         sheets.set_app_setting(key, value, updated_by=who)
+    _audit(agent, admin, "attendance_settings_update", "app_settings", "attendance",
+           metadata={"keys": sorted(cleaned.keys())})
     return jsonify(ok=True, settings=_attendance_settings_public(True))
 
 
@@ -2141,6 +2249,8 @@ def api_dayoff_decide():
     row = sheets.decide_dayoff(request_id, status)
     if not row:
         return jsonify(error="ვერ მოიძებნა"), 404
+    _audit(agent, admin, "dayoff_decide", "dayoff", request_id,
+           metadata={"status": status, "agent_id": row.get("agent_id"), "date": row.get("date")})
 
     label = "✅ დამტკიცებულია" if status == "approved" else "❌ უარყოფილია"
     a2 = next((a for a in sheets.get_agents() if str(a.get("agent_id")) == str(row.get("agent_id"))), None)
@@ -2168,6 +2278,7 @@ def api_dayoff_mine():
 
 
 @app.post("/api/dayoff/request")
+@rate_limited("bulk_notify")
 def api_dayoff_request():
     """Day off მოთხოვნა Mini App-იდან — თარიღის არჩევით (<input type=date>).
     ძველი ბოტის /dayoff თავისუფალ ტექსტს იღებდა ("ხვალ", "15/09") და
@@ -2301,6 +2412,7 @@ def api_districts():
 
 
 @app.post("/api/districts/assign")
+@rate_limited("bulk_notify")
 def api_districts_assign():
     """body: {week, agent_ids:[...], districts:[...]} — ერთი ან რამდენიმე
     აგენტისთვის (მულტი-არჩევით) კვირის რაიონების ჩაწერა/გადაწერა
@@ -2355,6 +2467,8 @@ def api_districts_assign():
             else:
                 msg = f"📍 ამ კვირის ({label}) რაიონების განაწილება გაუქმდა — დაგაზუსტებთ მენეჯერი."
             _send_telegram_message(int(chat), msg)
+    _audit(agent, admin, "districts_assign", "district_assignment", ws_str,
+           metadata={"agents": len(agent_ids), "changed": changed, "districts": districts})
     return jsonify(ok=True, changed=changed, total=len(agent_ids), week_start=ws_str)
 
 
@@ -2385,19 +2499,25 @@ def _authed_worker():
 
 
 @app.get("/internal/myhome-jobs/next")
+@rate_limited("worker")
 def internal_myhome_jobs_next():
     """worker.py ყოველ SCRAPER_POLL_INTERVAL წამში — ამ მენეჯერის
-    (`?manager_label=`) უძველესი "QUEUED" job-ის ატომური დაკავება
-    ("PROCESSING"-ში გადაყვანით). job არაა → `row: null`."""
+    (`?manager_label=`) უძველესი "QUEUED" job-ის დაკავება
+    ("PROCESSING"-ში გადაყვანით, `?worker_id=`-ის ჩაწერით). job არაა →
+    `row: null`. (Sheets-ზე დაკავება საუკეთესო ძალისხმევაა, იხ.
+    sheets_gspread.claim_next_myhome_job.)"""
     err = _authed_worker()
     if err:
         return err
     manager_label = str(request.args.get("manager_label") or "").strip()
     if not manager_label:
         return jsonify(error="manager_label საჭიროა"), 400
-    row = sheets.claim_next_myhome_job(manager_label)
+    worker_id = str(request.args.get("worker_id") or "").strip()[:80]
+    row = sheets.claim_next_myhome_job(manager_label, worker_id)
     if not row:
         return jsonify(row=None)
+    sheets.add_audit_event("", "worker", "myhome_job_claimed", "myhome_job", row.get("job_id"),
+                           row.get("job_id"), {"worker_id": worker_id, "manager_label": manager_label})
     agent = next(
         (a for a in sheets.get_agents() if str(a.get("agent_id")) == str(row.get("agent_id"))),
         None,
@@ -2410,12 +2530,21 @@ def internal_myhome_jobs_next():
     return jsonify(row=row)
 
 
+_FINISH_HTTP = {"not_found": 404, "not_processing": 409, "wrong_worker": 409, "bad_status": 400}
+
+
 @app.post("/internal/myhome-jobs/<job_id>/complete")
+@rate_limited("worker")
 def internal_myhome_jobs_complete(job_id):
     """worker.py-ს job-ის დამუშავების შედეგის ანგარიში
-    (`{"status": "COMPLETED"|"FAILED", "error_message": "...",
-    "deal_type"/"address"/"district"/"city": "..." (მხოლოდ
-    წარმატებისას, საძიებო/ფილტრის ველებისთვის)}`)."""
+    (`{"status": "COMPLETED"|"FAILED", "worker_id": "...", "error_message": "...",
+    "failure_stage": "preparing|payment|paid", "deal_type"/"address"/
+    "district"/"city": "..." (წარმატებისას)}`).
+
+    PHASE 1.5: მხოლოდ PROCESSING -> COMPLETED/FAILED, მხოლოდ დამკავებელი
+    worker-იდან; განმეორებითი იგივე შედეგი idempotent-ია (200, `duplicate:
+    true`, **Telegram-შეტყობინების გარეშე**). FAILED გადახდამდე ეტაპზე
+    ავტომატურად იგეგმება ხელახლა (მაქს. MYHOME_JOB_MAX_RETRIES, backoff)."""
     err = _authed_worker()
     if err:
         return err
@@ -2423,30 +2552,110 @@ def internal_myhome_jobs_complete(job_id):
     status = str(body.get("status") or "").strip().upper()
     if status not in ("COMPLETED", "FAILED"):
         return jsonify(error="status უნდა იყოს COMPLETED ან FAILED"), 400
-    error_message = str(body.get("error_message") or "").strip()
-    row = sheets.complete_myhome_job(
-        job_id, status, error_message,
+    worker_id = str(body.get("worker_id") or "").strip()[:80]
+    error_message = str(body.get("error_message") or "").strip()[:2000]
+    res = sheets.finish_myhome_job(
+        job_id, worker_id, status, error_message,
         deal_type=str(body.get("deal_type") or "").strip(),
         address=str(body.get("address") or "").strip(),
         district=str(body.get("district") or "").strip(),
         city=str(body.get("city") or "").strip(),
+        failure_stage=str(body.get("failure_stage") or "").strip(),
     )
-    if not row:
-        return jsonify(error="job ვერ მოიძებნა"), 404
+    if not res["ok"]:
+        sheets.add_audit_event("", "worker", "myhome_job_finish_rejected", "myhome_job", job_id, job_id,
+                               {"worker_id": worker_id, "status": status, "code": res["code"]}, "rejected")
+        return jsonify(error="ოპერაცია უარყოფილია", code=res["code"]), _FINISH_HTTP.get(res["code"], 409)
+    row = res["row"]
+    if res["code"] == "duplicate":
+        return jsonify(ok=True, duplicate=True, row=row)
+
+    sheets.add_audit_event(
+        "", "worker",
+        "myhome_job_retry_scheduled" if res["retry_scheduled"] else f"myhome_job_{status.lower()}",
+        "myhome_job", job_id, job_id,
+        {"worker_id": worker_id, "retry_count": row.get("retry_count"),
+         "failure_stage": row.get("failure_stage"), "next_retry_at": row.get("next_retry_at")},
+        "ok" if status == "COMPLETED" else "failed",
+    )
     agent = next(
         (a for a in sheets.get_agents() if str(a.get("agent_id")) == str(row.get("agent_id"))),
         None,
     )
     if agent and agent.get("telegram_chat_id"):
+        listing = row.get("myhome_listing_id")
         if status == "COMPLETED":
-            text = f"✅ MyHome ID {row.get('myhome_listing_id')} — წარმატებით აიტვირთა."
+            text = f"✅ MyHome ID {listing} — წარმატებით აიტვირთა."
+        elif res["retry_scheduled"]:
+            text = (f"⚠️ MyHome ID {listing} — დროებით ვერ აიტვირთა ({error_message or 'უცნობი მიზეზი'}). "
+                    f"ავტომატურად გავიმეორებთ ({row.get('retry_count')}/{config.MYHOME_JOB_MAX_RETRIES}).")
         else:
-            text = (
-                f"❌ MyHome ID {row.get('myhome_listing_id')} — ვერ აიტვირთა. "
-                f"მიზეზი: {error_message or 'უცნობი'}"
-            )
+            text = f"❌ MyHome ID {listing} — ვერ აიტვირთა. მიზეზი: {error_message or 'უცნობი'}"
         _send_telegram_message(int(agent["telegram_chat_id"]), text)
-    return jsonify(ok=True, row=row)
+    return jsonify(ok=True, row=row, retry_scheduled=res["retry_scheduled"])
+
+
+@app.post("/internal/myhome-jobs/<job_id>/stage")
+@rate_limited("worker")
+def internal_myhome_jobs_stage(job_id):
+    """"გადახდის კარიბჭე": worker-ი გადახდამდე (`stage: "payment"`) და მის
+    შემდეგ (`"paid"`) იძახებს. 200 = გადახდის დაწყება/გაგრძელება დაშვებულია;
+    409 = job ამ worker-ს აღარ ეკუთვნის -> worker-მა გადახდა **არ უნდა დაიწყოს**
+    (ორმაგი გადახდის დაცვა). ეტაპი job-ზე ინახება და stale-recovery-ს
+    აჩერებს (გადახდილი job queue-ში არ ბრუნდება)."""
+    err = _authed_worker()
+    if err:
+        return err
+    body = request.get_json(silent=True) or {}
+    res = sheets.set_myhome_job_stage(job_id, str(body.get("worker_id") or "").strip()[:80],
+                                      str(body.get("stage") or "").strip())
+    if not res["ok"]:
+        sheets.add_audit_event("", "worker", "myhome_job_stage_rejected", "myhome_job", job_id, job_id,
+                               {"stage": body.get("stage"), "code": res["code"]}, "rejected")
+        code = {"not_found": 404, "bad_stage": 400}.get(res["code"], 409)
+        return jsonify(error="ოპერაცია უარყოფილია", code=res["code"]), code
+    sheets.add_audit_event("", "worker", f"myhome_job_stage_{body.get('stage')}", "myhome_job", job_id, job_id,
+                           {"worker_id": body.get("worker_id")})
+    return jsonify(ok=True)
+
+
+@app.post("/internal/worker/heartbeat")
+@rate_limited("worker")
+def internal_worker_heartbeat():
+    """worker-ის სიცოცხლის ნიშანი: {worker_id, status, current_job_id, stage}."""
+    err = _authed_worker()
+    if err:
+        return err
+    body = request.get_json(silent=True) or {}
+    worker_id = str(body.get("worker_id") or "").strip()[:80]
+    if not worker_id:
+        return jsonify(error="worker_id საჭიროა"), 400
+    row = sheets.record_worker_heartbeat(
+        worker_id, str(body.get("status") or "online")[:20],
+        str(body.get("current_job_id") or "")[:40], str(body.get("stage") or "")[:20],
+    )
+    return jsonify(ok=True, last_heartbeat=row["last_heartbeat"])
+
+
+def worker_status_list() -> list[dict]:
+    """heartbeat-ები + გამოთვლილი `online` (WORKER_HEARTBEAT_STALE_SECONDS)."""
+    out = []
+    for hb in sheets.get_worker_heartbeats():
+        age = crm_time.seconds_since_utc_iso(hb.get("last_heartbeat"))
+        online = age is not None and age <= config.WORKER_HEARTBEAT_STALE_SECONDS
+        out.append({**hb, "online": online, "age_seconds": None if age is None else int(age)})
+    return out
+
+
+@app.get("/api/worker/status")
+def api_worker_status():
+    """worker-ების მდგომარეობა — მხოლოდ ადმინი."""
+    agent, admin, err = _authed_agent()
+    if err:
+        return err
+    if not admin:
+        return jsonify(error="მხოლოდ ადმინისთვის"), 403
+    return jsonify(workers=worker_status_list(), stale_after_seconds=config.WORKER_HEARTBEAT_STALE_SECONDS)
 
 
 # ---------------------------------------------------------- static app
@@ -2467,13 +2676,45 @@ def app_js():
     return send_from_directory(BASE_DIR, "app.js")
 
 
+def _photo_owner_report(filename: str) -> dict | None:
+    """იმ რეპორტის პოვნა, რომლის file_id-შიც ეს ფოტოა მითითებული."""
+    needle = f"uploads/reports/{filename}"
+    for r in sheets.get_reports():
+        if needle in str(r.get("file_id") or ""):
+            return r
+    return None
+
+
 @app.get("/uploads/reports/<path:filename>")
+@rate_limited("photo")
 def uploaded_report_photo(filename):
-    """კლიენტის რეპორტთან ატვირთული ფოტოს გაცემა — ფაილის სახელი
-    შემთხვევითი (UUID) წარმოქმნილია, პირდაპირ ვერავინ გამოიცნობს;
-    ცალკე ავტორიზაცია არ სჭირდება, რადგან <img src>-ს Mini App-ის
-    custom header-ის დამატება არ შეუძლია."""
-    return send_from_directory(UPLOADS_DIR, filename)
+    """კლიენტის რეპორტთან ატვირთული ფოტოს გაცემა — PHASE 1.5: **ავტორიზაცია
+    სავალდებულოა** (initData სათაური; ფრონტენდი სურათს fetch-ით კითხულობს და
+    blob URL-ით აჩვენებს). ფაილის სახელის ცოდნა აღარ კმარა.
+    წვდომა: ადმინი — ყველა; თიმლიდერი — თავისი გუნდის რეპორტების;
+    აგენტი — საკუთარი რეპორტის; რეპორტთან დაუკავშირებელი (ობოლი) ფაილი —
+    მხოლოდ ადმინი. წაშლის endpoint არ არსებობს."""
+    agent, admin, err = _authed_agent()
+    if err:
+        return err
+    if not filename or "/" in filename or "\\" in filename or ".." in filename:
+        return jsonify(error="არასწორი ფაილი"), 400
+    if not admin:
+        report = _photo_owner_report(filename)
+        allowed = False
+        if report and agent:
+            if _is_team_lead(agent):
+                owner = next((a for a in sheets.get_agents()
+                              if str(a.get("agent_id")) == str(report.get("agent_id"))), None)
+                allowed = bool(owner) and str(owner.get("team", "")).strip() == str(agent.get("team", "")).strip() \
+                    and bool(str(agent.get("team", "")).strip())
+            else:
+                allowed = str(report.get("agent_id")) == str(agent.get("agent_id"))
+        if not allowed:
+            return jsonify(error="ამ ფაილზე წვდომა არ გაქვთ"), 403
+    resp = send_from_directory(UPLOADS_DIR, filename)
+    resp.headers["Cache-Control"] = "private, no-store"
+    return resp
 
 
 def run():

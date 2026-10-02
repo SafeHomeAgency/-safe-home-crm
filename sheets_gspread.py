@@ -231,6 +231,25 @@ MYHOME_JOBS_HEADERS = [
     "created_at", "started_at", "completed_at",
     "deal_type", "address", "district", "city",
     "owner_number",
+    # PHASE 1.5 (ბოლოში, ძველი სტრიქონები არ ირევა): რომელმა worker-მა
+    # დაიკავა, დაკავების უნიკალური ნიშანი, ჩავარდნის ეტაპი
+    # (preparing/payment/paid — ავტო-retry მხოლოდ "preparing"-ზეა), შემდეგი
+    # ავტომატური ცდის დრო.
+    "worker_id", "claim_token", "failure_stage", "next_retry_at",
+    # ბიზნეს-დღე (Asia/Tbilisi) — "აგენტი + MyHome ID + დღე" ერთჯერადობისთვის
+    "business_date",
+]
+
+# PHASE 1.5: Audit log — ვინ (Telegram ID) რა გააკეთა. metadata — JSON,
+# სენსიტიური გასაღებები ამოღებულია (crm_security.sanitize_metadata).
+AUDIT_LOG_HEADERS = [
+    "audit_id", "timestamp", "actor_telegram_id", "actor_role", "action",
+    "entity_type", "entity_id", "job_id", "metadata", "result",
+]
+
+# PHASE 1.5: worker heartbeat — ერთი სტრიქონი worker-ზე (upsert).
+WORKER_HEARTBEAT_HEADERS = [
+    "worker_id", "status", "last_heartbeat", "current_job_id", "stage", "updated_at",
 ]
 
 # თიმი -> მენეჯერის MyHome ანგარიშის (non-secret) იარლიყი. ნამდვილი
@@ -329,6 +348,8 @@ def ensure_sheets():
         (config.DISTRICT_ASSIGNMENTS_SHEET_NAME, DISTRICT_ASSIGNMENTS_HEADERS, 500),
         (config.ATTENDANCE_GEO_SHEET_NAME, ATTENDANCE_GEO_HEADERS, 3000),
         (config.APP_SETTINGS_SHEET_NAME, APP_SETTINGS_HEADERS, 50),
+        (config.AUDIT_LOG_SHEET_NAME, AUDIT_LOG_HEADERS, 5000),
+        (config.WORKER_HEARTBEAT_SHEET_NAME, WORKER_HEARTBEAT_HEADERS, 20),
     ]
     for name, headers, rows in sheets_to_ensure:
         try:
@@ -409,6 +430,14 @@ def _attendance_geo_ws():
 
 def _app_settings_ws():
     return _worksheet(config.APP_SETTINGS_SHEET_NAME)
+
+
+def _audit_log_ws():
+    return _worksheet(config.AUDIT_LOG_SHEET_NAME)
+
+
+def _worker_heartbeat_ws():
+    return _worksheet(config.WORKER_HEARTBEAT_SHEET_NAME)
 
 
 def _now():
@@ -2084,6 +2113,8 @@ def create_myhome_job(agent_id: str, fields: dict) -> str:
                 row.append("0")
             elif h == "created_at":
                 row.append(_now())
+            elif h == "business_date":
+                row.append(crm_time.business_date())
             elif h in ("started_at", "completed_at", "error_message"):
                 row.append("")
             else:
@@ -2129,45 +2160,143 @@ def find_active_myhome_job(myhome_listing_id: str) -> dict | None:
     )
 
 
+def _job_business_date(row: dict) -> str:
+    """job-ის ბიზნეს-დღე: `business_date` სვეტი; ძველ ჩანაწერებზე (სვეტი
+    ცარიელია) created_at-იდან თბილისის დროით."""
+    return str(row.get("business_date") or "").strip() or crm_time.business_date_of_server_naive(row.get("created_at"))
+
+
+def has_agent_submitted_myhome_id_today(agent_id: str, myhome_id: str, business_date: str = "") -> dict | None:
+    """ბიზნეს-წესი: უნიკალურია `agent_id + myhome_id + ბიზნეს-დღე`. აბრუნებს
+    უკვე არსებულ job-ს (ნებისმიერი სტატუსით), ან None. **სხვა აგენტის** იგივე
+    ID, ან იგივე აგენტის სხვა/გუშინდელი დღე — არ ითვლება. ფასი გასაღების
+    ნაწილი არ არის. წაკითხვა გაზიარებულ 6-წამიან კეშზეა (ბევრი აგენტის
+    ერთდროული მუშაობა Sheets-ის კვოტას არ ხარჯავს)."""
+    day = business_date or crm_time.business_date()
+    lid = str(myhome_id or "").strip()
+    with _lock:
+        rows = get_myhome_jobs(agent_id=agent_id)
+    for r in rows:
+        if str(r.get("myhome_listing_id", "")).strip() == lid and _job_business_date(r) == day:
+            return r
+    return None
+
+
+def create_myhome_job_once_per_day(agent_id: str, fields: dict) -> tuple[str | None, dict | None]:
+    """შემოწმება + შექმნა ერთ `_lock`-ში (ერთ პროცესში ატომური): თუ ამ აგენტს
+    დღეს ეს ID უკვე აქვს — (None, არსებული_job). წინააღმდეგ შემთხვევაში
+    (job_id, None). შენიშვნა: მრავალ ინსტანსს შორის Sheets ამას ვერ იცავს
+    (იხ. PHASE_1_5_REPORT.md); Postgres-ზე — უნიკალური ინდექსი."""
+    with _lock:
+        existing = has_agent_submitted_myhome_id_today(agent_id, fields.get("myhome_listing_id", ""))
+        if existing:
+            return None, existing
+        return create_myhome_job(agent_id, fields), None
+
+
+def _row_dict(values: list) -> dict:
+    """Sheets-ის row_values -> dict (მოკლე/ძველი სტრიქონები სათაურებამდე
+    ივსება ცარიელით — ახალი სვეტები ძველ სტრიქონებში ცარიელია)."""
+    vals = list(values) + [""] * (len(MYHOME_JOBS_HEADERS) - len(values))
+    return dict(zip(MYHOME_JOBS_HEADERS, vals))
+
+
+def _fresh_job_row(ws, job_id: str):
+    """job-ის სტრიქონი **ახალი** წაკითხვით (კეშის გარეშე) — გადაწყვეტილებები
+    (claim/complete) არასოდეს ეყრდნობა 6-წამიან კეშს. აბრუნებს (row_number, dict)."""
+    cell = ws.find(str(job_id), in_column=1)
+    if not cell:
+        return None, None
+    return cell.row, _row_dict(ws.row_values(cell.row))
+
+
+def _write_job_fields(ws, row_number: int, updates: dict) -> None:
+    """ერთი `batch_update` გამოძახება ყველა ველზე (ადრე — თითო ველზე
+    ცალკე `update_cell`; claim/complete/retry ყველაზე ხშირი ჩაწერებია)."""
+    data = []
+    for field, value in updates.items():
+        col = MYHOME_JOBS_HEADERS.index(field) + 1
+        data.append({"range": gspread.utils.rowcol_to_a1(row_number, col), "values": [[value]]})
+    if data:
+        ws.batch_update(data)
+
+
 def _update_myhome_job_fields(job_id: str, updates: dict) -> dict | None:
     with _lock:
         ws = _myhome_jobs_ws()
-        cell = ws.find(job_id, in_column=1)
-        if not cell:
+        row_number, _row = _fresh_job_row(ws, job_id)
+        if not row_number:
             return None
-        for field, value in updates.items():
-            ws.update_cell(cell.row, MYHOME_JOBS_HEADERS.index(field) + 1, value)
-        row = ws.row_values(cell.row)
+        _write_job_fields(ws, row_number, updates)
         _invalidate(config.MYHOME_JOBS_SHEET_NAME)
-        return dict(zip(MYHOME_JOBS_HEADERS, row))
+        return _row_dict(ws.row_values(row_number))
 
 
-def claim_next_myhome_job(manager_label: str) -> dict | None:
-    """worker.py გამოძახებით: ამ მენეჯერის ანგარიშზე უძველესი "QUEUED"
-    job-ის დაკავება — მაშინვე "PROCESSING"-ში გადაყვანა, რომ მეორე
-    (თუნდაც შემთხვევით ერთდროულად გაშვებული) worker-მა იგივე ის
-    ხელახლა არ დაიწყოს. ერთდროულად მხოლოდ ერთი worker-ის დაშვებით
-    (რეკომენდებული) ეს საკმარისად უსაფრთხოა."""
-    manager_label = str(manager_label or "").strip()
-    candidates = [
-        r for r in get_myhome_jobs(status="QUEUED")
-        if str(r.get("manager_label", "")).strip() == manager_label
-    ]
-    if not candidates:
+def _parse_minute_dt(value) -> datetime.datetime | None:
+    try:
+        return datetime.datetime.strptime(str(value).strip(), "%Y-%m-%d %H:%M")
+    except (ValueError, TypeError):
         return None
-    oldest = sorted(candidates, key=lambda r: str(r.get("created_at", "")))[0]
-    return _update_myhome_job_fields(str(oldest["job_id"]), {
-        "status": "PROCESSING",
-        "started_at": _now(),
-    })
+
+
+def _retry_due(row: dict) -> bool:
+    """QUEUED job-ის `next_retry_at` მოვიდა თუ არა (ცარიელი = მაშინვე)."""
+    at = _parse_minute_dt(row.get("next_retry_at"))
+    return at is None or at <= datetime.datetime.now()
+
+
+def claim_next_myhome_job(manager_label: str, worker_id: str = "") -> dict | None:
+    """worker.py გამოძახებით: ამ მენეჯერის ანგარიშზე უძველესი "QUEUED"
+    job-ის დაკავება -> "PROCESSING". Google Sheets-ს ტრანზაქცია არ აქვს,
+    ამიტომ **საუკეთესო ძალისხმევის** პროტოკოლი: (1) კანდიდატს ვკითხულობთ
+    ახლიდან (არა კეშიდან) და ვამოწმებთ, რომ ჯერ კიდევ QUEUED-ია;
+    (2) ვწერთ PROCESSING + worker_id + უნიკალურ claim_token-ს ერთი
+    batch_update-ით; (3) ვიცდით MYHOME_CLAIM_SETTLE_SECONDS-ს; (4) ვკითხულობთ
+    ახლიდან და ვაგრძელებთ მხოლოდ თუ ჩვენი claim_token შემორჩა. პარალელური
+    (მეორე ინსტანსის) ჩაწერა ამ ფანჯარაში დაიჭერება; ეს მაინც არ არის
+    100%-იანი გარანტია (იხ. PHASE_1_5_REPORT.md). `next_retry_at`-მდე
+    ავტო-retry job არ გაიცემა."""
+    manager_label = str(manager_label or "").strip()
+    with _lock:
+        candidates = [
+            r for r in get_myhome_jobs(status="QUEUED")
+            if str(r.get("manager_label", "")).strip() == manager_label and _retry_due(r)
+        ]
+    candidates.sort(key=lambda r: str(r.get("created_at", "")))
+    for cand in candidates:
+        job_id = str(cand["job_id"])
+        token = uuid.uuid4().hex[:12]
+        with _lock:
+            ws = _myhome_jobs_ws()
+            row_number, fresh = _fresh_job_row(ws, job_id)
+            if not row_number or str(fresh.get("status")) != "QUEUED":
+                _invalidate(config.MYHOME_JOBS_SHEET_NAME)
+                continue
+            _write_job_fields(ws, row_number, {
+                "status": "PROCESSING", "started_at": _now(),
+                "worker_id": str(worker_id or ""), "claim_token": token,
+                "next_retry_at": "", "failure_stage": "",
+            })
+            _invalidate(config.MYHOME_JOBS_SHEET_NAME)
+        if config.MYHOME_CLAIM_SETTLE_SECONDS > 0:
+            time.sleep(config.MYHOME_CLAIM_SETTLE_SECONDS)
+        with _lock:
+            ws = _myhome_jobs_ws()
+            row_number, after = _fresh_job_row(ws, job_id)
+            if after and str(after.get("claim_token")) == token and str(after.get("status")) == "PROCESSING":
+                return after
+            logging.getLogger("safehome-crm-sheets").warning(
+                "job %s-ის დაკავება სხვამ მოასწრო — გამოტოვებულია", job_id
+            )
+    return None
 
 
 def complete_myhome_job(job_id: str, status: str, error_message: str = "",
                          deal_type: str = "", address: str = "",
                          district: str = "", city: str = "") -> dict | None:
-    """status: "COMPLETED" ან "FAILED". deal_type/address/district/city —
-    worker.py-ს მიერ, წარმატების შემთხვევაში, დამატებით მოწოდებული
-    დეტალები (საძიებო/ფილტრის ველებისთვის); წარუმატებლობისას ცარიელია."""
+    """status: "COMPLETED" ან "FAILED". **შიდა/ძველი** ფუნქცია (მაგ.
+    stale-reaper იყენებს) — შემოწმების გარეშე წერს. worker-ის შედეგებისთვის
+    გამოიყენება `finish_myhome_job` (მდგომარეობის/მფლობელის შემოწმებით)."""
     updates = {
         "status": status,
         "error_message": error_message,
@@ -2184,51 +2313,284 @@ def complete_myhome_job(job_id: str, status: str, error_message: str = "",
     return _update_myhome_job_fields(str(job_id), updates)
 
 
+def _retry_count(row: dict) -> int:
+    try:
+        return int(str(row.get("retry_count") or "0").strip() or "0")
+    except ValueError:
+        return 0
+
+
+def finish_myhome_job(job_id: str, worker_id: str, status: str, error_message: str = "",
+                       deal_type: str = "", address: str = "", district: str = "",
+                       city: str = "", failure_stage: str = "") -> dict:
+    """worker-ის შედეგის მიღება მკაცრი შემოწმებით (ყველაფერი ერთ `_lock`-ში,
+    ახალი წაკითხვით). აბრუნებს:
+      {"ok": bool, "code": "ok"|"duplicate"|"not_found"|"not_processing"|
+       "wrong_worker"|"bad_status", "row": dict|None, "retry_scheduled": bool}
+    წესები: მხოლოდ PROCESSING -> COMPLETED/FAILED; worker_id უნდა ემთხვეოდეს
+    (ძველი job-ები, სადაც worker_id ცარიელია, დაშვებულია); იმავე ტერმინალური
+    სტატუსის განმეორება = idempotent `duplicate` (გვერდითი ეფექტის გარეშე).
+    FAILED + failure_stage == "preparing" (გადახდამდე) + retry_count <
+    MYHOME_JOB_MAX_RETRIES -> ავტომატურად QUEUED (retry_count+1, backoff).
+    გადახდის დაწყების/შემდგომი ჩავარდნა არასდროს მეორდება ავტომატურად —
+    განცხადება შეიძლება უკვე გამოქვეყნებულია (დუბლირება)."""
+    status = str(status or "").strip().upper()
+    if status not in ("COMPLETED", "FAILED"):
+        return {"ok": False, "code": "bad_status", "row": None, "retry_scheduled": False}
+    with _lock:
+        ws = _myhome_jobs_ws()
+        row_number, row = _fresh_job_row(ws, job_id)
+        if not row_number:
+            return {"ok": False, "code": "not_found", "row": None, "retry_scheduled": False}
+        current = str(row.get("status") or "")
+        owner = str(row.get("worker_id") or "")
+        if current in ("COMPLETED", "FAILED") and current == status and (not owner or owner == str(worker_id or "")):
+            return {"ok": True, "code": "duplicate", "row": row, "retry_scheduled": False}
+        if current != "PROCESSING":
+            return {"ok": False, "code": "not_processing", "row": row, "retry_scheduled": False}
+        if owner and owner != str(worker_id or ""):
+            return {"ok": False, "code": "wrong_worker", "row": row, "retry_scheduled": False}
+
+        # გადახდის ეტაპი, რომელიც job-ზე უკვე დაფიქსირდა (set_myhome_job_stage),
+        # არასდროს "მცირდება" worker-ის ანგარიშით: გადახდამდე ეტაპად არ ჩაითვლება
+        row_stage = str(row.get("failure_stage") or "")
+        failure_stage = row_stage if row_stage in ("payment", "paid") else str(failure_stage or "")
+        updates = {"error_message": error_message, "failure_stage": failure_stage}
+        retry_scheduled = False
+        if status == "COMPLETED":
+            updates.update({"status": "COMPLETED", "completed_at": _now(), "error_message": "",
+                            "failure_stage": ""})
+            for k, v in (("deal_type", deal_type), ("address", address),
+                         ("district", district), ("city", city)):
+                if v:
+                    updates[k] = v
+        else:
+            count = _retry_count(row)
+            if str(failure_stage) == "preparing" and count < config.MYHOME_JOB_MAX_RETRIES:
+                delays = config.MYHOME_RETRY_BACKOFF_MINUTES
+                delay = delays[min(count, len(delays) - 1)]
+                nxt = (datetime.datetime.now() + datetime.timedelta(minutes=delay)).strftime("%Y-%m-%d %H:%M")
+                updates.update({"status": "QUEUED", "retry_count": str(count + 1), "next_retry_at": nxt,
+                                "started_at": "", "worker_id": "", "claim_token": ""})
+                retry_scheduled = True
+            else:
+                updates.update({"status": "FAILED", "completed_at": _now(), "next_retry_at": ""})
+        _write_job_fields(ws, row_number, updates)
+        _invalidate(config.MYHOME_JOBS_SHEET_NAME)
+        return {"ok": True, "code": "ok", "row": _row_dict(ws.row_values(row_number)),
+                "retry_scheduled": retry_scheduled}
+
+
+def set_myhome_job_stage(job_id: str, worker_id: str, stage: str) -> dict:
+    """"გადახდის კარიბჭე": worker-ი გადახდამდე (stage="payment") და მის შემდეგ
+    (stage="paid") სერვერს ატყობინებს. მხოლოდ `PROCESSING` job-ზე და მხოლოდ
+    დამკავებელი worker-იდან (ძველი, worker_id-გარეშე job — დაშვებულია).
+    უარყოფა ნიშნავს, რომ job ამ worker-ს აღარ ეკუთვნის (stale-reset/სხვა
+    worker) — worker-მა გადახდა **არ უნდა დაიწყოს** (ორმაგი გადახდის დაცვა).
+    აბრუნებს {"ok", "code": "ok"|"not_found"|"not_processing"|"wrong_worker"|"bad_stage", "row"}."""
+    stage = str(stage or "").strip()
+    if stage not in ("payment", "paid"):
+        return {"ok": False, "code": "bad_stage", "row": None}
+    with _lock:
+        ws = _myhome_jobs_ws()
+        row_number, row = _fresh_job_row(ws, job_id)
+        if not row_number:
+            return {"ok": False, "code": "not_found", "row": None}
+        if str(row.get("status")) != "PROCESSING":
+            return {"ok": False, "code": "not_processing", "row": row}
+        owner = str(row.get("worker_id") or "")
+        if owner and owner != str(worker_id or ""):
+            return {"ok": False, "code": "wrong_worker", "row": row}
+        if str(row.get("failure_stage") or "") == "paid" and stage == "payment":
+            return {"ok": False, "code": "not_processing", "row": row}   # უკვე გადახდილია
+        _write_job_fields(ws, row_number, {"failure_stage": stage})
+        _invalidate(config.MYHOME_JOBS_SHEET_NAME)
+        return {"ok": True, "code": "ok", "row": _row_dict(ws.row_values(row_number))}
+
+
 def retry_myhome_job(job_id: str) -> dict | None:
-    """ხელით ("Mini App"-იდან) ხელახლა რიგში ჩაყენება — FAILED (ან
-    გაჭედილი PROCESSING) job-ს უბრუნებს "QUEUED"-ს, პირდაპირ, retry_count
-    ლიმიტის დალოდების გარეშე. worker.py მას ჩვეულებრივი QUEUED job-ივით
-    აიღებს შემდეგივე ციკლზე."""
-    return _update_myhome_job_fields(str(job_id), {
-        "status": "QUEUED",
-        "error_message": "",
-        "retry_count": "0",
-        "started_at": "",
-        "completed_at": "",
-    })
+    """ხელით ("Mini App"-იდან) ხელახლა რიგში ჩაყენება: FAILED -> QUEUED.
+    **retry_count უცვლელია** (ადრე ნულდებოდა და ისტორია იკარგებოდა).
+    მხოლოდ FAILED (ან გაჭედილი PROCESSING) job-ზე — COMPLETED/QUEUED
+    ხელახლა არ ჩაიყენება (დუბლირება). აბრუნებს None-ს, თუ job არ არსებობს
+    ან მდგომარეობა არ ვარგა."""
+    with _lock:
+        ws = _myhome_jobs_ws()
+        row_number, row = _fresh_job_row(ws, job_id)
+        if not row_number or str(row.get("status")) not in ("FAILED", "PROCESSING"):
+            return None
+        _write_job_fields(ws, row_number, {
+            "status": "QUEUED", "error_message": "", "started_at": "", "completed_at": "",
+            "worker_id": "", "claim_token": "", "next_retry_at": "", "failure_stage": "",
+        })
+        _invalidate(config.MYHOME_JOBS_SHEET_NAME)
+        return _row_dict(ws.row_values(row_number))
+
+
+def _worker_alive(hb: dict | None) -> bool:
+    age = crm_time.seconds_since_utc_iso((hb or {}).get("last_heartbeat"))
+    return age is not None and age <= config.WORKER_HEARTBEAT_STALE_SECONDS
 
 
 def reset_stale_myhome_jobs(older_than_minutes: int, max_retries: int) -> list[dict]:
     """worker.py-ს crash-ის/restart-ის დაცვა: "PROCESSING"-ში
-    `older_than_minutes`-ზე მეტხანს გაჭედილი job-ები ბრუნდება
-    "QUEUED"-ში ხელახლა (retry_count იზრდება), ან თუ უკვე `max_retries`
-    მიაღწია — საბოლოოდ "FAILED". აბრუნებს შეცვლილი job-ების სიას (რომ
-    გამომძახებელმა შეატყობინოს შესაბამის აგენტს, საჭიროების შემთხვევაში)."""
+    `older_than_minutes`-ზე მეტხანს გაჭედილი job-ები. PHASE 1.5 წესები:
+      * თუ job-ის worker ცოცხალია (heartbeat) და სწორედ ამ job-ს ამუშავებს —
+        არ ვეხებით (მხოლოდ ნელა მუშაობს);
+      * თუ heartbeat-ის ბოლო ცნობილი ეტაპი ამ job-ზე გადახდის დაწყებაა ან
+        მის შემდეგ — **არ ბრუნდება queue-ში** (შეიძლება უკვე გამოქვეყნებულია,
+        ხელახალი გაშვება გააორმაგებდა) -> FAILED + ხელით შემოწმების შეტყობინება;
+      * სხვა შემთხვევაში (გადახდამდე/უცნობი) -> QUEUED, retry_count+1;
+        `max_retries`-ზე -> საბოლოო FAILED.
+    აბრუნებს შეცვლილი job-ების სიას."""
     cutoff = datetime.datetime.now() - datetime.timedelta(minutes=older_than_minutes)
+    heartbeats = {str(h.get("worker_id")): h for h in get_worker_heartbeats()}
     changed = []
     for r in get_myhome_jobs(status="PROCESSING"):
-        started = r.get("started_at") or r.get("created_at")
-        try:
-            started_dt = datetime.datetime.strptime(str(started).strip(), "%Y-%m-%d %H:%M")
-        except (ValueError, TypeError):
+        started_dt = _parse_minute_dt(r.get("started_at") or r.get("created_at"))
+        if started_dt is None or started_dt > cutoff:
             continue
-        if started_dt > cutoff:
+        job_id = str(r["job_id"])
+        hb = heartbeats.get(str(r.get("worker_id") or ""))
+        hb_on_job = bool(hb) and str(hb.get("current_job_id")) == job_id
+        if hb_on_job and _worker_alive(hb):
             continue
-        retry_count = int(str(r.get("retry_count") or "0").strip() or "0")
+        # ეტაპი: ჯერ თავად job-ზე დაფიქსირებული (გადახდამდე სერვერს ატყობინებს
+        # worker-ი — იხ. set_myhome_job_stage), შემდეგ heartbeat-ის ბოლო ეტაპი
+        job_stage = str(r.get("failure_stage") or "")
+        stage = job_stage if job_stage in ("payment", "paid") else (str(hb.get("stage") or "") if hb_on_job else "")
+        if stage not in ("", "preparing"):
+            updated = _update_myhome_job_fields(job_id, {
+                "status": "FAILED", "completed_at": _now(), "failure_stage": stage,
+                "error_message": ("worker-ი გაითიშა გადახდის ეტაპზე ან მის შემდეგ — განცხადება შეიძლება "
+                                  "უკვე გამოქვეყნებულია. შეამოწმეთ MyHome-ზე და მხოლოდ შემდეგ გაუშვით ხელით."),
+            })
+            if updated:
+                changed.append(updated)
+            continue
+        retry_count = _retry_count(r)
         if retry_count >= max_retries:
             updated = complete_myhome_job(
-                r["job_id"], "FAILED",
+                job_id, "FAILED",
                 error_message="worker-ი გაითიშა დამუშავებისას, ცდების ლიმიტი ამოიწურა",
             )
         else:
-            updated = _update_myhome_job_fields(str(r["job_id"]), {
-                "status": "QUEUED",
-                "retry_count": str(retry_count + 1),
-                "started_at": "",
+            updated = _update_myhome_job_fields(job_id, {
+                "status": "QUEUED", "retry_count": str(retry_count + 1), "started_at": "",
+                "worker_id": "", "claim_token": "",
             })
         if updated:
             changed.append(updated)
     return changed
+
+
+# ---------- Worker heartbeat (PHASE 1.5) ----------
+
+def record_worker_heartbeat(worker_id: str, status: str = "online",
+                             current_job_id: str = "", stage: str = "") -> dict:
+    """worker-ის სიცოცხლის ნიშანი: upsert worker_id-ზე, **ერთი** ჩაწერა
+    (batch_update) გამოძახებაზე."""
+    worker_id = str(worker_id or "").strip()
+    row = [worker_id, str(status or "online"), crm_time.iso_utc_now(), str(current_job_id or ""),
+           str(stage or ""), _now()]
+    with _lock:
+        ws = _worker_heartbeat_ws()
+        cell = ws.find(worker_id, in_column=1) if worker_id else None
+        if cell:
+            first = gspread.utils.rowcol_to_a1(cell.row, 1)
+            last = gspread.utils.rowcol_to_a1(cell.row, len(WORKER_HEARTBEAT_HEADERS))
+            ws.batch_update([{"range": f"{first}:{last}", "values": [row]}])
+        else:
+            ws.append_row(row)
+        _invalidate(config.WORKER_HEARTBEAT_SHEET_NAME)
+    return dict(zip(WORKER_HEARTBEAT_HEADERS, row))
+
+
+def get_worker_heartbeats() -> list[dict]:
+    with _lock:
+        return list(_cached_records(config.WORKER_HEARTBEAT_SHEET_NAME))
+
+
+# ---------- Audit log (PHASE 1.5) ----------
+# ივენთი ჯერ მეხსიერების რიგში ხვდება და ფონურად იწერება ერთი append_rows-ით
+# (Sheets-ის კვოტის დასაზოგად). ჩავარდნისას რიგში რჩება და მომდევნო flush-ზე
+# ხელახლა ცდება; პროცესის გასვლისას (atexit) ბოლო flush სრულდება.
+
+_audit_queue: list[list] = []
+_audit_queue_lock = threading.Lock()
+_audit_timer: threading.Timer | None = None
+_AUDIT_QUEUE_MAX = 2000
+
+
+def _schedule_audit_flush() -> None:
+    global _audit_timer
+    if config.AUDIT_FLUSH_SECONDS <= 0:
+        return  # ტესტი/ხელით flush
+    if _audit_timer is not None and _audit_timer.is_alive():
+        return
+    _audit_timer = threading.Timer(config.AUDIT_FLUSH_SECONDS, flush_audit_log)
+    _audit_timer.daemon = True
+    _audit_timer.start()
+
+
+def add_audit_event(actor_telegram_id, actor_role: str, action: str, entity_type: str = "",
+                     entity_id: str = "", job_id: str = "", metadata: dict | None = None,
+                     result: str = "ok") -> str:
+    """audit ივენთის რიგში დამატება. არასოდეს აგდებს გამონაკლისს (audit-ის
+    ჩავარდნამ ძირითადი ოპერაცია არ უნდა გააჩეროს)."""
+    import crm_security
+    audit_id = uuid.uuid4().hex[:12]
+    try:
+        meta = json.dumps(crm_security.sanitize_metadata(metadata or {}), ensure_ascii=False)
+        row = [audit_id, crm_time.iso_utc_now(), str(actor_telegram_id or ""), str(actor_role or ""),
+               str(action or ""), str(entity_type or ""), str(entity_id or ""), str(job_id or ""),
+               meta, str(result or "ok")]
+        with _audit_queue_lock:
+            if len(_audit_queue) < _AUDIT_QUEUE_MAX:
+                _audit_queue.append(row)
+        _schedule_audit_flush()
+    except Exception:
+        logging.getLogger("safehome-crm-sheets").exception("audit ივენთის რიგში დამატება ვერ მოხერხდა")
+    return audit_id
+
+
+def flush_audit_log() -> int:
+    """რიგში მყოფი ივენთების ჩაწერა ერთი `append_rows`-ით. აბრუნებს
+    ჩაწერილი ივენთების რაოდენობას; ჩავარდნისას ივენთები რიგში რჩება."""
+    with _audit_queue_lock:
+        batch = list(_audit_queue)
+        _audit_queue.clear()
+    if not batch:
+        return 0
+    try:
+        _audit_log_ws().append_rows(batch, value_input_option="RAW")
+        _invalidate(config.AUDIT_LOG_SHEET_NAME)
+        return len(batch)
+    except Exception:
+        logging.getLogger("safehome-crm-sheets").exception(
+            "audit flush ჩავარდა — %d ივენთი რიგში რჩება და ხელახლა სცდება", len(batch)
+        )
+        with _audit_queue_lock:
+            _audit_queue[:0] = batch[: _AUDIT_QUEUE_MAX]
+        return 0
+
+
+def get_audit_events(limit: int = 200, actor_telegram_id: str | None = None,
+                      action: str | None = None) -> list[dict]:
+    flush_audit_log()
+    with _lock:
+        rows = list(_cached_records(config.AUDIT_LOG_SHEET_NAME))
+    if actor_telegram_id:
+        rows = [r for r in rows if str(r.get("actor_telegram_id")) == str(actor_telegram_id)]
+    if action:
+        rows = [r for r in rows if str(r.get("action")) == action]
+    rows.sort(key=lambda r: str(r.get("timestamp", "")), reverse=True)
+    return rows[: max(1, int(limit))]
+
+
+import atexit as _atexit  # noqa: E402
+
+_atexit.register(lambda: flush_audit_log())
 
 
 def search_myhome_jobs(query: str = "", deal_type: str = "", status: str = "",

@@ -290,11 +290,34 @@ async function api(path, opts) {
   }
   const body = await res.json().catch(() => ({}));
   if (!res.ok) {
-    const err = new Error(body.error || "დაფიქსირდა შეცდომა");
-    err.code = body.code || "";
+    // 401 = initData-ს ვადა გავიდა (Telegram მას ღია აპში არ ანახლებს) ან
+    // არასწორია — მომხმარებელს ვეუბნებით, როგორ გააგრძელოს
+    const msg = res.status === 401
+      ? "🔒 სესიის ვადა ამოიწურა — დახურეთ Mini App და თავიდან გახსენით ბოტიდან (/app)"
+      : (body.error || "დაფიქსირდა შეცდომა");
+    const err = new Error(msg);
+    err.code = body.code || (res.status === 401 ? "auth_failed" : "");
     throw err;
   }
   return body;
+}
+
+/* ფოტოები ახლა ავტორიზებულია (initData სათაურით) — <img src> სათაურს ვერ
+   აგზავნის, ამიტომ სურათს fetch-ით ვკითხულობთ და blob URL-ით ვაჩვენებთ. */
+async function hydratePhotos(root) {
+  const imgs = Array.from(root.querySelectorAll("img[data-photo]"));
+  for (const img of imgs) {
+    try {
+      const res = await fetch("/" + img.dataset.photo, {
+        headers: { "X-Telegram-Init-Data": tg ? tg.initData : "" },
+      });
+      if (!res.ok) throw new Error("photo " + res.status);
+      img.src = URL.createObjectURL(await res.blob());
+    } catch (e) {
+      img.alt = "🔒";
+      img.style.opacity = "0.35";
+    }
+  }
 }
 
 /* ------------------------------------------------ GPS (Attendance) */
@@ -1320,7 +1343,7 @@ function _clientTimelineItemHtml(entry) {
         <div class="sub">${esc(d.actions || "-")}</div>
         ${d.notes ? `<div class="sub">${esc(d.notes)}</div>` : ""}
         <div class="sub">${esc(d.created_at || "")}</div>
-        ${photos.length ? `<div style="display:flex;gap:6px;margin-top:6px;flex-wrap:wrap">${photos.map((p) => `<img src="/${esc(p)}" style="width:56px;height:56px;object-fit:cover;border-radius:8px" />`).join("")}</div>` : ""}
+        ${photos.length ? `<div style="display:flex;gap:6px;margin-top:6px;flex-wrap:wrap">${photos.map((p) => `<img data-photo="${esc(p)}" alt="" style="width:56px;height:56px;object-fit:cover;border-radius:8px" />`).join("")}</div>` : ""}
       </div>
     </div>`;
   }
@@ -1370,6 +1393,7 @@ function bindClientRowClicks(rows) {
           ${timeline.length === 0 ? `<div class="empty">ისტორია არ არის</div>` : timeline.map(_clientTimelineItemHtml).join("")}
         `;
         document.getElementById("modalClose").onclick = closeDetail;
+        hydratePhotos(box);
       } catch (e) {
         box.innerHTML += `<div class="empty">⚠️ ${esc(e.message)}</div>`;
       }
@@ -2231,6 +2255,9 @@ function _openMyHomeDetail(jobId) {
     { label: "გუნდი", value: r.team },
     { label: "გარიგება", value: r.deal_type },
     { label: "თანამშრომლობის %", value: r.cooperation_percent },
+    { label: "ავტომატური ცდები", value: r.retry_count && r.retry_count !== "0" ? `${r.retry_count} / 3` : "" },
+    { label: "შემდეგი ავტო-ცდა", value: r.next_retry_at },
+    { label: "ჩავარდნის ეტაპი", value: r.failure_stage },
     { label: "საბოლოო ფასი", value: r.final_price },
     { label: "მისამართი", value: r.address },
     { label: "რაიონი", value: r.district },
@@ -2259,6 +2286,21 @@ async function _mhRetryJob(jobId, el) {
     mhSearchResults = null;
     await renderContent();
   } catch (e) { toast(e.message); if (el) el.disabled = false; }
+}
+
+/* ადმინს: worker-ის მდგომარეობა (heartbeat) — ონლაინ/ოფლაინ + ბოლო სიგნალი */
+function renderWorkerBadge(role) {
+  if (role !== "admin" || !state.workers) return "";
+  if (!state.workers.length) {
+    return `<div class="card"><h2>🖥️ Worker</h2><div class="sub">heartbeat ჯერ არ მიღებულა (worker-ის ახალი ვერსია უნდა ჩაირთოს)</div></div>`;
+  }
+  return `<div class="card"><h2>🖥️ Worker</h2>${state.workers.map((w) => {
+    const mins = w.age_seconds == null ? "?" : Math.max(0, Math.round(w.age_seconds / 60));
+    return `<div class="list-row"><div class="avatar">${w.online ? "🟢" : "🔴"}</div><div class="main">
+      <div class="title">${esc(w.worker_id)} — ${w.online ? "ონლაინ" : "ოფლაინ"}</div>
+      <div class="sub">ბოლო სიგნალი: ${mins} წთ წინ${w.current_job_id ? " · job " + esc(w.current_job_id) + (w.stage ? " (" + esc(w.stage) + ")" : "") : ""}</div>
+    </div></div>`;
+  }).join("")}</div>`;
 }
 
 function renderMyHomeJobs(rows, role) {
@@ -2320,7 +2362,7 @@ function renderMyHomeJobs(rows, role) {
         <h2>📋 ${listTitle} <span class="cnt">${displayRows.length}</span></h2>
         ${displayRows.map((r) => _renderMyHomeRow(r, showAgentName)).join("")}
       </div>`;
-  return compose + searchBar + list;
+  return renderWorkerBadge(role) + compose + searchBar + list;
 }
 
 function bindMyHomeJobsActions() {
@@ -3318,6 +3360,7 @@ async function renderContent() {
           }
           if (params.length) url += "?" + params.join("&");
           const resp = await api(url);
+          if (tab === "myhomejobs") state.workers = resp.workers || null;
           const wholeObjTabs = ["admintasks", "agentsmgmt", "meetings", "taskhistory", "digest", "reports", "dayoffs", "swaps", "regulations", "mydayoffs", "attendance", "districts"];
           lazyCache[tab] = wholeObjTabs.includes(tab) ? resp : (resp.rows || []);
         } catch (e) {

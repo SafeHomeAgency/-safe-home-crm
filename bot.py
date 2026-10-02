@@ -1005,7 +1005,8 @@ async def swapnumber_response(update: Update, context: ContextTypes.DEFAULT_TYPE
                 text=f"{target['name']}-მა არ დაეთანხმა ნომრის გაცვლას.",
             )
         except Exception:
-            pass
+            log.warning("ნომრის გაცვლაზე უარის შეტყობინება ვერ გაიგზავნა (requester_id=%s)",
+                        requester_id, exc_info=True)
         return
     sheets.swap_internal_numbers(requester_id, target_id)
     await query.edit_message_text("✅ ნომრები გაიცვალა.")
@@ -1015,7 +1016,8 @@ async def swapnumber_response(update: Update, context: ContextTypes.DEFAULT_TYPE
             text=f"✅ {target['name']} დათანხმდა — ნომრები გაიცვალა.",
         )
     except Exception:
-        pass
+        log.warning("ნომრის გაცვლის დადასტურების შეტყობინება ვერ გაიგზავნა (requester_id=%s)",
+                    requester_id, exc_info=True)
 
 
 # --------------------------------------------------------- /swapshift (agent)
@@ -1177,7 +1179,7 @@ async def swapshift_accept(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 text=f"✅ {accepting['name']} დათანხმდა თქვენს სმენის გაცვლის მოთხოვნას — ველოდებით მენეჯერის დადასტურებას.",
             )
         except Exception:
-            pass
+            log.warning("სმენის გაცვლის მიღების შეტყობინება ვერ გაიგზავნა (swap_id=%s)", swap_id, exc_info=True)
     kb = InlineKeyboardMarkup([[
         InlineKeyboardButton("✅ დადასტურება", callback_data=f"swshift_decide:{swap_id}:approved"),
         InlineKeyboardButton("❌ უარყოფა", callback_data=f"swshift_decide:{swap_id}:rejected"),
@@ -1219,7 +1221,8 @@ async def swapshift_decide(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     text=f"სმენის გაცვლის მოთხოვნა ({row.get('swap_date')}) — {label}",
                 )
             except Exception:
-                pass
+                log.warning("სმენის გაცვლის გადაწყვეტილების შეტყობინება ვერ გაიგზავნა (agent_id=%s)",
+                            a.get("agent_id"), exc_info=True)
 
 
 async def swaps_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2001,7 +2004,9 @@ async def taskseen_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_reply_markup(reply_markup=None)
         await query.message.reply_text("✅ დადასტურებული — გმადლობთ!")
     except Exception:
-        pass
+        # ღილაკის გასუფთავება/პასუხი ვერ მოხერხდა (მაგ. ძველი შეტყობინება) —
+        # დადასტურება უკვე ჩაწერილია, ამიტომ მხოლოდ ვლოგავთ
+        log.warning("კლიენტის მიღების დადასტურების პასუხი ვერ გაიგზავნა", exc_info=True)
 
     created_by = str(row.get("created_by") or "")
     text = f"✅ {agent.get('name')} დაადასტურა კლიენტის მიღება: {row.get('title')}"
@@ -2347,7 +2352,23 @@ async def check_myhome_jobs_stale(context: ContextTypes.DEFAULT_TYPE):
         if not (agent and agent.get("telegram_chat_id")):
             continue
         try:
-            if row.get("status") == "FAILED":
+            if row.get("status") == "FAILED" and row.get("failure_stage"):
+                text = (
+                    f"⚠️ MyHome ID {row.get('myhome_listing_id')} — დამუშავება შეწყდა გადახდის "
+                    f"ეტაპზე ან მის შემდეგ. განცხადება შეიძლება უკვე გამოქვეყნებულია — "
+                    f"ავტომატურად აღარ გავიმეორებთ, ადმინი შეამოწმებს."
+                )
+                for admin_id in config.ADMIN_CHAT_IDS:
+                    try:
+                        await context.bot.send_message(
+                            chat_id=admin_id,
+                            text=f"⚠️ MyHome job {row.get('job_id')} (ID {row.get('myhome_listing_id')}) — "
+                                 f"worker გაითიშა ეტაპზე „{row.get('failure_stage')}“. შეამოწმეთ MyHome-ზე "
+                                 f"და მხოლოდ შემდეგ გაუშვით ხელით.",
+                        )
+                    except Exception:
+                        log.warning("ადმინის შეტყობინება stale job-ზე ვერ გაიგზავნა", exc_info=True)
+            elif row.get("status") == "FAILED":
                 text = (
                     f"❌ MyHome ID {row.get('myhome_listing_id')} — ვერ დამუშავდა "
                     f"(worker გაითიშა, ცდების ლიმიტი ამოიწურა)."
@@ -2362,6 +2383,43 @@ async def check_myhome_jobs_stale(context: ContextTypes.DEFAULT_TYPE):
             log.exception(
                 "MyHome stale-შეტყობინება ვერ გაეგზავნა agent_id=%s", row.get("agent_id")
             )
+
+
+_worker_alert_state: dict[str, bool] = {}   # worker_id -> ადმინს offline-ზე უკვე ეცნობა
+
+
+async def check_worker_heartbeat(context: ContextTypes.DEFAULT_TYPE):
+    """5 წუთში ერთხელ: თუ worker-ის ბოლო heartbeat WORKER_HEARTBEAT_STALE_SECONDS-ზე
+    ძველია, ადმინს **ერთხელ** ეცნობება; აღდგენისას — ერთხელ "ისევ ონლაინ".
+    (მეხსიერებაში მდგომარეობა: bot-ის restart-ის შემდეგ ერთხელ შეიძლება
+    განმეორდეს — უვნებელია.)"""
+    try:
+        heartbeats = sheets.get_worker_heartbeats()
+    except Exception:
+        log.exception("worker heartbeat-ის შემოწმება ვერ გაეშვა")
+        return
+    for hb in heartbeats:
+        wid = str(hb.get("worker_id") or "")
+        if not wid:
+            continue
+        age = crm_time.seconds_since_utc_iso(hb.get("last_heartbeat"))
+        offline = age is None or age > config.WORKER_HEARTBEAT_STALE_SECONDS
+        was_alerted = _worker_alert_state.get(wid, False)
+        text = None
+        if offline and not was_alerted:
+            mins = "?" if age is None else int(age // 60)
+            text = (f"🔴 MyHome worker „{wid}“ OFFLINE — ბოლო სიგნალი {mins} წთ წინ. "
+                    f"განცხადებების ატვირთვა გაჩერებულია (შეამოწმეთ კომპიუტერი/ინტერნეტი).")
+            _worker_alert_state[wid] = True
+        elif not offline and was_alerted:
+            text = f"🟢 MyHome worker „{wid}“ ისევ ONLINE."
+            _worker_alert_state[wid] = False
+        if text:
+            for admin_id in config.ADMIN_CHAT_IDS:
+                try:
+                    await context.bot.send_message(chat_id=admin_id, text=text)
+                except Exception:
+                    log.warning("worker-ის სტატუსის შეტყობინება ვერ გაიგზავნა admin_id=%s", admin_id, exc_info=True)
 
 
 async def check_manager_notifications(context: ContextTypes.DEFAULT_TYPE):
@@ -2875,6 +2933,7 @@ def main():
         app.job_queue.run_repeating(remind_before_shift_edge, interval=300, first=60)
         app.job_queue.run_repeating(check_manager_notifications, interval=300, first=90)
         app.job_queue.run_repeating(check_myhome_jobs_stale, interval=300, first=150)
+        app.job_queue.run_repeating(check_worker_heartbeat, interval=300, first=240)
         app.job_queue.run_daily(
             check_missing_checkouts,
             time=datetime.time(hour=config.MISSING_CHECKOUT_HOUR, minute=0, tzinfo=ZoneInfo(config.TIMEZONE)),
