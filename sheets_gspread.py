@@ -2121,7 +2121,9 @@ def create_myhome_job(agent_id: str, fields: dict) -> str:
                 row.append("")
             else:
                 row.append(fields.get(h, ""))
-        _myhome_jobs_ws().append_row(row)
+        # RAW: Sheets-მა ტექსტი არ "გააგოს" (მაგ. "+995…" ფორმულად, "0599…" რიცხვად წინა 0-ის
+        # დაკარგვით) — მესაკუთრის ნომერი ზუსტად ისე ინახება, როგორც შეიყვანეს
+        _myhome_jobs_ws().append_row(row, value_input_option="RAW")
         _invalidate(config.MYHOME_JOBS_SHEET_NAME)
         return job_id
 

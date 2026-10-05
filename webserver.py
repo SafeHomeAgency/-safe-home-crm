@@ -454,6 +454,11 @@ def api_exclusives_share():
     return jsonify(ok=True, share=result)
 
 
+def crm_time_digits(value) -> str:
+    """მხოლოდ ციფრები (ტელეფონის მინიმალური ვალიდაციისთვის)."""
+    return "".join(ch for ch in str(value or "") if ch.isdigit())
+
+
 @app.get("/api/myhome-jobs")
 def api_myhome_jobs():
     """აგენტს — საკუთარი job-ები; თიმლიდერს — თავისი თიმის; ადმინს —
@@ -504,6 +509,10 @@ def api_myhome_jobs_create():
     owner_number = str(body.get("owner_number") or "").strip()
     if not owner_number:
         return jsonify(error="მესაკუთრის ნომრის მითითება სავალდებულოა"), 400
+    # "-", "0", ერთი-ორი ციფრი და მისთანა ნაგავი ვერ გაივლის (მინიმუმ 9 ციფრი) —
+    # ცარიელი/არასწორი ნომრით worker-ი MyHome-ის "ნომრის ნახვაზე" გადადის და ვარდება/იბლოკება
+    if len(crm_time_digits(owner_number)) < 9:
+        return jsonify(error="მესაკუთრის ნომერი არასწორია — მინიმუმ 9 ციფრი (მაგ. 599123456)"), 400
 
     team = str(agent.get("team", "")).strip()
     account = sheets.get_myhome_account_for_team(team)
@@ -2739,6 +2748,22 @@ import crm2_api  # noqa: E402
 crm2_api.register(
     app, authed=_authed_agent, is_team_lead=_is_team_lead, audit=_audit,
     rate_limited=rate_limited, get_agents=lambda: sheets.get_agents(),
+)
+
+
+# MyHome ანგარიშების ფორმა (ადმინი): email/პაროლი მხოლოდ RAM-ში გადის worker-მდე, არსად ინახება
+import myhome_accounts_api  # noqa: E402
+
+class _SheetsProxy:
+    """`sheets` მოდულს გამოძახებისას ეძებს (არა იმპორტისას) — იგივე ქცევა, რაც დანარჩენ endpoint-ებს."""
+
+    def __getattr__(self, name):
+        return getattr(sheets, name)
+
+
+myhome_accounts_api.register(
+    app, authed=_authed_agent, authed_worker=_authed_worker, audit=_audit,
+    rate_limited=rate_limited, sheets=_SheetsProxy(), get_agents=lambda: sheets.get_agents(),
 )
 
 

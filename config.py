@@ -117,6 +117,7 @@ RATE_LIMITS = {
     "export":       (6, 60),     # CSV ექსპორტი (Telegram-ში ფაილის გაგზავნა)
     "crm2_read":    (120, 60),   # CRM 2.0: კლიენტების სია/ბარათი/follow-up-ები (წაკითხვა)
     "crm2_write":   (30, 60),    # CRM 2.0: follow-up/შენიშვნის ჩაწერა
+    "myhome_account": (10, 60),  # ადმინის ფორმა: MyHome ანგარიშის დამატება
 }
 RATE_LIMIT_ENABLED = os.environ.get("RATE_LIMIT_ENABLED", "1").strip().lower() not in ("0", "false", "no")
 

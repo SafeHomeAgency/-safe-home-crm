@@ -2305,6 +2305,120 @@ function renderWorkerBadge(role) {
   }).join("")}</div>`;
 }
 
+/* ============================================ MyHome ანგარიშები (ადმინის ფორმა) ====
+   პატარა ღილაკი MyHome ტაბში -> ფორმა: ახალი MyHome ანგარიშის გააქტიურება/პაროლის განახლება
+   კოდში ქექვის გარეშე. email/პაროლი სერვერზე არსად ინახება — worker-მა (ლოკალური კომპიუტერი)
+   რამდენიმე წამში იღებს და თავის accounts.json-ში წერს. ფორმა მხოლოდ ადმინს ეჩვენება. */
+function renderMhAccountsButton(role) {
+  if (role !== "admin" || !state.data || !state.data.is_admin) return "";
+  return `<div style="display:flex;justify-content:flex-end;margin:0 0 8px">
+    <button class="btn secondary" id="mhAccBtn" style="padding:6px 12px;font-size:12.5px;width:auto">⚙️ MyHome ანგარიშები</button>
+  </div>`;
+}
+
+const _MH_DELIVERY_LABELS = { pending: "⏳ worker-ს ელოდება", delivered: "✅ worker-მა მიიღო", none: "" };
+
+async function openMhAccountsModal() {
+  const backdrop = document.getElementById("modalBackdrop");
+  const box = document.getElementById("modalBox");
+  box.innerHTML = `<h3>⚙️ MyHome ანგარიშები<button class="close" id="modalClose">✕</button></h3><div class="empty">იტვირთება…</div>`;
+  backdrop.hidden = false;
+  document.getElementById("modalClose").onclick = closeDetail;
+  backdrop.onclick = (e) => { if (e.target === backdrop) closeDetail(); };
+
+  let data;
+  try { data = await api("/api/myhome-accounts"); }
+  catch (e) { box.innerHTML += `<div class="empty">⚠️ ${esc(e.message)}</div>`; return; }
+
+  const rows = data.rows || [];
+  const list = rows.length ? rows.map((r) => `
+      <div class="list-row clickable" data-mh-acc="${esc(r.manager_label)}" data-mh-team="${esc(r.team)}" data-mh-name="${esc(r.manager_name)}">
+        <div class="avatar">🔑</div>
+        <div class="main">
+          <div class="title">${esc(r.manager_label)}</div>
+          <div class="sub">თიმი: ${esc(r.team)}${r.manager_name ? " · " + esc(r.manager_name) : ""}</div>
+          ${_MH_DELIVERY_LABELS[r.delivery] ? `<div class="sub">${_MH_DELIVERY_LABELS[r.delivery]}</div>` : ""}
+        </div>
+      </div>`).join("") : `<div class="empty">ანგარიში ჯერ არ არის მიბმული</div>`;
+
+  box.innerHTML = `
+    <h3>⚙️ MyHome ანგარიშები<button class="close" id="modalClose">✕</button></h3>
+    ${list}
+    <h3 style="margin-top:14px">➕ ახალი ანგარიში / განახლება</h3>
+    <div class="sub" style="white-space:normal;margin-bottom:6px">
+      🔒 ელფოსტა და პაროლი სერვერზე არ ინახება — worker მათ რამდენიმე წამში იღებს და მხოლოდ საკუთარ კომპიუტერზე წერს.
+      არსებულ იარლიყს თუ მიუთითებთ — ის განახლდება (მაგ. პაროლის შესაცვლელად).
+    </div>
+    <div class="qa-compose">
+      <input id="mhaTeam" list="mhaTeams" placeholder="თიმი (რომელი თიმი გამოიყენებს)" autocomplete="off">
+      <datalist id="mhaTeams">${(data.teams || []).map((t) => `<option value="${esc(t)}">`).join("")}</datalist>
+      <input id="mhaLabel" placeholder="იარლიყი (მაგ. nino-account — პატარა ლათინური, ციფრი, ტირე)" autocomplete="off" autocapitalize="off">
+      <input id="mhaName" placeholder="მენეჯერის სახელი (ჩვენებისთვის)" autocomplete="off">
+      <input id="mhaEmail" type="email" placeholder="MyHome ელფოსტა" autocomplete="off" autocapitalize="off">
+      <input id="mhaPassword" type="password" placeholder="MyHome პაროლი" autocomplete="new-password">
+      <input id="mhaContactName" placeholder="საკონტაქტო სახელი (განცხადებაზე)" autocomplete="off">
+      <input id="mhaContactNumber" type="tel" inputmode="tel" placeholder="საკონტაქტო ნომერი (განცხადებაზე)" autocomplete="off">
+      <button class="btn" id="mhaSave">💾 შენახვა</button>
+      <div class="sub" id="mhaStatus" style="white-space:normal"></div>
+    </div>`;
+  document.getElementById("modalClose").onclick = closeDetail;
+
+  // არსებულ იარლიყზე დაჭერა ავსებს იარლიყს/თიმს/სახელს (პაროლის შესაცვლელად)
+  box.querySelectorAll("[data-mh-acc]").forEach((el) => {
+    el.onclick = () => {
+      document.getElementById("mhaLabel").value = el.dataset.mhAcc || "";
+      document.getElementById("mhaTeam").value = el.dataset.mhTeam || "";
+      document.getElementById("mhaName").value = el.dataset.mhName || "";
+      document.getElementById("mhaEmail").focus();
+    };
+  });
+
+  document.getElementById("mhaSave").onclick = async () => {
+    const val = (id) => (document.getElementById(id).value || "").trim();
+    const payload = {
+      team: val("mhaTeam"),
+      manager_label: val("mhaLabel").toLowerCase(),
+      manager_name: val("mhaName"),
+      email: val("mhaEmail"),
+      password: document.getElementById("mhaPassword").value || "",
+      contact_name: val("mhaContactName"),
+      contact_number: val("mhaContactNumber"),
+    };
+    if (!payload.team || !payload.manager_label) { toast("შეიყვანეთ თიმი და იარლიყი"); return; }
+    const btn = document.getElementById("mhaSave");
+    const statusEl = document.getElementById("mhaStatus");
+    btn.disabled = true;
+    try {
+      const res = await api("/api/myhome-accounts", { method: "POST", body: JSON.stringify(payload) });
+      // პაროლი ფორმიდან მაშინვე ვშლით (არც state-ში ვინახავთ)
+      document.getElementById("mhaPassword").value = "";
+      document.getElementById("mhaEmail").value = "";
+      if (res.delivery !== "pending") {
+        statusEl.textContent = "✅ შენახულია (თიმი მიბმულია იარლიყზე). ელფოსტა/პაროლი არ გაგიგზავნიათ.";
+        btn.disabled = false;
+        return;
+      }
+      statusEl.textContent = "⏳ ველოდები worker-ს…";
+      let delivered = false;
+      for (let i = 0; i < 25 && !delivered; i++) {
+        await new Promise((r) => setTimeout(r, 3000));
+        try {
+          const st = await api("/api/myhome-accounts/status?label=" + encodeURIComponent(payload.manager_label));
+          delivered = st.status === "delivered";
+          if (st.status === "none") break;
+        } catch (e) { break; }
+      }
+      statusEl.textContent = delivered
+        ? "✅ worker-მა მიიღო — ანგარიში მზადაა (შემდეგი ამ თიმის განცხადება უკვე ამ ანგარიშით გამოქვეყნდება)."
+        : "⚠️ worker-მა ჯერ ვერ მიიღო (კომპიუტერი გამორთულია/გაჩერებულია?). მონაცემები სერვერზე 15 წუთს დარჩება; ამის შემდეგ თავიდან შეიყვანეთ.";
+      btn.disabled = false;
+    } catch (e) {
+      toast(e.message || "შეცდომა");
+      btn.disabled = false;
+    }
+  };
+}
+
 function renderMyHomeJobs(rows, role) {
   const compose = `
     <div class="card">
@@ -2364,10 +2478,12 @@ function renderMyHomeJobs(rows, role) {
         <h2>📋 ${listTitle} <span class="cnt">${displayRows.length}</span></h2>
         ${displayRows.map((r) => _renderMyHomeRow(r, showAgentName)).join("")}
       </div>`;
-  return renderWorkerBadge(role) + compose + searchBar + list;
+  return renderWorkerBadge(role) + renderMhAccountsButton(role) + compose + searchBar + list;
 }
 
 function bindMyHomeJobsActions() {
+  const accBtn = document.getElementById("mhAccBtn");
+  if (accBtn) accBtn.onclick = openMhAccountsModal;
   const btn = document.getElementById("mhSubmit");
   if (btn) {
     btn.onclick = async () => {
