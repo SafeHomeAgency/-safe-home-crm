@@ -2515,6 +2515,8 @@ function renderMyHomeJobs(rows, role) {
     : `<div class="card">
         <h2>📋 ${listTitle} <span class="cnt">${displayRows.length}</span></h2>
         ${displayRows.map((r) => _renderMyHomeRow(r, showAgentName)).join("")}
+        ${(mhSearchResults === null && state.mhTotal && state.mhTotal > rows.length)
+          ? `<button class="btn secondary" id="mhMore" style="margin-top:8px">⬇️ მეტის ჩვენება (კიდევ ${state.mhTotal - rows.length})</button>` : ""}
       </div>`;
   return renderWorkerBadge(role) + renderMhAccountsButton(role) + compose + searchBar + list;
 }
@@ -2522,6 +2524,8 @@ function renderMyHomeJobs(rows, role) {
 function bindMyHomeJobsActions() {
   const accBtn = document.getElementById("mhAccBtn");
   if (accBtn) accBtn.onclick = openMhAccountsModal;
+  const moreBtn = document.getElementById("mhMore");
+  if (moreBtn) moreBtn.onclick = async () => { state.mhLimit = (state.mhLimit || 150) + 150; delete lazyCache.myhomejobs; await renderContent(); };
   const retryBtn = document.getElementById("mhRetryBtn");
   if (retryBtn) retryBtn.onclick = runBulkRetry;
   const btn = document.getElementById("mhSubmit");
@@ -3449,6 +3453,7 @@ if (!state.reportsDate) state.reportsDate = "";
 /* თიმლიდერისთვის: შეხვედრების ჩვენება „გუნდის" ან „საკუთარი" ჭრილში. */
 if (!state.meetingsScope) state.meetingsScope = "team";
 /* გაფრთხილებების ტაბის ფილტრები (აგენტი/მენეჯერი) — client-side. */
+if (!state.mhLimit) state.mhLimit = 150;
 if (!state.warningsAgentFilter) state.warningsAgentFilter = "";
 if (!state.warningsManagerFilter) state.warningsManagerFilter = "";
 if (!state.warnSel) state.warnSel = new Set();
@@ -3670,6 +3675,7 @@ async function renderContent() {
             if (state.mhStatsFrom) params.push("date_from=" + encodeURIComponent(state.mhStatsFrom));
             if (state.mhStatsTo) params.push("date_to=" + encodeURIComponent(state.mhStatsTo));
           }
+          if (tab === "myhomejobs") params.push("limit=" + (state.mhLimit || 150));
           if (tab === "myattendance" && state.myAttMonth) params.push("month=" + encodeURIComponent(state.myAttMonth));
           if (tab === "attendance") {
             if (state.attDate) params.push("date=" + encodeURIComponent(state.attDate));
@@ -3684,7 +3690,7 @@ async function renderContent() {
           }
           if (params.length) url += "?" + params.join("&");
           const resp = await api(url);
-          if (tab === "myhomejobs") state.workers = resp.workers || null;
+          if (tab === "myhomejobs") { state.workers = resp.workers || null; state.mhTotal = resp.total || null; }
           const wholeObjTabs = ["admintasks", "agentsmgmt", "meetings", "taskhistory", "digest", "reports", "dayoffs", "swaps", "regulations", "mydayoffs", "attendance", "districts"];
           lazyCache[tab] = wholeObjTabs.includes(tab) ? resp : (resp.rows || []);
         } catch (e) {

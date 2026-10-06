@@ -474,7 +474,14 @@ def api_myhome_jobs():
         rows = sheets.get_myhome_jobs(agent_id=agent["agent_id"])
     else:
         return jsonify(error="ავტორიზაცია საჭიროა"), 403
-    payload = {"rows": rows}
+    # უახლესი N ჩანაწერი (ნაგულისხმევად 150): ათასობით job-ის ერთბაშად გადაცემა/დახატვა Mini App-ს "ჭედავდა"
+    # (Telegram WebView + ~850+ სტრიქონი; დღეში +200). მეტის სანახავად `?limit=` (ღილაკი „მეტის ჩვენება“).
+    try:
+        limit = max(1, min(int(request.args.get("limit") or 150), 2000))
+    except (TypeError, ValueError):
+        limit = 150
+    total = len(rows)
+    payload = {"rows": rows[:limit], "total": total}
     if admin:
         try:
             payload["workers"] = worker_status_list()
