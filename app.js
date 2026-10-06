@@ -2312,8 +2312,45 @@ function renderWorkerBadge(role) {
 function renderMhAccountsButton(role) {
   if (role !== "admin" || !state.data || !state.data.is_admin) return "";
   return `<div style="display:flex;justify-content:flex-end;margin:0 0 8px">
+    <button class="btn secondary" id="mhRetryBtn" style="padding:6px 12px;font-size:12.5px;width:auto;margin-right:6px">🔁 ჩავარდნილების გაშვება</button>
     <button class="btn secondary" id="mhAccBtn" style="padding:6px 12px;font-size:12.5px;width:auto">⚙️ MyHome ანგარიშები</button>
   </div>`;
+}
+
+/* ჩავარდნილი job-ების ერთიანად ხელახლა გაშვება: ჯერ მშრალი გამოთვლა (dry-run), მერე თანხმობა; ორმაგი გადახდისგან
+   დაცვა სერვერზეა (არარსებული ID, გადახდილი და უკვე დადებული არ ბრუნდება). */
+async function runBulkRetry() {
+  try {
+    const pre = await api("/api/myhome-jobs/retry-failed", { method: "POST", body: JSON.stringify({ dry_run: true }) });
+    if (!pre.safe && !pre.payment) {
+      alert("ხელახლა გასაშვები ჩავარდნილი არ არის (ბოლო 2 დღეში).\n"
+        + `გამოტოვებული: არარსებული ID ${pre.skipped.permanent}, უკვე დადებული ${pre.skipped.done}, გადახდილი ${pre.skipped.paid}`);
+      return;
+    }
+    if (!confirm(`ხელახლა გაეშვას ${pre.safe} ჩავარდნილი (გადახდამდე ჩავარდნილი — უსაფრთხო)?\n`
+      + `გამოტოვებულია: არარსებული ID ${pre.skipped.permanent}, უკვე დადებული ${pre.skipped.done}, გადახდილი ${pre.skipped.paid}.`)) {
+      if (!pre.payment) return;
+    }
+    let includePayment = false;
+    if (pre.payment) {
+      includePayment = confirm(`დამატებით ${pre.payment} job, რომელიც გადახდის ეტაპზე ჩავარდა (MyHome-მა გადახდა უარყო/გვერდი არ გადავიდა).\n`
+        + "ისინიც გაეშვას? გააკეთეთ მხოლოდ თუ ბალანსი შევსებულია და დარწმუნებული ხართ, რომ ეს განცხადებები MyHome-ზე არ დადებულა (ორმაგი გადახდის რისკი).");
+    }
+    if (!pre.safe && !includePayment) return;
+    const res = await api("/api/myhome-jobs/retry-failed", { method: "POST", body: JSON.stringify({ include_payment: includePayment }) });
+    if (!res.started) { toast("გასაშვები არაფერია"); return; }
+    toast(`⏳ ${res.will_retry} job ბრუნდება რიგში…`);
+    for (let i = 0; i < 60; i++) {
+      await new Promise((r) => setTimeout(r, 4000));
+      const st = await api("/api/myhome-jobs/retry-failed/status");
+      if (!st.running) {
+        toast(`✅ რიგში დაბრუნდა ${st.done}${st.failed ? ", ვერ დაბრუნდა " + st.failed : ""}`);
+        break;
+      }
+    }
+    delete lazyCache.myhomejobs;
+    await renderContent();
+  } catch (e) { toast(e.message || "შეცდომა"); }
 }
 
 const _MH_DELIVERY_LABELS = { pending: "⏳ worker-ს ელოდება", delivered: "✅ worker-მა მიიღო", none: "" };
@@ -2429,6 +2466,7 @@ function renderMyHomeJobs(rows, role) {
         <input id="mhPercent" type="text" inputmode="decimal" placeholder="თანამშრომლობის საკომისიო % — გადავა ბაზაში (არასავალდებულო)">
         <input id="mhPrice" type="text" inputmode="decimal" placeholder="საბოლოო ფასი (არასავალდებულო)">
         <textarea id="mhNotes" placeholder="შეზღუდვები / შენიშვნა — გადავა ბაზაში (არასავალდებულო)"></textarea>
+        <label style="display:flex;align-items:center;gap:8px"><input id="mhNoPets" type="checkbox" style="width:auto"> 🐾 მესაკუთრე ცხოველებს არ უშვებს</label>
         <button class="btn" id="mhSubmit">დამატება</button>
       </div>
     </div>`;
@@ -2484,6 +2522,8 @@ function renderMyHomeJobs(rows, role) {
 function bindMyHomeJobsActions() {
   const accBtn = document.getElementById("mhAccBtn");
   if (accBtn) accBtn.onclick = openMhAccountsModal;
+  const retryBtn = document.getElementById("mhRetryBtn");
+  if (retryBtn) retryBtn.onclick = runBulkRetry;
   const btn = document.getElementById("mhSubmit");
   if (btn) {
     btn.onclick = async () => {
@@ -2491,7 +2531,10 @@ function bindMyHomeJobsActions() {
       const ownerNumber = (document.getElementById("mhOwnerNumber").value || "").trim();
       const percent = (document.getElementById("mhPercent").value || "").trim();
       const price = (document.getElementById("mhPrice").value || "").trim();
-      const notes = (document.getElementById("mhNotes").value || "").trim();
+      // ცხოველების თიქი შენიშვნის ბოლოს ცალკე სტრიქონად იწერება — worker (tg_export.py)
+      // აქედან ავსებს ბაზის "pets" სვეტს; სერვერის/ბაზის ცვლილება არ სჭირდება.
+      const petsLine = "ცხოველები: " + (document.getElementById("mhNoPets").checked ? "არა" : "კი");
+      const notes = [(document.getElementById("mhNotes").value || "").trim(), petsLine].filter(Boolean).join("\n");
       if (!listingId || !/^\d+$/.test(listingId)) { toast("შეიყვანეთ სწორი MyHome ID (მხოლოდ ციფრები)"); return; }
       if (!ownerNumber) { toast("შეიყვანეთ მესაკუთრის ნომერი"); return; }
       btn.disabled = true;

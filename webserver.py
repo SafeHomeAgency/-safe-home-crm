@@ -2767,6 +2767,14 @@ myhome_accounts_api.register(
 )
 
 
+# ჩავარდნილი MyHome job-ების ერთიანად ხელახლა გაშვება (ადმინი) — უსაფრთხოების წესებით
+import myhome_bulk_retry  # noqa: E402
+
+myhome_bulk_retry.register(
+    app, authed=_authed_agent, audit=_audit, rate_limited=rate_limited, sheets=_SheetsProxy(),
+)
+
+
 def run():
     """ბლოკავს — bot.py იძახებს ცალკე thread-ში."""
     log.info("Mini App ვებ-სერვერი ეშვება პორტზე %s", config.PORT)
