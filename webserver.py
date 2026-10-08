@@ -2782,6 +2782,12 @@ myhome_bulk_retry.register(
 )
 
 
+# დასრულებული job-ების ექსპორტი worker-ისთვის (ბაზის აღსადგენად) — მხოლოდ worker-ის გასაღებით, მხოლოდ კითხვა
+import myhome_export_api  # noqa: E402
+
+myhome_export_api.register(app, authed_worker=_authed_worker, rate_limited=rate_limited, sheets=_SheetsProxy())
+
+
 def run():
     """ბლოკავს — bot.py იძახებს ცალკე thread-ში."""
     log.info("Mini App ვებ-სერვერი ეშვება პორტზე %s", config.PORT)
