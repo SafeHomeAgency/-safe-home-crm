@@ -615,24 +615,38 @@ function bindTasksActions(d) {
 
 const PERIOD_TITLES = { day: "დღეს", week: "ბოლო კვირა", month: "ბოლო თვე" };
 
+/* KPI-ის 5 კომპონენტი (განცხადებები გეგმასთან, დისციპლინა, შეხვედრები, კლიენტები,
+   ჩახურული ქეისები) — სერვერზე გამოთვლილი (kpi.py); ერთი და იგივე ფორმულა აგენტისთვისაც და მენეჯერისთვისაც. */
+function kpiBreakdown(k) {
+  if (!k || !k.components) return `<div class="empty">KPI ჯერ ვერ გამოითვალა</div>`;
+  const order = ["listings", "discipline", "meetings", "clients", "closed_cases"];
+  return order.map((key) => {
+    const c = k.components[key];
+    if (!c) return "";
+    const pct = c.score == null ? null : Math.round(c.score * 100);
+    return `<div class="bar-row">
+      <div class="top"><span>${esc(c.label)} <span class="sub">(${esc(c.text || "")})</span></span><span>${pct == null ? "—" : pct + "%"}</span></div>
+      <div class="track"><div class="fill" style="width:${pct == null ? 0 : pct}%"></div></div>
+    </div>`;
+  }).join("");
+}
+
 function renderKpi(d) {
   const p = d.performance;
-  const r = ratePct(p.rate);
+  const k = d.kpi;
+  const total = k && k.pct != null ? k.pct : null;
   const meetings = d.meetings || [];
-  const chart = barChart([
-    { label: "მიღებული", value: p.assigned || 0 },
-    { label: "დროულად", value: p.on_time || 0 },
-  ]);
   return `
   <div class="card">
     ${renderPeriodSwitch()}
     <h2>📈 შედეგები — ${esc(PERIOD_TITLES[state.period] || "")}</h2>
-    ${chart}
     <div class="grid3">
-      <div class="stat"><div class="num">${p.assigned}</div><div class="lbl">მიღებული</div></div>
-      <div class="stat"><div class="num">${p.on_time}</div><div class="lbl">დროულად</div></div>
-      <div class="stat"><div class="num">${r == null ? "—" : r + "%"}</div><div class="lbl">შედეგი</div></div>
+      <div class="stat"><div class="num">${total == null ? "—" : total + "%"}</div><div class="lbl">ჯამური KPI</div></div>
+      <div class="stat"><div class="num">${k ? k.warnings : 0}</div><div class="lbl">გაფრთხილება</div></div>
+      <div class="stat"><div class="num">${p.assigned}</div><div class="lbl">მიღებული კლიენტი</div></div>
     </div>
+    ${kpiBreakdown(k)}
+    <div class="sub" style="margin-top:8px">ფორმულა: განცხადებები გეგმასთან, დისციპლინა (დროულად გახსნა/დახურვა + გაფრთხილებები), შეხვედრები, კლიენტები, ჩახურული ქეისები. რაც არ გეხება (მაგ. კლიენტი არ მიგიღია), ჯამში არ ითვლება.</div>
   </div>
   <div class="card">
     <h2>📅 ბოლო შეხვედრები</h2>
@@ -781,7 +795,7 @@ function renderOverview(d) {
 }
 
 const TEAM_FIELD_LABELS = [
-  ["team", "გუნდი"], ["mode", "დღევანდელი რეჟიმი"], ["count_submitted", "შეყვანილი დღეს (ჯამი)"],
+  ["team", "გუნდი"], ["kpi_pct", "KPI (არჩეული პერიოდი)"], ["mode", "დღევანდელი რეჟიმი"], ["count_submitted", "შეყვანილი დღეს (ჯამი)"],
   ["site_count", "საიტი"], ["myhome_count", "myhome"], ["ssge_count", "ss.ge"], ["quota", "დღიური გეგმა"],
   ["clients_today", "კლიენტი დღეს"], ["clients_total", "კლიენტი ჯამურად"], ["assigned", "მიღებული (30დღე)"],
   ["warnings", "გაფრთხილებები"], ["districts", "ამ კვირის რაიონები"],
@@ -879,8 +893,9 @@ function renderRanking(d) {
     ${rk.length === 0 ? `<div class="empty">ჯერ საკმარისი მონაცემი არ არის</div>` :
       rk.map((t, i) => `
         <div class="bar-row">
-          <div class="top"><span>${i + 1}. ${esc(t.name)} <span class="sub">(${t.assigned})</span></span><span>${ratePct(t.rate)}%</span></div>
+          <div class="top"><span>${i + 1}. ${esc(t.name)}</span><span>${ratePct(t.rate)}%</span></div>
           <div class="track"><div class="fill" style="width:${ratePct(t.rate)}%"></div></div>
+          <details style="margin-top:4px"><summary class="sub">კომპონენტები</summary>${kpiBreakdown(t.kpi)}</details>
         </div>`).join("")}
   </div>`;
 }
@@ -1830,9 +1845,11 @@ function bindAdminTasksActions() {
       }
       submitBtn.disabled = true;
       try {
-        await api("/api/tasks/new", { method: "POST", body: JSON.stringify(body) });
+        const created = await api("/api/tasks/new", { method: "POST", body: JSON.stringify(body) });
         tg && tg.HapticFeedback && tg.HapticFeedback.notificationOccurred("success");
-        toast("დამატებულია ✅");
+        toast(created && created.delivered === false
+          ? "დამატებულია ✅, მაგრამ აგენტთან ჯერ ვერ მივიდა — ავტომატურად გავიმეორებ, 10 წთ-ში გაგაფრთხილებ"
+          : "დამატებულია და აგენტს მიუვიდა ✅");
         delete lazyCache.admintasks;
         await renderContent();
       } catch (e) { toast(e.message); submitBtn.disabled = false; }

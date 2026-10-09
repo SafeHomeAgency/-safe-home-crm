@@ -13,6 +13,7 @@ from google.oauth2.service_account import Credentials
 
 import config
 import crm_time
+import shift_rules
 
 _SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
@@ -460,10 +461,27 @@ def find_agent_by_phone(phone: str) -> dict | None:
 
 
 def find_agent_by_chat_id(chat_id: int) -> dict | None:
+    """იგივე chat_id-ზე რამდენიმე ჩანაწერიც რომ იყოს (ხელახალი რეგისტრაცია, დეაქტივირებული
+    ძველი ჩანაწერი), აქტიურს ვარჩევთ — ძველად პირველივე ჩანაწერი მოდიოდა და კლიენტის
+    დადასტურებისას ეწერებოდა "სხვა აგენტზეა მინიჭებული"."""
+    first = None
     for row in get_agents():
         if str(row.get("telegram_chat_id", "")).strip() == str(chat_id):
-            return row
-    return None
+            if str(row.get("active", "yes")).strip().lower() not in ("no", "false", "0"):
+                return row
+            first = first or row
+    return first
+
+
+def agent_ids_same_chat(agent_id: str) -> set:
+    """ამ აგენტისა და იმავე Telegram ანგარიშზე (chat_id) რეგისტრირებული ყველა ჩანაწერის id-ები."""
+    agents = get_agents()
+    me = next((a for a in agents if str(a.get("agent_id")) == str(agent_id)), None)
+    ids = {str(agent_id)}
+    chat = str((me or {}).get("telegram_chat_id", "")).strip()
+    if chat:
+        ids |= {str(a.get("agent_id")) for a in agents if str(a.get("telegram_chat_id", "")).strip() == chat}
+    return ids
 
 
 def agent_name_by_id(agent_id: str) -> str:
@@ -725,8 +743,11 @@ def mark_task_seen(task_id: str, agent_id: str) -> dict | None:
         if not cell:
             return None
         row = dict(zip(TASKS_HEADERS, ws.row_values(cell.row)))
-        if str(row.get("assigned_to")) != str(agent_id):
+        if str(row.get("assigned_to")) not in agent_ids_same_chat(agent_id):
             return None
+        if str(row.get("seen")).strip().lower() == "yes":
+            row["already_seen"] = True              # განმეორებითი დაჭერა — შეცდომა არაა, მენეჯერს ხელახლა არ ეგზავნება
+            return row
         ws.update_cell(cell.row, TASKS_HEADERS.index("seen") + 1, "yes")
         ws.update_cell(cell.row, TASKS_HEADERS.index("seen_at") + 1, _now())
         _invalidate(config.TASKS_SHEET_NAME)
@@ -1284,13 +1305,14 @@ def agent_available_now(agent_id: str) -> bool:
 # ---------- გაფრთხილებები ----------
 
 def has_warning_today(agent_id: str, type_: str) -> bool:
-    today = _today_str()
+    # "დღეს" = თბილისის ბიზნეს-დღე (created_at სერვერის UTC-ია)
+    today = crm_time.local_today().strftime(crm_time.DATE_FMT)
     with _lock:
         rows = _cached_records(config.WARNINGS_SHEET_NAME)
     return any(
         str(r.get("agent_id")) == str(agent_id)
         and r.get("type") == type_
-        and str(r.get("created_at", "")).startswith(today)
+        and crm_time.business_date_of_server_naive(r.get("created_at", "")) == today
         for r in rows
     )
 
@@ -1370,6 +1392,29 @@ def add_warning(agent_id: str, type_: str, detail: str = "") -> dict:
         set_agent_active(agent_id, "no")
         deactivated = True
     return {"warning_id": warning_id, "count": count, "deactivated": deactivated}
+
+
+def add_warning_once(agent_id: str, type_: str, detail: str = "", exclusive_with: tuple = ()) -> dict:
+    """add_warning, მაგრამ დღეში (თბილისის დღე) ერთხელ აგენტზე იმავე ტიპის
+    (ან `exclusive_with`-ში ჩამოთვლილი ტიპის) გაფრთხილება არ მეორდება.
+    შემოწმება ხდება ბაზის **ახალ** წაკითხვაზე (კეშის გარეშე) და იმავე
+    ჩაკეტვაში, რაც ჩაწერა — ამიტომ ორი job/ორი გზა (ბოტი + Mini App,
+    ან redeploy-ის დროს ორი პროცესის გადაფარვა) ერთსა და იმავეს ორჯერ ვერ წერს.
+    დუბლიკატზე: {"skipped": "duplicate", "warning_id": ""} — გამომძახებელი
+    შეტყობინებას აღარ აგზავნის (იხ. bot._notify_warning)."""
+    types = {type_, *exclusive_with}
+    with _lock:
+        _invalidate(config.WARNINGS_SHEET_NAME)
+        today = crm_time.local_today().strftime(crm_time.DATE_FMT)
+        for r in _cached_records(config.WARNINGS_SHEET_NAME):
+            if (str(r.get("agent_id")) == str(agent_id) and r.get("type") in types
+                    and crm_time.business_date_of_server_naive(r.get("created_at", "")) == today):
+                current = len([
+                    w for w in get_warnings(agent_id=agent_id, days=config.WARNING_WINDOW_DAYS)
+                    if str(w.get("status") or "active") != "dismissed"
+                ])
+                return {"warning_id": "", "count": current, "deactivated": False, "skipped": "duplicate"}
+        return add_warning(agent_id, type_, detail)
 
 
 def _find_warning_row(warning_id: str):
@@ -1874,11 +1919,9 @@ def get_admin_dashboard(team: str | None = None, days: int = 30) -> dict:
         # (item 6): ოფისის ცვლაზეა, ჯერ არ დაუწყია, და საათი უკვე
         # grace-ის მიღმაა.
         late = False
-        if mode in ("office_morning", "office_evening") and not att.get("clock_in"):
-            start_hour = 10 if mode == "office_morning" else 16
-            _now_dt = datetime.datetime.now()
-            _deadline = _now_dt.replace(hour=start_hour, minute=config.ATTENDANCE_GRACE_MINUTES, second=0, microsecond=0)
-            if _now_dt >= _deadline:
+        if mode in ("office_morning", "office_evening"):
+            # თბილისის დროით (არა სერვერის UTC-ით) და რეალური clock_in-ის მიხედვით
+            if shift_rules.late_arrival_due(mode, att or None, crm_time.local_now().replace(tzinfo=None)):
                 late = True
                 late_count += 1
         w = len([
@@ -2383,6 +2426,25 @@ def finish_myhome_job(job_id: str, worker_id: str, status: str, error_message: s
         _invalidate(config.MYHOME_JOBS_SHEET_NAME)
         return {"ok": True, "code": "ok", "row": _row_dict(ws.row_values(row_number)),
                 "retry_scheduled": retry_scheduled}
+
+
+def recover_paid_myhome_job(job_id: str, listing_id: str = "") -> dict:
+    """გადახდილი, მაგრამ შედეგის ჩაწერამდე ჩავარდნილი job (FAILED + failure_stage paid/payment — ID-ის ამოკითხვა/ბაზის
+    ჩაწერა ჩაიშალა, განცხადება კი უკვე გამოქვეყნებულია) -> COMPLETED, რომ CRM-ში აგენტს წარმატებული ეჩვენოს და ავტო-retry
+    დუბლირებას არ გამოიწვევდეს. მხოლოდ ასეთ job-ზე მუშაობს; COMPLETED-ზე — უვნებელი `duplicate`.
+    აბრუნებს {"ok", "code": "ok"|"duplicate"|"not_found"|"not_recoverable", "row"}."""
+    with _lock:
+        ws = _myhome_jobs_ws()
+        row_number, row = _fresh_job_row(ws, job_id)
+        if not row_number:
+            return {"ok": False, "code": "not_found", "row": None}
+        if str(row.get("status") or "") == "COMPLETED":
+            return {"ok": True, "code": "duplicate", "row": row}
+        if str(row.get("status") or "") != "FAILED" or str(row.get("failure_stage") or "") not in ("paid", "payment"):
+            return {"ok": False, "code": "not_recoverable", "row": row}
+        _write_job_fields(ws, row_number, {"status": "COMPLETED", "error_message": "", "failure_stage": "", "next_retry_at": ""})
+        _invalidate(config.MYHOME_JOBS_SHEET_NAME)
+        return {"ok": True, "code": "ok", "row": _row_dict(ws.row_values(row_number))}
 
 
 def set_myhome_job_stage(job_id: str, worker_id: str, stage: str) -> dict:

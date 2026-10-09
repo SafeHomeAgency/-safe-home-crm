@@ -23,6 +23,7 @@ import uuid
 
 import config
 import crm_time
+import shift_rules
 import db
 
 log = logging.getLogger("safehome-crm-sheets-pg")
@@ -193,10 +194,25 @@ def find_agent_by_phone(phone: str) -> dict | None:
 
 
 def find_agent_by_chat_id(chat_id: int) -> dict | None:
+    """იხ. sheets_gspread.find_agent_by_chat_id — აქტიური ჩანაწერი სარჩევია."""
+    first = None
     for row in get_agents():
         if str(row.get("telegram_chat_id", "")).strip() == str(chat_id):
-            return row
-    return None
+            if str(row.get("active", "yes")).strip().lower() not in ("no", "false", "0"):
+                return row
+            first = first or row
+    return first
+
+
+def agent_ids_same_chat(agent_id: str) -> set:
+    """იხ. sheets_gspread.agent_ids_same_chat."""
+    agents = get_agents()
+    me = next((a for a in agents if str(a.get("agent_id")) == str(agent_id)), None)
+    ids = {str(agent_id)}
+    chat = str((me or {}).get("telegram_chat_id", "")).strip()
+    if chat:
+        ids |= {str(a.get("agent_id")) for a in agents if str(a.get("telegram_chat_id", "")).strip() == chat}
+    return ids
 
 
 def agent_name_by_id(agent_id: str) -> str:
@@ -409,8 +425,12 @@ def mark_task_seen(task_id: str, agent_id: str) -> dict | None:
     თავად მინიჭებულ აგენტს შეუძლია საკუთარი დავალების დადასტურება."""
     with _lock:
         row = db.query_one("SELECT * FROM tasks WHERE task_id = %s", (task_id,))
-        if not row or str(row.get("assigned_to")) != str(agent_id):
+        if not row or str(row.get("assigned_to")) not in agent_ids_same_chat(agent_id):
             return None
+        if str(row.get("seen")).strip().lower() == "yes":
+            row = dict(row)
+            row["already_seen"] = True
+            return row
         db.execute(
             "UPDATE tasks SET seen = %s, seen_at = %s WHERE task_id = %s",
             ("yes", _now(), task_id),
@@ -908,12 +928,13 @@ def agent_available_now(agent_id: str) -> bool:
 # ---------- გაფრთხილებები ----------
 
 def has_warning_today(agent_id: str, type_: str) -> bool:
-    today = _today_str()
+    # "დღეს" = თბილისის ბიზნეს-დღე (created_at სერვერის UTC-ია)
+    today = crm_time.local_today().strftime(crm_time.DATE_FMT)
     with _lock:
         rows = db.query_all(
             "SELECT * FROM warnings WHERE agent_id = %s AND type = %s", (agent_id, type_),
         )
-    return any(str(r.get("created_at", "")).startswith(today) for r in rows)
+    return any(crm_time.business_date_of_server_naive(r.get("created_at", "")) == today for r in rows)
 
 
 def _warning_cutoff(days: int) -> datetime.datetime:
@@ -972,6 +993,22 @@ def add_warning(agent_id: str, type_: str, detail: str = "") -> dict:
         _audit("auto_deactivate_on_warnings", "agent", agent_id,
                new_value={"warning_count": count, "type": type_})
     return {"warning_id": warning_id, "count": count, "deactivated": deactivated}
+
+
+def add_warning_once(agent_id: str, type_: str, detail: str = "", exclusive_with: tuple = ()) -> dict:
+    """იხ. sheets_gspread.add_warning_once — დღეში (თბილისი) ერთხელ აგენტზე."""
+    types = {type_, *exclusive_with}
+    with _lock:
+        today = crm_time.local_today().strftime(crm_time.DATE_FMT)
+        rows = db.query_all("SELECT * FROM warnings WHERE agent_id = %s", (agent_id,))
+        if any(r.get("type") in types
+               and crm_time.business_date_of_server_naive(r.get("created_at", "")) == today for r in rows):
+            current = len([
+                w for w in get_warnings(agent_id=agent_id, days=config.WARNING_WINDOW_DAYS)
+                if str(w.get("status") or "active") != "dismissed"
+            ])
+            return {"warning_id": "", "count": current, "deactivated": False, "skipped": "duplicate"}
+        return add_warning(agent_id, type_, detail)
 
 
 def request_warning_dismissal(warning_id: str, requested_by: str, reason: str) -> dict | None:
@@ -1407,11 +1444,9 @@ def get_admin_dashboard(team: str | None = None, days: int = 30) -> dict:
         # (item 6): ოფისის ცვლაზეა, ჯერ არ დაუწყია, და საათი უკვე
         # grace-ის მიღმაა.
         late = False
-        if mode in ("office_morning", "office_evening") and not att.get("clock_in"):
-            start_hour = 10 if mode == "office_morning" else 16
-            _now_dt = datetime.datetime.now()
-            _deadline = _now_dt.replace(hour=start_hour, minute=config.ATTENDANCE_GRACE_MINUTES, second=0, microsecond=0)
-            if _now_dt >= _deadline:
+        if mode in ("office_morning", "office_evening"):
+            # თბილისის დროით (არა სერვერის UTC-ით) და რეალური clock_in-ის მიხედვით
+            if shift_rules.late_arrival_due(mode, att or None, crm_time.local_now().replace(tzinfo=None)):
                 late = True
                 late_count += 1
         w = len([
@@ -1841,6 +1876,22 @@ def finish_myhome_job(job_id: str, worker_id: str, status: str, error_message: s
         return {"ok": True, "code": "ok",
                 "row": db.query_one("SELECT * FROM myhome_jobs WHERE job_id = %s", (str(job_id),)),
                 "retry_scheduled": retry_scheduled}
+
+
+def recover_paid_myhome_job(job_id: str, listing_id: str = "") -> dict:
+    """იხ. sheets_gspread.recover_paid_myhome_job — FAILED(paid/payment) -> COMPLETED."""
+    with _lock:
+        row = db.query_one("SELECT * FROM myhome_jobs WHERE job_id = %s", (str(job_id),))
+        if not row:
+            return {"ok": False, "code": "not_found", "row": None}
+        if str(row.get("status") or "") == "COMPLETED":
+            return {"ok": True, "code": "duplicate", "row": row}
+        if str(row.get("status") or "") != "FAILED" or str(row.get("failure_stage") or "") not in ("paid", "payment"):
+            return {"ok": False, "code": "not_recoverable", "row": row}
+        db.execute(
+            "UPDATE myhome_jobs SET status = 'COMPLETED', error_message = '', failure_stage = '', next_retry_at = '' "
+            "WHERE job_id = %s AND status = 'FAILED'", (str(job_id),))
+        return {"ok": True, "code": "ok", "row": db.query_one("SELECT * FROM myhome_jobs WHERE job_id = %s", (str(job_id),))}
 
 
 def set_myhome_job_stage(job_id: str, worker_id: str, stage: str) -> dict:

@@ -19,6 +19,7 @@ import re
 
 import config
 import crm_time
+import shift_rules
 import sheets
 
 
@@ -415,11 +416,7 @@ def shift_start_hour(mode: str) -> int | None:
 def is_late(mode: str, local_dt: datetime.datetime) -> bool:
     """იგივე წესი, რასაც ბოტის `check_late_arrivals` იყენებს: ოფისის
     ცვლის დაწყება (10:00/16:00) + ATTENDANCE_GRACE_MINUTES."""
-    start = shift_start_hour(mode)
-    if start is None:
-        return False
-    deadline = local_dt.replace(hour=start, minute=config.ATTENDANCE_GRACE_MINUTES, second=0, microsecond=0)
-    return local_dt > deadline
+    return shift_rules.is_late_open(mode, local_dt)
 
 
 def fmt_hours(minutes: int | None) -> str:

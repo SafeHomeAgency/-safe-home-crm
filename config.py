@@ -145,6 +145,22 @@ ATTENDANCE_GRACE_MINUTES = int(os.environ.get("ATTENDANCE_GRACE_MINUTES", "15"))
 # myhome + ss.ge)
 ONLINE_DAILY_QUOTA = int(os.environ.get("ONLINE_DAILY_QUOTA", "20"))
 OFFICE_DAILY_QUOTA = int(os.environ.get("OFFICE_DAILY_QUOTA", "20"))
+
+# KPI (აგენტის შედეგი %): 5 კომპონენტის წონები (ჯამი თავისუფალია — ნორმირდება;
+# კომპონენტი, რომელიც აგენტზე არ ვრცელდება (მაგ. კლიენტი არ ჰყოლია), გამოტოვდება).
+KPI_WEIGHTS = {"listings": 30, "discipline": 25, "meetings": 15, "clients": 15, "closed_cases": 15}
+for _pair in os.environ.get("KPI_WEIGHTS", "").split(","):
+    if ":" in _pair:
+        _k, _v = _pair.split(":", 1)
+        if _k.strip() in KPI_WEIGHTS:
+            try:
+                KPI_WEIGHTS[_k.strip()] = float(_v)
+            except ValueError:
+                pass
+# შეხვედრების გეგმა კვირაში / ჩახურული ქეისების გეგმა თვეში / ერთი გაფრთხილების ჯარიმა დისციპლინის ქულაში
+KPI_MEETINGS_PER_WEEK = float(os.environ.get("KPI_MEETINGS_PER_WEEK", "3"))
+KPI_CLOSED_CASES_PER_MONTH = float(os.environ.get("KPI_CLOSED_CASES_PER_MONTH", "2"))
+KPI_WARNING_PENALTY = float(os.environ.get("KPI_WARNING_PENALTY", "0.10"))
 # ონლაინ დღეზე რომელ საათზე შევახსენოთ აგენტს დაწყება (/clockin), თუ
 # ჯერ არ დაუწყია — ონლაინ რეჟიმს ფიქსირებული საწყისი საათი არა აქვს,
 # ამიტომ ეს მხოლოდ ერთხელადი, დღის შუა საათის შეხსენებაა.

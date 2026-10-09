@@ -257,7 +257,8 @@ def test_is_late_uses_shift_start_and_grace():
     g = config.ATTENDANCE_GRACE_MINUTES
     day = datetime.datetime(2026, 10, 2, 10, 0)
     check(not ex.is_late("office_morning", day.replace(minute=g)), "grace-ის ბოლო წუთი დაგვიანება არაა")
-    check(ex.is_late("office_morning", day.replace(minute=g, second=30)), "grace-ის შემდეგ — დაგვიანებაა")
+    check(not ex.is_late("office_morning", day.replace(minute=g, second=30)), "grace-ის ბოლო წუთის შიგნით (10:15:30) — დროულია")
+    check(ex.is_late("office_morning", day.replace(minute=g + 1)), "grace-ის შემდეგ (10:16) — დაგვიანებაა")
     check(not ex.is_late("online", datetime.datetime(2026, 10, 2, 23, 0)), "ონლაინზე დაგვიანება არ არსებობს")
 
 

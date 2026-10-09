@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import datetime
+import time
 import logging
 import threading
 from zoneinfo import ZoneInfo
@@ -32,6 +33,9 @@ from telegram.ext import (
 import config
 import crm_extras
 import crm_time
+import kpi
+import shift_rules
+import task_notify
 import sheets
 import webserver
 import crm2_sync
@@ -1604,8 +1608,10 @@ async def _finish_clockout(update: Update, context: ContextTypes.DEFAULT_TYPE,
     if quota and total < quota:
         today = datetime.datetime.now().strftime("%Y-%m-%d")
         detail = f"{today}: {total}/{quota} ({SCHEDULE_MODE_LABELS.get(mode, mode)})"
-        result = sheets.add_warning(agent_id, "quota_missed", detail)
-        if result.get("skipped"):
+        result = sheets.add_warning_once(agent_id, "quota_missed", detail)
+        if result.get("skipped") == "duplicate":
+            note = f"\n\nℹ️ დღევანდელი გეგმა ({quota}) ვერ შესრულდა — გაფრთხილება დღეს უკვე ჩაწერილია, ხელახლა არ ჩაიწერა."
+        elif result.get("skipped"):
             note = f"\n\n🏖 დღევანდელი გეგმა ({quota}) ვერ შესრულდა, მაგრამ დღეს დამტკიცებული Day off გაქვთ — გაფრთხილება არ ჩაწერილა."
         else:
             note = f"\n\n⚠️ დღევანდელი გეგმა ({quota}) ვერ შესრულდა — ჩაეწერა გაფრთხილება."
@@ -1917,37 +1923,29 @@ async def report(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def ranking(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_chat.id):
         return
-    perf = sheets.get_agent_performance(30)
-    all_agents = sheets.get_agents()
-    agents = {a["agent_id"]: a["name"] for a in all_agents}
-    # გათავისუფლებული/დეაქტივირებული აგენტები რეიტინგში აღარ ჩანან —
-    # წინააღმდეგ შემთხვევაში უკვე წასული აგენტი კვლავ "ჩნდებოდა" აქ.
-    active_ids = {
-        a["agent_id"] for a in all_agents
-        if str(a.get("active", "yes")).strip().lower() != "no"
-    }
-
-    if not perf:
-        await update.message.reply_text("ბოლო 30 დღეში მინიჭებული დავალება არცერთ აგენტს არ ჰქონია.")
+    # KPI = 5 კომპონენტი (განცხადებები გეგმასთან, დისციპლინა, შეხვედრები, კლიენტები,
+    # ჩახურული ქეისები) — იხ. kpi.py. აქტიური აგენტები მხოლოდ (compute თავად ფილტრავს).
+    try:
+        kmap = kpi.compute(30)
+    except Exception:
+        log.exception("/ranking: KPI გამოთვლა ჩავარდა")
+        await update.message.reply_text("⚠️ რეიტინგის გამოთვლა ვერ მოხერხდა, სცადეთ მოგვიანებით.")
         return
-
-    rows = []
-    for agent_id, s in perf.items():
-        if agent_id not in active_ids:
-            continue
-        name = agents.get(agent_id, agent_id)
-        rate = s["rate"]
-        rate_str = f"{rate * 100:.0f}%" if rate is not None else "-"
-        rows.append((rate if rate is not None else -1, name, s["assigned"], s["on_time"], rate_str))
-    rows.sort(key=lambda r: r[0], reverse=True)
-
+    rows = kpi.ranking(kmap)
     if not rows:
-        await update.message.reply_text("ბოლო 30 დღეში მინიჭებული დავალება არცერთ აქტიურ აგენტს არ ჰქონია.")
+        await update.message.reply_text("ბოლო 30 დღეში KPI-ს გასათვლელი მონაცემი არცერთ აგენტს არ აქვს.")
         return
 
-    lines = ["🏆 აგენტების რეიტინგი (ბოლო 30 დღე, 24სთ-ში დახურვის %):", ""]
-    for _, name, assigned, on_time, rate_str in rows:
-        lines.append(f"• {name}: {rate_str} ({on_time}/{assigned} დროულად)")
+    def _c(v, k):
+        s = v["components"][k]["score"]
+        return "–" if s is None else f"{round(s * 100)}"
+
+    lines = ["🏆 აგენტების KPI (ბოლო 30 დღე)", "განცხ / დისც / შეხვ / კლიენტ / ქეისი", ""]
+    for i, v in enumerate(rows, 1):
+        lines.append(
+            f"{i}. {v['name']}: {v['pct']}%  ({_c(v, 'listings')}/{_c(v, 'discipline')}/"
+            f"{_c(v, 'meetings')}/{_c(v, 'clients')}/{_c(v, 'closed_cases')})"
+        )
     await update.message.reply_text("\n".join(lines))
 
 
@@ -1967,30 +1965,11 @@ async def check_new_tasks(context: ContextTypes.DEFAULT_TYPE):
         agent = agents_by_id.get(str(t.get("assigned_to")))
         if agent and agent.get("telegram_chat_id"):
             try:
-                # კლიენტის ნომერი ერთხელ: ზოგადი ლიდის სათაური უკვე შეიცავს
-                # ნომერს ("კლიენტი 5xx (ქირა)") — ამ შემთხვევაში ცალკე
-                # "კლიენტი: ..." ხაზს აღარ ვამატებთ (ადრე ნომერი ორჯერ ჩანდა).
-                extra = ""
-                phone = str(t.get("client_phone") or "").strip()
-                if phone and phone not in str(t.get("title") or ""):
-                    extra += f"\nკლიენტი: {phone}"
-                if str(t.get("owner_phone") or "").strip():
-                    extra += f"\nმესაკუთრე: {t['owner_phone']}"
-                if t.get("viewing_time"):
-                    extra += f"\nნახვის დრო: {t['viewing_time']}"
-                details = str(t.get("description") or "").strip()
-                details_line = f"\n📝 დეტალი: {details}" if details else ""
                 await context.bot.send_message(
                     chat_id=int(agent["telegram_chat_id"]),
-                    text=(
-                        f"🆕 ახალი დავალება: {t['title']}"
-                        f"{extra}"
-                        f"{details_line}\n"
-                        f"პრიორიტეტი: {t.get('priority') or '-'} | ვადა: {t.get('due_date') or '-'}\n"
-                        f"დახურვა: /done_{t['task_id']}"
-                    ),
+                    text=task_notify.assignment_text(t),
                     reply_markup=InlineKeyboardMarkup([[
-                        InlineKeyboardButton("✅ მივიღე კლიენტი", callback_data=f"taskseen:{t['task_id']}"),
+                        InlineKeyboardButton(task_notify.CONFIRM_TEXT, callback_data=f"taskseen:{t['task_id']}"),
                     ]]),
                 )
                 sheets.mark_task_notified(t["task_id"])
@@ -2012,32 +1991,106 @@ async def taskseen_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     row = sheets.mark_task_seen(task_id, agent["agent_id"])
     if not row:
-        await query.answer("ვერ მოიძებნა ან სხვა აგენტზეა მინიჭებული.", show_alert=True)
+        # ნამდვილად სხვაზეა მინიჭებული (გადაბარდა) ან დავალება წაშლილია — ვაჩვენებთ ზუსტად, ვისზეა
+        t = next((x for x in sheets.get_tasks() if str(x.get("task_id")) == task_id), None)
+        if t:
+            owner = sheets.agent_name_by_id(t.get("assigned_to")) or "სხვა აგენტი"
+            msg = f"ეს კლიენტი ახლა გადაბარებულია: {owner}."
+        else:
+            msg = "ეს დავალება ვერ მოიძებნა (შესაძლოა წაშლილია)."
+        await query.answer(msg, show_alert=True)
         return
     await query.answer("✅ დადასტურდა")
     try:
         await query.edit_message_reply_markup(reply_markup=None)
-        await query.message.reply_text("✅ დადასტურებული — გმადლობთ!")
+        if not row.get("already_seen"):
+            await query.message.reply_text("✅ დადასტურებული — გმადლობთ!")
     except Exception:
         # ღილაკის გასუფთავება/პასუხი ვერ მოხერხდა (მაგ. ძველი შეტყობინება) —
         # დადასტურება უკვე ჩაწერილია, ამიტომ მხოლოდ ვლოგავთ
         log.warning("კლიენტის მიღების დადასტურების პასუხი ვერ გაიგზავნა", exc_info=True)
+    if row.get("already_seen"):
+        return                       # უკვე დადასტურებული იყო — მენეჯერს ხელახლა არ ვაწუხებთ
 
-    created_by = str(row.get("created_by") or "")
-    text = f"✅ {agent.get('name')} დაადასტურა კლიენტის მიღება: {row.get('title')}"
-    if created_by and created_by != "admin":
-        creator = next((a for a in sheets.get_agents() if str(a.get("agent_id")) == created_by), None)
-        if creator and creator.get("telegram_chat_id"):
-            try:
-                await context.bot.send_message(chat_id=int(creator["telegram_chat_id"]), text=text)
-            except Exception:
-                log.exception("მენეჯერისთვის დადასტურების შეტყობინება ვერ გაეგზავნა")
-    else:
-        for admin_id in config.ADMIN_CHAT_IDS:
-            try:
-                await context.bot.send_message(chat_id=admin_id, text=text)
-            except Exception:
-                log.exception("ადმინისთვის დადასტურების შეტყობინება ვერ გაეგზავნა")
+    text = task_notify.ack_text(agent, row)
+    recipients = task_notify.manager_recipients(row, agent, sheets.get_agents(), config.ADMIN_CHAT_IDS)
+    for chat in recipients:
+        try:
+            await context.bot.send_message(chat_id=chat, text=text)
+        except Exception:
+            log.exception("დადასტურების შეტყობინება ვერ გაეგზავნა chat=%s", chat)
+
+
+_task_followup_sent: set[tuple] = set()
+UNDELIVERED_ALERT_MIN = 10      # ამდენი წუთის მერე ვერგაგზავნილ კლიენტზე მენეჯერს ვაფრთხილებთ
+UNCONFIRMED_REMIND_MIN = 15     # აგენტს ვახსენებთ, თუ კლიენტი არ დაუდასტურებია
+UNCONFIRMED_ESCALATE_MIN = 30   # მენეჯერს ვაცნობებთ, რომ აგენტმა ჯერ არ დაადასტურა
+
+
+async def check_task_followups(context: ContextTypes.DEFAULT_TYPE):
+    """5 წუთში ერთხელ — რომ არცერთი კლიენტი არ დაიკარგოს:
+      * ვერგაგზავნილი (აგენტს ტელეგრამი არ აქვს/გაგზავნა ვერ ხერხდება) -> მენეჯერს ერთხელ ეცნობება;
+      * გაგზავნილი, მაგრამ დაუდასტურებელი -> აგენტს შეხსენება, მერე მენეჯერს ესკალაცია.
+    მხოლოდ ბოლო 24 საათის ღია დავალებები; ყველა ნაბიჯი ერთხელ (ბოტის გადატვირთვამდე)."""
+    try:
+        tasks = sheets.get_tasks()
+        agents = sheets.get_agents()
+    except Exception:
+        log.exception("task follow-up შემოწმება ვერ მოხერხდა")
+        return
+    by_id = {str(a.get("agent_id")): a for a in agents}
+    now = datetime.datetime.now()
+    for t in tasks:
+        if str(t.get("status")) == "Done" or not t.get("assigned_to"):
+            continue
+        stamp = crm_time.parse_server_dt(t.get("updated_at") or t.get("created_at"))
+        if not stamp:
+            continue
+        age = (now - stamp).total_seconds() / 60
+        if age > 24 * 60:
+            continue
+        agent = by_id.get(str(t.get("assigned_to")))
+        if not agent:
+            continue
+        base = (str(t.get("task_id")), str(t.get("updated_at")))
+        notified = str(t.get("notified", "")).strip().lower() == "yes"
+        seen = str(t.get("seen", "")).strip().lower() == "yes"
+        title = t.get("title")
+        try:
+            if not notified:
+                if age >= UNDELIVERED_ALERT_MIN and (base, "undelivered") not in _task_followup_sent:
+                    _task_followup_sent.add((base, "undelivered"))
+                    reason = ("ტელეგრამში არ არის დარეგისტრირებული (/start)" if not agent.get("telegram_chat_id")
+                              else "გაგზავნა ვერ ხერხდება")
+                    recipients = (task_notify.manager_recipients(t, agent, agents, config.ADMIN_CHAT_IDS)
+                                  or list(config.ADMIN_CHAT_IDS))
+                    for chat in recipients:
+                        await context.bot.send_message(
+                            chat_id=chat,
+                            text=f"⚠️ კლიენტი ვერ მიუვიდა აგენტს {agent.get('name')}: {title}\nმიზეზი: {reason}. "
+                                 f"ვცდილობ ავტომატურად; საჭიროების შემთხვევაში გადააბარეთ სხვა აგენტს.")
+                continue
+            if seen:
+                continue
+            if age >= UNCONFIRMED_REMIND_MIN and (base, "remind") not in _task_followup_sent and agent.get("telegram_chat_id"):
+                _task_followup_sent.add((base, "remind"))
+                await context.bot.send_message(
+                    chat_id=int(agent["telegram_chat_id"]),
+                    text=f"⏰ კლიენტი ჯერ არ დაგიდასტურებიათ: {title}\nდააჭირეთ ღილაკს, რომ მიღება დაფიქსირდეს.",
+                    reply_markup=InlineKeyboardMarkup([[
+                        InlineKeyboardButton(task_notify.CONFIRM_TEXT, callback_data=f"taskseen:{t['task_id']}"),
+                    ]]),
+                )
+            if age >= UNCONFIRMED_ESCALATE_MIN and (base, "escalate") not in _task_followup_sent:
+                _task_followup_sent.add((base, "escalate"))
+                recipients = (task_notify.manager_recipients(t, agent, agents, config.ADMIN_CHAT_IDS)
+                              or list(config.ADMIN_CHAT_IDS))
+                for chat in recipients:
+                    await context.bot.send_message(
+                        chat_id=chat,
+                        text=f"🔔 {agent.get('name')}-მა {int(age)} წუთია კლიენტი არ დაადასტურა: {title}")
+        except Exception:
+            log.exception("task follow-up გაგზავნა ვერ მოხერხდა task=%s", t.get("task_id"))
 
 
 async def send_daily_report(context: ContextTypes.DEFAULT_TYPE):
@@ -2344,6 +2397,38 @@ async def remind_before_shift_edge(context: ContextTypes.DEFAULT_TYPE):
                 log.exception("ცვლის დასრულების შეხსენება ვერ გაეგზავნა agent_id=%s", agent_id)
 
 
+_challenge_alert_at = [0.0]
+
+
+async def check_myhome_challenge_alert(context: ContextTypes.DEFAULT_TYPE):
+    """MyHome/Cloudflare "ადამიანობის შემოწმება" (MYHOME_CHALLENGE) ბლოკავს ლოგინს -> ვორკერი რიგს აჩერებს.
+    ადმინს ვაფრთხილებთ (საათში მაქს. ერთხელ), რომ ერთხელ გაიაროს შემოწმება (myhome_login_helper.py)."""
+    try:
+        now = datetime.datetime.now()
+        hits = 0
+        for j in sheets.get_myhome_jobs():
+            if "MYHOME_CHALLENGE" not in str(j.get("error_message") or ""):
+                continue
+            stamp = crm_time.parse_server_dt(j.get("completed_at") or "") or crm_time.parse_server_dt(j.get("next_retry_at") or "")
+            if stamp and abs((now - stamp).total_seconds()) <= 20 * 60:
+                hits += 1
+    except Exception:
+        log.exception("MyHome challenge-შემოწმება ვერ მოხერხდა")
+        return
+    if hits and time.time() - _challenge_alert_at[0] > 3600:
+        _challenge_alert_at[0] = time.time()
+        for admin_id in config.ADMIN_CHAT_IDS:
+            try:
+                await context.bot.send_message(
+                    chat_id=admin_id,
+                    text=("🛑 MyHome ლოგინზე Cloudflare-ის ადამიანობის შემოწმებას ითხოვს — განცხადებების ატვირთვა დროებით "
+                          "დაპაუზებულია (job-ები რიგში რჩება, არაფერი იკარგება).\n"
+                          "ვორკერის კომპიუტერზე გაუშვით ერთხელ: python myhome_login_helper.py — გაიარეთ შემოწმება და "
+                          "შედით; მერე ატვირთვა თავისით გაგრძელდება."))
+            except Exception:
+                log.warning("challenge-შეტყობინება ადმინს ვერ გაეგზავნა", exc_info=True)
+
+
 async def check_myhome_jobs_stale(context: ContextTypes.DEFAULT_TYPE):
     """worker.py-ს (ცალკე კომპიუტერზე მომუშავე MyHome სქრეპერის queue
     worker, home-automation რეპო) crash-ის/restart-ის დაცვა:
@@ -2536,17 +2621,19 @@ async def check_late_arrivals(context: ContextTypes.DEFAULT_TYPE):
         mode = str(sched.get(weekday_key) or "off")
         if mode not in ("office_morning", "office_evening"):
             continue
-        start_hour = 10 if mode == "office_morning" else 16
-        deadline = now.replace(hour=start_hour, minute=config.ATTENDANCE_GRACE_MINUTES, second=0, microsecond=0)
-        if now < deadline:
+        try:
+            att = sheets.get_today_attendance(agent_id)
+            # გახსნილი ცვლა იკითხება რეალური clock_in-იდან: დროულად გახსნილზე
+            # არაფერი ეკუთვნის; გვიან გახსნილზე/ვერგახსნილზე — ერთი გაფრთხილება.
+            detail = shift_rules.late_arrival_due(mode, att, now)
+            if not detail:
+                continue
+            result = sheets.add_warning_once(
+                agent_id, "late_arrival", detail, exclusive_with=shift_rules.ATTENDANCE_TYPES)
+        except Exception:
+            log.exception("დაგვიანების შემოწმება agent_id=%s ჩავარდა", agent_id)
             continue
-        if sheets.has_warning_today(agent_id, "late_arrival"):
-            continue
-        att = sheets.get_today_attendance(agent_id)
-        if att and att.get("clock_in"):
-            continue
-        result = sheets.add_warning(agent_id, "late_arrival", f"ცვლა {start_hour}:00-ზე, ჯერ არ დაწყებია")
-        await _notify_warning(context, a, "late_arrival", f"ცვლის დაწყება: {start_hour}:00", result)
+        await _notify_warning(context, a, "late_arrival", detail, result)
 
 
 async def check_daily_compliance(context: ContextTypes.DEFAULT_TYPE):
@@ -2574,30 +2661,39 @@ async def check_daily_compliance(context: ContextTypes.DEFAULT_TYPE):
             continue
 
         att = sheets.get_today_attendance(agent_id)
-        if not att or not att.get("clock_in"):
-            if sheets.has_warning_today(agent_id, "no_show"):
-                continue
-            result = sheets.add_warning(agent_id, "no_show", f"{today}: არ გამოცხადებულა")
-            await _notify_warning(context, a, "no_show", today, result)
+        if not shift_rules.is_opened(att):
+            # "არ გამოცხადდა" მხოლოდ ვერგახსნილ ცვლაზე და მხოლოდ თუ დღეს
+            # "დაგვიანება" უკვე არ ჩაწერილა იმავე გამოუცხადებლობაზე.
+            if shift_rules.no_show_due(mode, att, now):
+                result = sheets.add_warning_once(
+                    agent_id, "no_show", f"{today}: არ გამოცხადებულა",
+                    exclusive_with=shift_rules.ATTENDANCE_TYPES)
+                await _notify_warning(context, a, "no_show", today, result)
             continue
 
-        if sheets.has_warning_today(agent_id, "late_report"):
-            continue
-        reports_today = [
-            r for r in sheets.get_reports(agent_id=agent_id)
-            if str(r.get("created_at", "")).startswith(today)
-        ]
-        if not reports_today:
-            result = sheets.add_warning(
-                agent_id, "late_report",
-                f"{today}: ანგარიში ({config.REPORT_DEADLINE_HOUR}:00-მდე) არ გამოგზავნილა",
-            )
-            await _notify_warning(context, a, "late_report", today, result)
+        # ანგარიში ეკუთვნის მხოლოდ მას, ვისაც დღეს კლიენტი ჰყავდა
+        # ("არა, არ ყოფილა" პასუხზე რეპორტი არ იქმნება — გაფრთხილება არ ეკუთვნის).
+        try:
+            had_clients = bool(sheets.get_today_client_phones(agent_id))
+        except Exception:
+            log.exception("კლიენტების შემოწმება ვერ მოხერხდა agent_id=%s", agent_id)
+            had_clients = False
+        if had_clients and not sheets.has_warning_today(agent_id, "late_report"):
+            reports_today = [
+                r for r in sheets.get_reports(agent_id=agent_id)
+                if crm_time.business_date_of_server_naive(r.get("created_at", "")) == today
+            ]
+            if not reports_today:
+                result = sheets.add_warning_once(
+                    agent_id, "late_report",
+                    f"{today}: ანგარიში ({config.REPORT_DEADLINE_HOUR}:00-მდე) არ გამოგზავნილა",
+                )
+                await _notify_warning(context, a, "late_report", today, result)
 
         # ონლაინ დღეზე: თუ 22:00-მდე ჯერ არ დაუსრულებია (/clockout) და
         # უკვე შეყვანილი რაოდენობა გეგმაზე ნაკლებია — გაფრთხილება
         # ავტომატურად, /clockout-ის დალოდების გარეშე.
-        if mode == "online" and not att.get("clock_out"):
+        if mode == "online" and not shift_rules.is_closed(att):
             if sheets.has_warning_today(agent_id, "quota_missed"):
                 continue
             # `count_submitted` მხოლოდ /clockout-ზეა დაფიქსირებული — ვინც
@@ -2611,7 +2707,7 @@ async def check_daily_compliance(context: ContextTypes.DEFAULT_TYPE):
                     f"{today}: {count_submitted}/{config.ONLINE_DAILY_QUOTA} "
                     f"(ონლაინ, {config.REPORT_DEADLINE_HOUR}:00-ის მდგომარეობით)"
                 )
-                result = sheets.add_warning(agent_id, "quota_missed", detail)
+                result = sheets.add_warning_once(agent_id, "quota_missed", detail)
                 await _notify_warning(context, a, "quota_missed", detail, result)
 
 
@@ -2933,6 +3029,7 @@ def main():
 
         app.job_queue.run_repeating(check_new_tasks, interval=config.POLL_INTERVAL_SECONDS, first=10)
         app.job_queue.run_repeating(check_late_arrivals, interval=900, first=120)
+        app.job_queue.run_repeating(check_task_followups, interval=300, first=200)
         app.job_queue.run_daily(
             send_daily_report,
             time=datetime.time(hour=config.DAILY_REPORT_HOUR, tzinfo=ZoneInfo(config.TIMEZONE)),
@@ -2948,6 +3045,7 @@ def main():
         app.job_queue.run_repeating(remind_before_shift_edge, interval=300, first=60)
         app.job_queue.run_repeating(check_manager_notifications, interval=300, first=90)
         app.job_queue.run_repeating(check_myhome_jobs_stale, interval=300, first=150)
+        app.job_queue.run_repeating(check_myhome_challenge_alert, interval=300, first=170)
         app.job_queue.run_repeating(check_worker_heartbeat, interval=300, first=240)
         app.job_queue.run_daily(
             check_missing_checkouts,

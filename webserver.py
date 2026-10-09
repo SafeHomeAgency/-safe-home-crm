@@ -36,6 +36,8 @@ import crm_extras
 import crm_security
 import crm_time
 import crm2_sync
+import kpi
+import task_notify
 import sheets
 
 log = logging.getLogger("safehome-crm-webapp")
@@ -362,6 +364,28 @@ def api_dashboard():
         except Exception:
             log.exception("agent dashboard ჩავარდა")
             return jsonify(error="მონაცემების ჩატვირთვა ვერ მოხერხდა"), 500
+    # KPI (შედეგი %) — 5 კომპონენტი (იხ. kpi.py); ჩავარდნა მთავარ დაშბორდს არ აფერხებს
+    try:
+        ids = {str(agent["agent_id"])} if agent else set()
+        if payload.get("admin"):
+            ids |= {str(t.get("agent_id")) for t in payload["admin"].get("team", [])}
+        kmap = kpi.compute(days, ids)
+        if agent and payload.get("agent") is not None:
+            payload["agent"]["kpi"] = kmap.get(str(agent["agent_id"]))
+        if payload.get("admin"):
+            for t in payload["admin"].get("team", []):
+                t["kpi"] = kmap.get(str(t.get("agent_id")))
+                _kp = (t["kpi"] or {}).get("pct")
+                t["kpi_pct"] = "" if _kp is None else f"{_kp}%"
+            team_ids = {str(t.get("agent_id")) for t in payload["admin"].get("team", [])}
+            payload["admin"]["ranking"] = [
+                {"agent_id": v["agent_id"], "name": v["name"], "team": v["team"], "rate": v["score"],
+                 "pct": v["pct"], "assigned": (v["components"]["clients"]["value"] or 0), "kpi": v}
+                for v in kpi.ranking({k: v for k, v in kmap.items() if k in team_ids}, 10)
+            ]
+    except Exception:
+        log.exception("KPI გამოთვლა ჩავარდა")
+    if agent:
         # ახალი ბარათები (Attendance + კვირის რაიონები) — თუ რომელიმე
         # ვერ ჩაიტვირთა, მთავარი დაშბორდი მაინც სრულად იტვირთება.
         try:
@@ -1441,7 +1465,23 @@ def api_tasks_new():
         deal_type=(deal_type if kind != "listing" else ""), by=created_by,
     )
     _audit(agent, admin, "task_create", "task", task_id, metadata={"kind": kind})
-    return jsonify(ok=True, task_id=task_id)
+
+    # დაუყოვნებლივ ვაგზავნით აგენტთან "✅ მივიღე კლიენტი" ღილაკით (ფონური job-ის ლოდინის გარეშე);
+    # "notified" მხოლოდ წარმატებულ გაგზავნაზე ინიშნება — წარუმატებელს check_new_tasks იმეორებს,
+    # ხოლო 10 წუთის მერე მენეჯერს ეცნობება (bot.check_task_followups).
+    delivered = False
+    try:
+        tgt = next((a for a in sheets.get_agents() if str(a.get("agent_id")) == str(target_agent_id)), None)
+        row_now = next((t for t in sheets.get_tasks() if str(t.get("task_id")) == task_id), None)
+        if tgt and row_now and str(tgt.get("telegram_chat_id") or "").strip():
+            delivered = _send_telegram_message(
+                int(tgt["telegram_chat_id"]), task_notify.assignment_text(row_now),
+                reply_markup=task_notify.confirm_markup(task_id))
+            if delivered:
+                sheets.mark_task_notified(task_id)
+    except Exception:
+        log.exception("ახალი კლიენტის დაუყოვნებლივი გაგზავნა ჩავარდა task=%s", task_id)
+    return jsonify(ok=True, task_id=task_id, delivered=delivered)
 
 
 @app.get("/api/tasks")
@@ -1495,18 +1535,18 @@ def api_tasks_ack():
         return jsonify(error="არასწორი მოთხოვნა"), 400
     row = sheets.mark_task_seen(task_id, agent["agent_id"])
     if not row:
-        return jsonify(error="ვერ მოიძებნა ან სხვა აგენტზეა მინიჭებული"), 404
+        t = next((x for x in sheets.get_tasks() if str(x.get("task_id")) == str(task_id)), None)
+        if t:
+            owner = sheets.agent_name_by_id(t.get("assigned_to")) or "სხვა აგენტი"
+            return jsonify(error=f"ეს კლიენტი ახლა გადაბარებულია: {owner}"), 409
+        return jsonify(error="დავალება ვერ მოიძებნა"), 404
+    if row.get("already_seen"):
+        return jsonify(ok=True, row=row, already=True)
 
-    # შემქმნელს (მენეჯერს/ადმინს) ეცნობება, რომ აგენტმა დაადასტურა.
-    created_by = str(row.get("created_by") or "")
-    text = f"✅ {agent.get('name')} დაადასტურა კლიენტის მიღება: {row.get('title')}"
-    if created_by and created_by != "admin":
-        creator = next((a for a in sheets.get_agents() if str(a.get("agent_id")) == created_by), None)
-        if creator and creator.get("telegram_chat_id"):
-            _send_telegram_message(int(creator["telegram_chat_id"]), text)
-    else:
-        for admin_id in config.ADMIN_CHAT_IDS:
-            _send_telegram_message(admin_id, text)
+    # მენეჯერს (შემქმნელს/თიმლიდერს; ადმინის შექმნილზე ადმინებს) ეცნობება დადასტურება.
+    text = task_notify.ack_text(agent, row)
+    for chat in task_notify.manager_recipients(row, agent, sheets.get_agents(), config.ADMIN_CHAT_IDS):
+        _send_telegram_message(chat, text)
     return jsonify(ok=True, row=row)
 
 
@@ -1542,16 +1582,9 @@ def api_tasks_reassign():
     _audit(agent, admin, "task_reassign", "task", task_id, metadata={"to_agent_id": to_agent_id})
 
     if to_agent.get("telegram_chat_id"):
-        title = str(row.get("title") or "")
-        phone = str(row.get("client_phone") or "").strip()
-        msg = f"📋 გადმოგეცით დავალება: {title}"
-        if phone and phone not in title:
-            msg += f"\nკლიენტი: {phone}"
-        if str(row.get("owner_phone") or "").strip():
-            msg += f"\nმესაკუთრე: {row.get('owner_phone')}"
-        if str(row.get("description") or "").strip():
-            msg += f"\n📝 დეტალი: {row.get('description')}"
-        sent_ok = _send_telegram_message(int(to_agent["telegram_chat_id"]), msg)
+        msg = task_notify.assignment_text(row, header="📋 გადმოგეცით დავალება")
+        sent_ok = _send_telegram_message(
+            int(to_agent["telegram_chat_id"]), msg, reply_markup=task_notify.confirm_markup(task_id))
         # მნიშვნელოვანია: "notified"-ად მხოლოდ მაშინ ვნიშნავთ, თუ
         # გაგზავნა ნამდვილად წარმატებული იყო. თუ ეს ერთხელ (ქსელის
         # ხანმოკლე ჩავარდნით, ან Telegram API-ის დროებითი შეცდომით)
@@ -1894,7 +1927,7 @@ def api_clockout():
         if quota and total < quota:
             today = datetime.datetime.now().strftime("%Y-%m-%d")
             detail = f"{today}: {total}/{quota} (Mini App-იდან)"
-            warn_result = sheets.add_warning(agent_id, "quota_missed", detail)
+            warn_result = sheets.add_warning_once(agent_id, "quota_missed", detail)
             # დამტკიცებული Day off დღეს -> გაფრთხილება არ იწერება
             # (skipped) და არავის ეგზავნება შეტყობინება.
             if not warn_result.get("skipped"):
