@@ -2429,6 +2429,46 @@ async def check_myhome_challenge_alert(context: ContextTypes.DEFAULT_TYPE):
                 log.warning("challenge-შეტყობინება ადმინს ვერ გაეგზავნა", exc_info=True)
 
 
+async def check_contract_deadlines(context: ContextTypes.DEFAULT_TYPE):
+    """ხელშეკრულებების ვადები: შეხსენება აგენტს ვადამდე; დაგვიანების შეტყობინება აგენტს/გუნდის ლიდერს/პასუხისმგებელს/ადმინს.
+    დაგვიანება გამოითვლება აქტიური გაცემის (Issue) ჩანაწერიდან; ერთი და იგივე შეტყობინება ორჯერ არ იგზავნება."""
+    try:
+        import contracts_jobs
+        items = contracts_jobs.pending_notifications(lambda: sheets.get_agents())
+    except Exception:
+        log.exception("ხელშეკრულებების ვადების შემოწმება ვერ გაეშვა")
+        return
+    delivered: dict[tuple, bool] = {}
+    for it in items:
+        key = (it["issue_id"], it["flag"])
+        try:
+            await context.bot.send_message(chat_id=it["chat_id"], text=it["text"])
+            delivered[key] = True
+        except Exception:
+            delivered.setdefault(key, False)
+            log.warning("ხელშეკრულების შეტყობინება ვერ გაიგზავნა (%s)", it.get("chat_id"), exc_info=True)
+    for (issue_id, flag), ok in delivered.items():
+        if ok:
+            contracts_jobs.mark_sent({"issue_id": issue_id, "flag": flag})
+
+
+async def send_contracts_daily_summary(context: ContextTypes.DEFAULT_TYPE):
+    """ადმინებისა და პასუხისმგებელი თანამშრომლების ყოველდღიური შეჯამება ხელშეკრულებების მარაგსა და ვადებზე."""
+    try:
+        import contracts_jobs
+        text = contracts_jobs.daily_summary_text()
+    except Exception:
+        log.exception("ხელშეკრულებების დღიური შეჯამება ვერ ჩამოყალიბდა")
+        return
+    if not text:
+        return
+    for cid in sorted(set(config.ADMIN_CHAT_IDS) | set(config.CONTRACT_STAFF_CHAT_IDS)):
+        try:
+            await context.bot.send_message(chat_id=cid, text=text)
+        except Exception:
+            log.warning("ხელშეკრულებების შეჯამება ვერ გაეგზავნა (%s)", cid, exc_info=True)
+
+
 async def check_myhome_jobs_stale(context: ContextTypes.DEFAULT_TYPE):
     """worker.py-ს (ცალკე კომპიუტერზე მომუშავე MyHome სქრეპერის queue
     worker, home-automation რეპო) crash-ის/restart-ის დაცვა:
@@ -2853,6 +2893,13 @@ def main():
             "და რომ სერვის-აქაუნთს Editor წვდომა აქვს ცხრილზე."
         )
         raise
+    # ხელშეკრულებების ახალი ცხრილები (ContractRequests/Copies/IssueHistory/AuditLog) — იდემპოტენტურია, არსებულს არ ეხება;
+    # ჩავარდნა ბოტს არ აჩერებს (ცხრილები ზარმაცად შეიქმნება პირველ გამოყენებაზე)
+    try:
+        import contracts_store
+        contracts_store.ensure_tabs()
+    except Exception:
+        log.exception("ხელშეკრულებების ცხრილების მომზადება ვერ მოხერხდა — მოდული პირველ გამოყენებაზე სცდის ხელახლა")
 
     app = Application.builder().token(config.TELEGRAM_BOT_TOKEN).build()
     app.add_error_handler(on_error)
@@ -3047,6 +3094,11 @@ def main():
         app.job_queue.run_repeating(check_myhome_jobs_stale, interval=300, first=150)
         app.job_queue.run_repeating(check_myhome_challenge_alert, interval=300, first=170)
         app.job_queue.run_repeating(check_worker_heartbeat, interval=300, first=240)
+        app.job_queue.run_repeating(check_contract_deadlines, interval=900, first=260)
+        app.job_queue.run_daily(
+            send_contracts_daily_summary,
+            time=datetime.time(hour=config.CONTRACT_SUMMARY_HOUR, minute=5, tzinfo=ZoneInfo(config.TIMEZONE)),
+        )
         app.job_queue.run_daily(
             check_missing_checkouts,
             time=datetime.time(hour=config.MISSING_CHECKOUT_HOUR, minute=0, tzinfo=ZoneInfo(config.TIMEZONE)),

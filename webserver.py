@@ -2807,6 +2807,26 @@ myhome_accounts_api.register(
 )
 
 
+# ხელშეკრულებების აღრიცხვა (Contract Management): /api/contracts/... — ახალი endpoint-ები, არსებულს არ ცვლის
+import contracts_api  # noqa: E402
+
+
+def _crm2_find_client(phone):
+    try:
+        import crm2_store
+        return crm2_store.get_client_by_phone(phone)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+contracts_api.register(
+    app, authed=_authed_agent, is_team_lead=_is_team_lead, audit=_audit, rate_limited=rate_limited,
+    get_agents=lambda: sheets.get_agents(), get_meetings=lambda: sheets.get_meetings(),
+    chat_id_fn=_requester_chat_id, notify=lambda chat_id, text: _send_telegram_message(chat_id, text),
+    find_client=_crm2_find_client,
+)
+
+
 # ჩავარდნილი MyHome job-ების ერთიანად ხელახლა გაშვება (ადმინი) — უსაფრთხოების წესებით
 import myhome_bulk_retry  # noqa: E402
 

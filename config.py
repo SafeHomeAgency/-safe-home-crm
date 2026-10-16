@@ -118,6 +118,8 @@ RATE_LIMITS = {
     "crm2_read":    (120, 60),   # CRM 2.0: კლიენტების სია/ბარათი/follow-up-ები (წაკითხვა)
     "crm2_write":   (30, 60),    # CRM 2.0: follow-up/შენიშვნის ჩაწერა
     "myhome_account": (10, 60),  # ადმინის ფორმა: MyHome ანგარიშის დამატება
+    "contracts_read": (120, 60),   # ხელშეკრულებების მოდული: სიები/დეტალები (წაკითხვა)
+    "contracts_write": (40, 60),   # ხელშეკრულებების მოდული: მოთხოვნა/გაცემა/დაბრუნება
 }
 RATE_LIMIT_ENABLED = os.environ.get("RATE_LIMIT_ENABLED", "1").strip().lower() not in ("0", "false", "no")
 
@@ -165,6 +167,21 @@ KPI_WARNING_PENALTY = float(os.environ.get("KPI_WARNING_PENALTY", "0.10"))
 # ჯერ არ დაუწყია — ონლაინ რეჟიმს ფიქსირებული საწყისი საათი არა აქვს,
 # ამიტომ ეს მხოლოდ ერთხელადი, დღის შუა საათის შეხსენებაა.
 ONLINE_START_REMINDER_HOUR = int(os.environ.get("ONLINE_START_REMINDER_HOUR", "12"))
+
+# --- ხელშეკრულებების აღრიცხვა (Contract Management) --------------------
+# CONTRACT_STAFF_CHAT_IDS — Telegram ID-ები (მძიმით), ვისაც ფიზიკური გაცემა/მიღება შეუძლია (ადმინებს ეს ყოველთვის აქვთ).
+# თიმლიდერს ეს უფლება მხოლოდ მაშინ აქვს, თუ აქ არის ჩამოთვლილი.
+CONTRACT_STAFF_CHAT_IDS = {
+    int(x.strip())
+    for x in os.environ.get("CONTRACT_STAFF_CHAT_IDS", "").split(",")
+    if x.strip().lstrip("-").isdigit()
+}
+# გაცემისას დაბრუნების ვადა ნაგულისხმევად (საათი), თუ გამცემმა არ მიუთითა
+CONTRACT_DEFAULT_RETURN_HOURS = int(os.environ.get("CONTRACT_DEFAULT_RETURN_HOURS", "48"))
+# რამდენი საათით ადრე შევახსენოთ აგენტს დაბრუნების ვადა
+CONTRACT_REMINDER_HOURS = int(os.environ.get("CONTRACT_REMINDER_HOURS", "4"))
+# რომელ საათზე (თბილისი) მიდის ადმინებს ყოველდღიური შეჯამება
+CONTRACT_SUMMARY_HOUR = int(os.environ.get("CONTRACT_SUMMARY_HOUR", "9"))
 
 # --- Attendance + ოფისის GPS ვერიფიკაცია (ახალი მოდული) --------------
 # ყველა ეს მნიშვნელობა ნაგულისხმევია; ადმინს შეუძლია Mini App-იდან

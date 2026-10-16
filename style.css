@@ -628,8 +628,19 @@ body {
 
 .chk-row { display: flex; align-items: center; gap: 10px; }
 .chk-row > input[type=checkbox], .chk-pick { width: 20px; height: 20px; flex: none; accent-color: var(--gold); }
+/* #warnBulk — ბარის კონტეინერი: sticky უნდა იყოს ის (არა თვითონ ბარი), რადგან ბარის მშობელი მხოლოდ მისი სიმაღლისაა და
+   sticky მასში არ მუშაობს — გრძელ სიაში მონიშვნისას პანელი ეკრანიდან გადიოდა და "არ ჩანდა" */
+#warnBulk:empty { display: none; }
+/* მონიშვნისას პანელი ეკრანის ქვედა ნაწილზე მიმაგრდება (ქვედა მენიუს ზემოთ) — სიის რომელ ადგილასაც არ უნდა იყოს მომხმარებელი,
+   ყოველთვის ჩანს და სქროლი არ სჭირდება */
+#warnBulk:not(:empty) {
+  position: fixed; left: 50%; transform: translateX(-50%); bottom: 96px; z-index: 60;
+  width: min(560px, calc(100% - 24px)); background: var(--bg); border-radius: 12px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, .45);
+}
+#warnBulk .bulk-bar { margin-bottom: 0; }
 .bulk-bar {
-  position: sticky; top: 0; z-index: 5; display: flex; gap: 8px; align-items: center; flex-wrap: wrap;
+  position: relative; z-index: 5; display: flex; gap: 8px; align-items: center; flex-wrap: wrap;
   padding: 9px 10px; margin-bottom: 10px; border-radius: 12px;
   background: rgba(201, 162, 39, .12); border: 1px solid rgba(201, 162, 39, .3); font-size: 12.5px;
 }

@@ -56,6 +56,7 @@ const AGENT_TABS = [
   { id: "questions", label: "კითხვები", icon: "💬", lazy: true },
   { id: "regulations", label: "ინსტრუქცია", icon: "📘", lazy: true },
   { id: "crm2", label: "CRM", icon: "🗃️", lazy: true },
+  { id: "contracts", label: "ხელშეკრულებები", icon: "📑", lazy: true },
 ];
 const ADMIN_TABS = [
   { id: "overview", label: "მიმოხილვა", icon: "📊" },
@@ -80,6 +81,7 @@ const ADMIN_TABS = [
   { id: "questions", label: "კითხვები", icon: "💬", lazy: true },
   { id: "regulations", label: "ინსტრუქცია/წესები", icon: "📘", lazy: true },
   { id: "crm2", label: "CRM", icon: "🗃️", lazy: true },
+  { id: "contracts", label: "ხელშეკრულებები", icon: "📑", lazy: true },
 ];
 
 const PERIODS = [
@@ -1900,7 +1902,9 @@ function bindMeetingsActions(payload) {
     el.onclick = () => {
       const m = rows[parseInt(el.dataset.meetingIdx, 10)];
       if (!m) return;
-      openDetail(m.address || m.district || "შეხვედრა", MEETING_FIELD_LABELS.map(([k, label]) => ({ label, value: m[k] })));
+      openDetail(m.address || m.district || "შეხვედრა", MEETING_FIELD_LABELS.map(([k, label]) => ({ label, value: m[k] })),
+        `<div class="share-box" id="ctMeetingBox"><div class="lbl">📑 ხელშეკრულებები</div><div class="sub">იტვირთება…</div></div>`);
+      ctLoadMeetingBox(m);
     };
   });
 }
@@ -3430,9 +3434,432 @@ function bindDistricts(p) {
   };
 }
 
+/* ================================================ ხელშეკრულებები (Contract Management) =====
+   მონაცემი: /api/contracts/... ; უფლებები სერვერზეა (აგენტი — საკუთარი, თიმლიდერი — გუნდის, თანამშრომელი/ადმინი — ყველა).
+   frontend მხოლოდ ღილაკებს მალავს/აჩვენებს (caps) — რეალურ შემოწმებას სერვერი აკეთებს.
+   არსებულ ტაბებს არ ეხება. შეხვედრის დეტალში ემატება "+ ხელშეკრულების მოთხოვნა" (იხ. bindMeetingsActions). */
+if (!state.ctSection) state.ctSection = "requests";
+if (!state.ctFilter) state.ctFilter = { status: "", agent: "", type: "", q: "" };
+if (!state.ctInv) state.ctInv = { type: "", status: "", q: "" };
+
+const CT_REQ_CLS = { REQUESTED: "amber", APPROVED: "amber", ISSUED: "green", PARTIALLY_ISSUED: "amber", COMPLETED: "gray", CANCELLED: "gray" };
+const CT_PH_CLS = { AVAILABLE: "green", RESERVED: "amber", ISSUED: "amber", RETURNED_UNUSED: "green", USED_SIGNED: "gray",
+  DAMAGED: "red", LOST: "red", UNDER_REVIEW: "amber" };
+
+function ctPost(path, body) { return api(path, { method: "POST", body: JSON.stringify(body || {}) }); }
+function ctReload() { delete lazyCache.contracts; closeDetail(); renderContent(); }
+function ctIdemKey() {
+  try { if (window.crypto && crypto.randomUUID) return crypto.randomUUID(); } catch (e) { /* ignore */ }
+  return "k" + Date.now().toString(36) + Math.random().toString(36).slice(2, 10);
+}
+function ctReqBadge(r) { return `<span class="badge ${CT_REQ_CLS[r.request_status] || "gray"}">${esc(r.status_label || r.request_status)}</span>`; }
+function ctCopyBadge(c) { return `<span class="badge ${CT_PH_CLS[c.physical_status] || "gray"}">${esc(c.status_label || c.physical_status)}</span>`; }
+function ctOptions(map, selected, allLabel) {
+  return `<option value="">${esc(allLabel)}</option>` + Object.keys(map).map((k) => `<option value="${esc(k)}" ${selected === k ? "selected" : ""}>${esc(map[k])}</option>`).join("");
+}
+
+function ctIssueRow(i, idx, withAgent) {
+  return `<div class="list-row clickable" data-ct-issue="${idx}">
+    <div class="avatar">${i.overdue ? "⏰" : "📑"}</div>
+    <div class="main">
+      <div class="title" style="font-family:monospace;letter-spacing:.5px">${esc(i.control_code)}${i.overdue ? ` <span class="badge red">ვადაგადაცილებული</span>` : ""}</div>
+      <div class="sub">${withAgent ? esc(i.agent_name) + " · " : ""}${esc(i.type_label || "")} · ${esc(i.property_address || "")}</div>
+      <div class="sub">გაიცა: ${esc(i.issued_at)} · დასაბრუნებელი: <b>${esc(i.due_at)}</b></div>
+    </div>
+  </div>`;
+}
+
+function renderContracts(p) {
+  p = p || {};
+  const caps = p.caps || {};
+  const reqs = p.requests || [];
+  const active = p.active_issues || [];
+  const manager = !!(caps.admin || caps.staff || caps.lead);
+  let html = "";
+
+  if (!manager) {                                   // ---- აგენტი: მინიმალისტური ხედი
+    html += `<div class="card"><h2>📑 ჩემი გატანილი ხელშეკრულებები <span class="cnt">${active.length}</span></h2>
+      ${active.length ? active.map((i, k) => ctIssueRow(i, k, false)).join("") : `<div class="empty">ამჟამად ხელშეკრულება არ გაქვთ გატანილი</div>`}
+    </div>
+    <div class="card"><h2>📋 ჩემი მოთხოვნები <span class="cnt">${reqs.length}</span></h2>
+      <div class="sub" style="margin-bottom:8px">ახალი მოთხოვნისთვის: „შეხვედრები“ → აირჩიეთ შეხვედრა → „+ ხელშეკრულების მოთხოვნა“.</div>
+      ${reqs.length ? reqs.map((r, k) => ctReqRow(r, k)).join("") : `<div class="empty">მოთხოვნა ჯერ არ გაქვთ</div>`}
+    </div>`;
+    return html;
+  }
+
+  // ---- მენეჯერი/თანამშრომელი/ადმინი
+  const s = p.summary || {};
+  const stat = (n, l) => `<div class="stat"><div class="num">${esc(n == null ? 0 : n)}</div><div class="lbl">${esc(l)}</div></div>`;
+  html += `<div class="card"><h2>📑 ხელშეკრულებები — მიმოხილვა</h2>
+    <div class="grid3">
+      ${stat(s.total, "სულ ეგზემპლარი")}${stat(s.available, "ხელმისაწვდომი")}${stat(s.reserved, "დაჯავშნილი")}
+      ${stat(s.issued, "აგენტებთან")}${stat(s.due_today, "დღეს დასაბრუნებელი")}${stat(s.overdue, "ვადაგადაცილებული")}
+      ${stat(s.returned_unused, "დაბრუნებული გამოუყენებელი")}${stat(s.signed, "ხელმოწერილი")}${stat(s.in_process, "მოთხოვნა პროცესში")}
+      ${stat(s.damaged, "დაზიანებული")}${stat(s.lost, "დაკარგული")}${stat(s.under_review, "შესამოწმებელი")}
+    </div>
+    <div class="sub" style="margin-top:10px">${Object.keys(p.stock || {}).map((t) => `${esc((p.types || {})[t] || t)}: თავისუფალი <b>${p.stock[t].available}</b>/${p.stock[t].total}`).join("<br>")}</div>
+  </div>`;
+
+  const sections = [["requests", "მოთხოვნები"], ["active", "გატანილი"], ["overdue", "დაგვიანება"], ["problems", "პრობლემური"]];
+  if (caps.staff) sections.push(["inventory", "მარაგი"]);
+  sections.push(["history", "დაბრუნებები"]);
+  if (!sections.some(([id]) => id === state.ctSection)) state.ctSection = "requests";
+  html += `<div class="card"><div class="period-switch" id="ctSections" style="flex-wrap:wrap">
+    ${sections.map(([id, l]) => `<button data-ct-sec="${id}" class="${state.ctSection === id ? "active" : ""}">${l}</button>`).join("")}</div>`;
+
+  if (state.ctSection === "requests") {
+    const f = state.ctFilter;
+    const agents = [...new Map(reqs.map((r) => [r.agent_id, r.agent_name])).entries()];
+    const shown = reqs.filter((r) =>
+      (!f.status || r.request_status === f.status) && (!f.agent || r.agent_id === f.agent) && (!f.type || r.contract_type === f.type)
+      && (!f.q || [r.property_address, r.request_id, r.agent_name, r.property_id, r.meeting_id].join(" ").toLowerCase().includes(f.q.toLowerCase())));
+    html += `<div class="qa-compose" style="margin-top:10px">
+      <select id="ctFStatus">${ctOptions(p.request_statuses || {}, f.status, "ყველა სტატუსი")}</select>
+      <select id="ctFType">${ctOptions(p.types || {}, f.type, "ყველა ტიპი")}</select>
+      <select id="ctFAgent"><option value="">ყველა აგენტი</option>${agents.map(([id, n]) => `<option value="${esc(id)}" ${f.agent === id ? "selected" : ""}>${esc(n)}</option>`).join("")}</select>
+      <input id="ctFQ" placeholder="ძებნა: მისამართი / მოთხოვნის ID / აგენტი" value="${esc(f.q)}">
+    </div>
+    <h2 style="margin-top:12px">📋 მოთხოვნები <span class="cnt">${shown.length}</span></h2>
+    ${shown.length ? shown.map((r) => ctReqRow(r, reqs.indexOf(r))).join("") : `<div class="empty">ვერაფერი მოიძებნა</div>`}`;
+  } else if (state.ctSection === "active") {
+    html += `<h2 style="margin-top:12px">📑 აგენტებთან გატანილი <span class="cnt">${active.length}</span></h2>
+      ${active.length ? active.map((i, k) => ctIssueRow(i, k, true)).join("") : `<div class="empty">ახლა არავისთანაა</div>`}`;
+  } else if (state.ctSection === "overdue") {
+    const od = (p.overdue || []), td = (p.today_due || []);
+    html += `<h2 style="margin-top:12px">⏰ ვადაგადაცილებული <span class="cnt">${od.length}</span></h2>
+      ${od.length ? od.map((i, k) => ctIssueRow(i, k, true)).join("") : `<div class="empty">ვადაგადაცილებული არ არის ✅</div>`}
+      <h2 style="margin-top:14px">📅 დღეს დასაბრუნებელი <span class="cnt">${td.length}</span></h2>
+      ${td.length ? td.map((i, k) => ctIssueRow(i, 1000 + k, true)).join("") : `<div class="empty">დღეს დასაბრუნებელი არ არის</div>`}`;
+  } else if (state.ctSection === "problems") {
+    const pc = p.problem_copies || [];
+    html += `<h2 style="margin-top:12px">⚠️ დაზიანებული / დაკარგული / შესამოწმებელი <span class="cnt">${pc.length}</span></h2>
+      ${pc.length ? pc.map((c, k) => ctCopyRow(c, k)).join("") : `<div class="empty">პრობლემური ეგზემპლარი არ არის ✅</div>`}`;
+  } else if (state.ctSection === "inventory" && caps.staff) {
+    const f = state.ctInv;
+    const copies = (p.copies || []).filter((c) => (!f.type || c.contract_type === f.type) && (!f.status || c.physical_status === f.status)
+      && (!f.q || String(c.control_code).toUpperCase().includes(f.q.toUpperCase())));
+    html += `<div class="qa-compose" style="margin-top:10px">
+      <div class="sub"><b>ახალი ეგზემპლარების დამატება მარაგში</b> (კოდები სერვერზე ენიჭება)</div>
+      <select id="ctNewType">${ctOptions(p.types || {}, "", "აირჩიეთ ტიპი")}</select>
+      <input id="ctNewQty" type="number" min="1" max="200" value="10" placeholder="რაოდენობა">
+      <input id="ctNewLoc" placeholder="შენახვის ადგილი (არასავალდებულო)">
+      <button class="btn" id="ctNewBtn">➕ დამატება</button>
+    </div>
+    <div class="qa-compose" style="margin-top:12px">
+      <select id="ctIType">${ctOptions(p.types || {}, f.type, "ყველა ტიპი")}</select>
+      <select id="ctIStatus">${ctOptions(p.physical_statuses || {}, f.status, "ყველა სტატუსი")}</select>
+      <input id="ctIQ" placeholder="ძებნა კოდით (SH-…)" value="${esc(f.q)}">
+    </div>
+    <h2 style="margin-top:12px">📦 ეგზემპლარები <span class="cnt">${copies.length}</span></h2>
+    ${copies.length ? copies.slice().reverse().slice(0, 200).map((c, k) => ctCopyRow(c, (p.copies || []).indexOf(c))).join("") : `<div class="empty">ვერაფერი მოიძებნა</div>`}`;
+  } else if (state.ctSection === "history") {
+    const rr = p.recent_returns || [];
+    html += `<h2 style="margin-top:12px">↩️ ბოლო დაბრუნებები <span class="cnt">${rr.length}</span></h2>
+      ${rr.length ? rr.map((i, k) => `<div class="list-row clickable" data-ct-ret="${k}"><div class="avatar">↩️</div><div class="main">
+        <div class="title" style="font-family:monospace">${esc(i.control_code)} <span class="badge gray">${esc(i.outcome_label || i.outcome)}</span></div>
+        <div class="sub">${esc(i.agent_name)} · დაბრუნდა: ${esc(i.returned_at)} · მიიღო: ${esc(i.received_by)}</div></div></div>`).join("") : `<div class="empty">ჯერ არ არის</div>`}`;
+  }
+  html += `</div>`;
+  return html;
+}
+
+function ctReqRow(r, idx) {
+  return `<div class="list-row clickable" style="align-items:flex-start" data-ct-req="${idx}">
+    <div class="avatar">📑</div>
+    <div class="main">
+      <div class="title" style="white-space:normal">${esc(r.property_address || "მისამართი უცნობია")}</div>
+      <div class="sub">${esc(r.agent_name)} · ${esc(r.type_label)} · ${esc(r.issued_count)}/${esc(r.copy_count)} ეგზ.</div>
+      <div class="sub">${esc(r.request_id)} · ${esc(r.request_created_at)}</div>
+    </div>
+    <div class="side">${ctReqBadge(r)}</div>
+  </div>`;
+}
+function ctCopyRow(c, idx) {
+  return `<div class="list-row clickable" data-ct-copy="${idx}">
+    <div class="avatar">📄</div>
+    <div class="main">
+      <div class="title" style="font-family:monospace;letter-spacing:.5px">${esc(c.control_code)}</div>
+      <div class="sub">${esc(c.type_label)}${c.storage_location ? " · " + esc(c.storage_location) : ""}</div>
+    </div>
+    <div class="side">${ctCopyBadge(c)}</div>
+  </div>`;
+}
+
+function bindContractsActions(p) {
+  p = p || {};
+  const caps = p.caps || {};
+  const reqs = p.requests || [];
+  const active = p.active_issues || [];
+  document.querySelectorAll("[data-ct-sec]").forEach((b) => {
+    b.onclick = () => { state.ctSection = b.dataset.ctSec; renderContent(); };
+  });
+  document.querySelectorAll("[data-ct-req]").forEach((el) => {
+    el.onclick = () => { const r = reqs[parseInt(el.dataset.ctReq, 10)]; if (r) ctOpenRequest(r.request_id); };
+  });
+  document.querySelectorAll("[data-ct-issue]").forEach((el) => {
+    el.onclick = () => {
+      const n = parseInt(el.dataset.ctIssue, 10);
+      let i;
+      if (n >= 1000) i = (p.today_due || [])[n - 1000];                    // „დღეს დასაბრუნებელი“ (დაგვიანების ტაბში)
+      else if (state.ctSection === "overdue") i = (p.overdue || [])[n];
+      else i = active[n];
+      if (i) ctOpenIssue(i, caps);
+    };
+  });
+  document.querySelectorAll("[data-ct-copy]").forEach((el) => {
+    el.onclick = () => {
+      const n = parseInt(el.dataset.ctCopy, 10);
+      const c = (state.ctSection === "problems" ? (p.problem_copies || []) : (p.copies || []))[n];
+      if (c) ctOpenCopy(c, caps);
+    };
+  });
+  document.querySelectorAll("[data-ct-ret]").forEach((el) => {
+    el.onclick = () => { const i = (p.recent_returns || [])[parseInt(el.dataset.ctRet, 10)]; if (i) ctOpenIssue(i, caps); };
+  });
+  // ფილტრები
+  const bindF = (id, key, obj, ev) => { const el = document.getElementById(id); if (el) el[ev || "onchange"] = () => { obj[key] = el.value; renderContent(); }; };
+  bindF("ctFStatus", "status", state.ctFilter); bindF("ctFType", "type", state.ctFilter); bindF("ctFAgent", "agent", state.ctFilter);
+  const q = document.getElementById("ctFQ");
+  if (q) q.onchange = () => { state.ctFilter.q = q.value; renderContent(); };
+  bindF("ctIType", "type", state.ctInv); bindF("ctIStatus", "status", state.ctInv);
+  const iq = document.getElementById("ctIQ");
+  if (iq) iq.onchange = () => { state.ctInv.q = iq.value; renderContent(); };
+  const nb = document.getElementById("ctNewBtn");
+  if (nb) nb.onclick = async () => {
+    const type = document.getElementById("ctNewType").value;
+    const qty = parseInt(document.getElementById("ctNewQty").value, 10);
+    if (!type) { toast("აირჩიეთ ტიპი"); return; }
+    if (!qty || qty < 1) { toast("მიუთითეთ რაოდენობა"); return; }
+    nb.disabled = true;
+    try {
+      const r = await ctPost("/api/contracts/copies", { contract_type: type, quantity: qty, storage_location: document.getElementById("ctNewLoc").value });
+      openDetail("დაემატა " + r.count + " ეგზემპლარი", [],
+        `<div class="sub" style="margin:8px 0">დაბეჭდვამდე გადაიწერეთ საკონტროლო კოდები:</div>
+         <div style="font-family:monospace;line-height:1.9;user-select:all">${r.copies.map((c) => esc(c.control_code)).join("<br>")}</div>
+         <button class="btn" id="ctDoneBtn" style="margin-top:10px">კარგი</button>`);
+      document.getElementById("ctDoneBtn").onclick = ctReload;
+    } catch (e) { toast(e.message); nb.disabled = false; }
+  };
+}
+
+/* მოთხოვნის დეტალი + მოქმედებები (უფლებების მიხედვით; სერვერი ამას მაინც ამოწმებს) */
+async function ctOpenRequest(rid) {
+  let d;
+  try { d = await api("/api/contracts/requests/" + encodeURIComponent(rid)); } catch (e) { toast(e.message); return; }
+  const r = d.request, caps = d.caps || {};
+  const fields = [
+    { label: "მოთხოვნის ID", value: r.request_id }, { label: "სტატუსი", value: r.status_label },
+    { label: "ხელშეკრულების ტიპი", value: r.type_label }, { label: "ეგზემპლარი (გაცემული/მოთხოვნილი)", value: `${r.issued_count}/${r.copy_count}` },
+    { label: "აგენტი", value: r.agent_name }, { label: "მისამართი", value: r.property_address },
+    { label: "MyHome ID", value: r.myhome_id }, { label: "SS.ge ID", value: r.ssge_id },
+    { label: "კლიენტის ტელეფონი", value: r.client_phone }, { label: "შეხვედრა", value: `${r.meeting_datetime || ""} (ID: ${r.meeting_id})` },
+    { label: "მოთხოვნის დრო", value: r.request_created_at }, { label: "დამტკიცა", value: r.approved_by ? `${r.approved_by} · ${r.approved_at}` : "" },
+    { label: "კომენტარი", value: r.notes }, { label: "გაუქმების მიზეზი", value: r.cancelled_reason },
+  ];
+  const issues = d.issues || [];
+  const status = r.request_status;
+  let extra = `<div class="share-box"><div class="lbl">📑 გაცემა/დაბრუნების ისტორია</div>${issues.length ? issues.map((i, k) => `
+      <div class="list-row clickable" data-ctm-issue="${k}"><div class="main">
+        <div class="title" style="font-family:monospace">${esc(i.control_code)} ${i.open ? (i.overdue ? `<span class="badge red">ვადაგადაცილებული</span>` : `<span class="badge amber">აგენტთანაა</span>`) : `<span class="badge gray">${esc(i.outcome_label || i.outcome)}</span>`}</div>
+        <div class="sub">გაიცა ${esc(i.issued_at)} (${esc(i.issued_by)}) · ვადა ${esc(i.due_at)}</div>
+        ${i.returned_at ? `<div class="sub">დაბრუნდა ${esc(i.returned_at)} · მიიღო ${esc(i.received_by)}${i.return_condition ? " · " + esc(i.return_condition) : ""}</div>` : ""}
+      </div></div>`).join("") : `<div class="sub">ჯერ არ გაცემულა</div>`}</div>`;
+  const btns = [];
+  const canApproveNow = status === "REQUESTED" && (caps.admin || (caps.can_approve && r.agent_id !== caps.agent_id));
+  if (canApproveNow) btns.push(`<button class="btn" id="ctApprove">✅ დამტკიცება</button>`);
+  if (caps.can_handle_physical && (status === "APPROVED" || status === "PARTIALLY_ISSUED")) btns.push(`<button class="btn" id="ctIssue">📤 გაცემა</button>`);
+  if (caps.can_handle_physical && status === "PARTIALLY_ISSUED") btns.push(`<button class="btn secondary" id="ctCloseRem">დარჩენილის გაუქმება</button>`);
+  if (status === "REQUESTED" || status === "APPROVED") btns.push(`<button class="btn danger" id="ctCancel">✖ გაუქმება</button>`);
+  if (btns.length) extra += `<div class="chip-row" style="margin-top:12px;gap:8px">${btns.join("")}</div>`;
+  if (d.audit && d.audit.length) {
+    extra += `<div class="share-box"><div class="lbl">🧾 აუდიტი</div>${d.audit.map((e) => `<div class="sub">${esc(e.timestamp)} · ${esc(e.action)} · ${esc(e.actor_id)}</div>`).join("")}</div>`;
+  }
+  openDetail("ხელშეკრულების მოთხოვნა", fields, extra);
+  document.querySelectorAll("[data-ctm-issue]").forEach((el) => {
+    el.onclick = () => { const i = issues[parseInt(el.dataset.ctmIssue, 10)]; if (i) ctOpenIssue(i, caps); };
+  });
+  const act = (id, fn) => { const b = document.getElementById(id); if (b) b.onclick = async () => { b.disabled = true; try { await fn(); } catch (e) { toast(e.message); b.disabled = false; } }; };
+  act("ctApprove", async () => { const x = await ctPost(`/api/contracts/requests/${rid}/approve`); toast(`დამტკიცდა ✅ (დაჯავშნილი: ${x.reserved})`); ctReload(); });
+  act("ctCancel", async () => {
+    const reason = prompt("გაუქმების მიზეზი (არასავალდებულო)") ; if (reason === null) throw new Error("გაუქმება შეჩერდა");
+    await ctPost(`/api/contracts/requests/${rid}/cancel`, { reason }); toast("გაუქმდა"); ctReload();
+  });
+  act("ctCloseRem", async () => { if (!confirm("დარჩენილი ეგზემპლარების გაცემა გაუქმდეს?")) throw new Error("შეჩერდა"); await ctPost(`/api/contracts/requests/${rid}/close-remaining`); ctReload(); });
+  act("ctIssue", async () => { await ctOpenIssueForm(r); });
+}
+
+/* გაცემის ფორმა (თანამშრომელი): თავისუფალი ეგზემპლარების არჩევა */
+async function ctOpenIssueForm(r) {
+  const left = parseInt(r.copy_count, 10) - parseInt(r.issued_count, 10);
+  let a;
+  try { a = await api(`/api/contracts/available?contract_type=${encodeURIComponent(r.contract_type)}&request_id=${encodeURIComponent(r.request_id)}`); } catch (e) { toast(e.message); return; }
+  const rows = a.rows || [];
+  openDetail(`გაცემა — ${r.request_id}`, [
+    { label: "აგენტი", value: r.agent_name }, { label: "ტიპი", value: r.type_label }, { label: "გასაცემია კიდევ", value: left },
+  ], `<div class="qa-compose" style="margin-top:8px">
+      <div class="sub"><b>აირჩიეთ ეგზემპლარი (მაქს. ${left})</b> — თავისუფალი: ${rows.length}</div>
+      ${rows.length ? rows.map((c) => `<label class="chip" style="display:flex;gap:8px;align-items:center;padding:8px"><input type="checkbox" class="ctPick" value="${esc(c.copy_id)}">
+        <span style="font-family:monospace">${esc(c.control_code)}</span> ${c.physical_status === "RESERVED" ? "· დაჯავშნილია" : ""} ${c.storage_location ? "· " + esc(c.storage_location) : ""}</label>`).join("")
+        : `<div class="empty">თავისუფალი ეგზემპლარი არ არის — ჯერ დაამატეთ მარაგი</div>`}
+      <label class="sub">დაბრუნების ვადა (ცარიელი = სისტემის ნაგულისხმევი ვადა ახლიდან)</label>
+      <input id="ctDue" type="datetime-local">
+      <input id="ctIssueNote" placeholder="კომენტარი (არასავალდებულო)">
+      <button class="btn" id="ctIssueGo" ${rows.length ? "" : "disabled"}>📤 გაცემის დადასტურება</button>
+    </div>`);
+  document.getElementById("ctIssueGo").onclick = async function () {
+    const ids = [...document.querySelectorAll(".ctPick:checked")].map((x) => x.value);
+    if (!ids.length) { toast("აირჩიეთ ეგზემპლარი"); return; }
+    if (ids.length > left) { toast(`მაქსიმუმ ${left}`); return; }
+    this.disabled = true;
+    try {
+      const due = document.getElementById("ctDue").value;
+      await ctPost(`/api/contracts/requests/${r.request_id}/issue`, { copy_ids: ids, due_at: due ? due.replace("T", " ") : "", notes: document.getElementById("ctIssueNote").value });
+      toast("გაცემა დაფიქსირდა ✅"); ctReload();
+    } catch (e) { toast(e.message); this.disabled = false; }
+  };
+}
+
+/* გაცემის დეტალი (+ დაბრუნების რეგისტრაცია თანამშრომლისთვის) */
+function ctOpenIssue(i, caps) {
+  const fields = [
+    { label: "საკონტროლო კოდი", value: i.control_code }, { label: "აგენტი", value: i.agent_name },
+    { label: "ტიპი", value: i.type_label }, { label: "მისამართი", value: i.property_address },
+    { label: "მოთხოვნა", value: i.request_id }, { label: "შეხვედრა", value: i.meeting_id },
+    { label: "გასცა", value: `${i.issued_by} · ${i.issued_at}` }, { label: "დაბრუნების ვადა", value: i.due_at + (i.overdue ? " ⏰ ვადაგადაცილებული" : "") },
+    { label: "დაბრუნდა", value: i.returned_at ? `${i.returned_at} · მიიღო: ${i.received_by}` : "" },
+    { label: "შედეგი", value: i.outcome_label }, { label: "მდგომარეობა", value: i.return_condition },
+    { label: "მიზეზი", value: i.return_reason }, { label: "ხელმოწერილი ხელშეკრულების №", value: i.signed_contract_number },
+    { label: "კომენტარი", value: i.notes },
+  ];
+  const canReturn = caps && caps.can_handle_physical && i.open;
+  openDetail("გაცემა — " + i.control_code, fields, canReturn ? `<div class="chip-row" style="margin-top:12px"><button class="btn" id="ctRetBtn">↩️ დაბრუნების რეგისტრაცია</button></div>` : "");
+  const b = document.getElementById("ctRetBtn");
+  if (b) b.onclick = () => ctOpenReturnForm(i);
+}
+
+function ctOpenReturnForm(i) {
+  openDetail("დაბრუნება — " + i.control_code, [{ label: "აგენტი", value: i.agent_name }, { label: "დაბრუნების ვადა", value: i.due_at }],
+    `<div class="qa-compose" style="margin-top:8px">
+      <label class="sub">დაბრუნების შედეგი (შეამოწმეთ დოკუმენტი ფიზიკურად)</label>
+      <select id="ctOut">
+        <option value="RETURNED_UNUSED">დაბრუნდა გამოუყენებელი</option>
+        <option value="USED_SIGNED">ხელმოწერილია / გაფორმდა</option>
+        <option value="DAMAGED">დაზიანებულია</option>
+        <option value="LOST">დაკარგულია</option>
+      </select>
+      <label class="chip" id="ctReuseBox" style="display:flex;gap:8px;align-items:center;padding:8px">
+        <input type="checkbox" id="ctReuse"> სუფთაა, გამოუყენებელია და ხელახლა გამოსაყენებლად უსაფრთხოა</label>
+      <div class="sub" id="ctReuseHint">თუ დოკუმენტზე კლიენტის მონაცემი/ხელმოწერა წერია ან მდგომარეობა გაურკვეველია — არ მონიშნოთ: ეგზემპლარი შემოწმებაზე გადავა და ხელახლა არ გაიცემა.</div>
+      <input id="ctCond" placeholder="მდგომარეობა (მაგ. სუფთა / დაჭმუჭნილი)">
+      <input id="ctSigned" placeholder="ხელმოწერილი ხელშეკრულების №, თუ არსებობს" hidden>
+      <input id="ctReason" placeholder="მიზეზი/შენიშვნა (მაგ. ბინა არ მოეწონა)">
+      <button class="btn" id="ctRetGo">✅ დაბრუნების დადასტურება</button>
+    </div>`);
+  const out = document.getElementById("ctOut");
+  const sync = () => {
+    const unused = out.value === "RETURNED_UNUSED";
+    document.getElementById("ctReuseBox").hidden = !unused;
+    document.getElementById("ctReuseHint").hidden = !unused;
+    document.getElementById("ctSigned").hidden = out.value !== "USED_SIGNED";
+  };
+  out.onchange = sync; sync();
+  document.getElementById("ctRetGo").onclick = async function () {
+    this.disabled = true;
+    try {
+      await ctPost(`/api/contracts/issues/${i.issue_id}/return`, {
+        outcome: out.value, reusable: document.getElementById("ctReuse").checked, condition: document.getElementById("ctCond").value,
+        reason: document.getElementById("ctReason").value, signed_contract_number: document.getElementById("ctSigned").value,
+      });
+      toast("დაბრუნება დაფიქსირდა ✅"); ctReload();
+    } catch (e) { toast(e.message); this.disabled = false; }
+  };
+}
+
+/* ფიზიკური ეგზემპლარის დეტალი: ისტორია + (თანამშრომლისთვის) შემოწმების გადაწყვეტილება */
+async function ctOpenCopy(c, caps) {
+  let h = { issues: [] };
+  try { h = await api(`/api/contracts/copies/${encodeURIComponent(c.copy_id)}/history`); } catch (e) { toast(e.message); }
+  const cc = h.copy || c;
+  const fields = [
+    { label: "საკონტროლო კოდი", value: cc.control_code }, { label: "ტიპი", value: cc.type_label }, { label: "სტატუსი", value: cc.status_label },
+    { label: "შენახვის ადგილი", value: cc.storage_location }, { label: "მდგომარეობა", value: cc.condition }, { label: "დაემატა", value: `${cc.created_at}` },
+  ];
+  let extra = `<div class="share-box"><div class="lbl">📜 გაცემა/დაბრუნების ისტორია</div>${(h.issues || []).length ? h.issues.map((i) => `
+    <div class="sub" style="margin:6px 0">• ${esc(i.agent_name)} · ${esc(i.issued_at)} → ${i.returned_at ? esc(i.returned_at) + " (" + esc(i.outcome_label || i.outcome) + ")" : "ჯერ არ დაუბრუნებია"}</div>`).join("") : `<div class="sub">არ გაცემულა</div>`}</div>`;
+  if (h.audit && h.audit.length) extra += `<div class="share-box"><div class="lbl">🧾 აუდიტი</div>${h.audit.map((e) => `<div class="sub">${esc(e.timestamp)} · ${esc(e.action)} · ${esc(e.actor_id)}</div>`).join("")}</div>`;
+  if (caps && caps.can_handle_physical && cc.physical_status === "UNDER_REVIEW") {
+    extra += `<div class="qa-compose" style="margin-top:12px"><label class="sub">შემოწმების გადაწყვეტილება</label>
+      <select id="ctRev"><option value="available">სუფთაა — ხელახლა გამოსაყენებელი (AVAILABLE)</option><option value="signed">ხელმოწერილია (USED_SIGNED)</option>
+      <option value="damaged">დაზიანებულია</option><option value="lost">დაკარგულია</option></select>
+      <button class="btn" id="ctRevGo">შენახვა</button></div>`;
+  }
+  openDetail("ეგზემპლარი " + cc.control_code, fields, extra);
+  const go = document.getElementById("ctRevGo");
+  if (go) go.onclick = async function () {
+    this.disabled = true;
+    try { await ctPost(`/api/contracts/copies/${cc.copy_id}/review`, { decision: document.getElementById("ctRev").value }); toast("შენახულია ✅"); ctReload(); }
+    catch (e) { toast(e.message); this.disabled = false; }
+  };
+}
+
+/* შეხვედრის დეტალში: ამ შეხვედრის ხელშეკრულებები + "+ ხელშეკრულების მოთხოვნა" (მონაცემები ავტომატურად მოდის შეხვედრიდან) */
+async function ctLoadMeetingBox(m) {
+  const box = document.getElementById("ctMeetingBox");
+  if (!box || !m.meeting_id) return;
+  let d;
+  try { d = await api("/api/contracts/meeting/" + encodeURIComponent(m.meeting_id)); }
+  catch (e) { box.innerHTML = `<div class="lbl">📑 ხელშეკრულებები</div><div class="sub">${esc(e.message)}</div>`; return; }
+  const reqs = d.requests || [], issues = d.issues || [];
+  box.innerHTML = `<div class="lbl">📑 ხელშეკრულებები</div>
+    ${reqs.length ? reqs.map((r) => `<div class="list-row clickable" data-ctm-req="${esc(r.request_id)}"><div class="main">
+        <div class="title" style="white-space:normal">${esc(r.type_label)} · ${esc(r.issued_count)}/${esc(r.copy_count)} ეგზ.</div>
+        <div class="sub">${esc(r.request_id)} · ${esc(r.request_created_at)}</div></div><div class="side">${ctReqBadge(r)}</div></div>`).join("")
+      : `<div class="sub">ამ შეხვედრაზე მოთხოვნა ჯერ არ არის</div>`}
+    ${issues.length ? `<div class="sub" style="margin-top:8px"><b>გაცემის ისტორია</b></div>` + issues.map((i) => `<div class="sub" style="font-family:monospace">• ${esc(i.control_code)} · გაიცა ${esc(i.issued_at)} · ვადა ${esc(i.due_at)}${i.returned_at ? " · დაბრუნდა " + esc(i.returned_at) + " (" + esc(i.outcome_label || i.outcome) + ")" : (i.overdue ? " · ⏰ ვადაგადაცილებული" : "")}</div>`).join("") : ""}
+    ${d.can_create ? `<button class="btn" id="ctNewReq" style="margin-top:10px">+ ხელშეკრულების მოთხოვნა</button>` : ""}`;
+  box.querySelectorAll("[data-ctm-req]").forEach((el) => { el.onclick = () => ctOpenRequest(el.dataset.ctmReq); });
+  const nb = document.getElementById("ctNewReq");
+  if (nb) nb.onclick = () => ctOpenRequestForm(m, d);
+}
+
+/* მოთხოვნის ფორმა: შეხვედრის/კლიენტის/ბინის/აგენტის მონაცემები ავტომატურია (მხოლოდ კითხვადი); აგენტი ირჩევს ტიპს და რაოდენობას */
+function ctOpenRequestForm(m, d) {
+  const key = ctIdemKey();                  // ერთი ფორმა = ერთი გასაღები: ორმაგი დაჭერა დუბლიკატს არ ქმნის
+  const types = d.types || {};
+  openDetail("+ ხელშეკრულების მოთხოვნა", [
+    { label: "შეხვედრის ID", value: m.meeting_id }, { label: "შეხვედრა", value: `${m.meeting_date || ""} ${m.time || ""}`.trim() },
+    { label: "აგენტი", value: m.agent_name }, { label: "მისამართი", value: m.address },
+    { label: "MyHome ID", value: m.myhome_id }, { label: "SS.ge ID", value: m.ssge_id },
+    { label: "კლიენტის ტელეფონი", value: m.client_phone },
+  ], `<div class="qa-compose" style="margin-top:10px">
+      <label class="sub">ხელშეკრულების ტიპი</label>
+      <select id="ctType"><option value="">— აირჩიეთ —</option>${Object.keys(types).map((k) => `<option value="${esc(k)}">${esc(types[k])}${(d.available || {})[k] != null ? ` (თავისუფალია: ${d.available[k]})` : ""}</option>`).join("")}</select>
+      <label class="sub">ეგზემპლარების რაოდენობა</label>
+      <input id="ctCopies" type="number" min="1" max="10" value="1">
+      <textarea id="ctNotes" rows="2" placeholder="კომენტარი (საჭიროების შემთხვევაში)"></textarea>
+      <button class="btn" id="ctSend">📑 მოთხოვნის გაგზავნა</button>
+    </div>`);
+  document.getElementById("ctSend").onclick = async function () {
+    const type = document.getElementById("ctType").value;
+    const n = parseInt(document.getElementById("ctCopies").value, 10);
+    if (!type) { toast("აირჩიეთ ხელშეკრულების ტიპი"); return; }
+    if (!n || n < 1 || n > 10) { toast("რაოდენობა 1–10"); return; }
+    this.disabled = true;
+    try {
+      const r = await ctPost("/api/contracts/requests", { meeting_id: m.meeting_id, contract_type: type, copy_count: n, notes: document.getElementById("ctNotes").value, idempotency_key: key });
+      toast(r.created ? `მოთხოვნა გაიგზავნა ✅ ${r.request.request_id}` : `ეს მოთხოვნა უკვე არსებობს: ${r.request.request_id}`);
+      if (r.stock_warning) alert(r.stock_warning);
+      delete lazyCache.contracts;
+      closeDetail();
+    } catch (e) { toast(e.message); this.disabled = false; }
+  };
+}
+
 /* ---------------------------------------------------------- shell */
 
 const LAZY_ENDPOINTS = {
+  contracts: "/api/contracts/overview",
   mydayoffs: "/api/dayoff/mine",
   myattendance: "/api/attendance/me/history",
   attendance: "/api/attendance/overview",
@@ -3708,7 +4135,7 @@ async function renderContent() {
           if (params.length) url += "?" + params.join("&");
           const resp = await api(url);
           if (tab === "myhomejobs") { state.workers = resp.workers || null; state.mhTotal = resp.total || null; }
-          const wholeObjTabs = ["admintasks", "agentsmgmt", "meetings", "taskhistory", "digest", "reports", "dayoffs", "swaps", "regulations", "mydayoffs", "attendance", "districts"];
+          const wholeObjTabs = ["contracts", "admintasks", "agentsmgmt", "meetings", "taskhistory", "digest", "reports", "dayoffs", "swaps", "regulations", "mydayoffs", "attendance", "districts"];
           lazyCache[tab] = wholeObjTabs.includes(tab) ? resp : (resp.rows || []);
         } catch (e) {
           content.innerHTML = `<div class="card"><div class="empty">⚠️ ${esc(e.message)}</div></div>`;
@@ -3733,6 +4160,7 @@ async function renderContent() {
       else if (tab === "warnings") { content.innerHTML = renderWarnings(rows); bindWarningsActions(rows); }
       else if (tab === "clients") { content.innerHTML = renderClients(rows); bindClientsActions(rows); }
       else if (tab === "crm2") { content.innerHTML = renderCrm2(rows); bindCrm2Actions(rows); }
+      else if (tab === "contracts") { content.innerHTML = renderContracts(rows); bindContractsActions(rows); }
       else if (tab === "mydayoffs") { content.innerHTML = renderMyDayoffs(rows); bindMyDayoffs(); }
       else if (tab === "myattendance") { content.innerHTML = renderMyAttendance(rows); bindMyAttendance(); }
       else if (tab === "attendance") { content.innerHTML = renderAttendanceAdmin(rows); bindAttendanceAdmin(rows); }
