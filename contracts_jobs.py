@@ -68,15 +68,17 @@ def pending_notifications(get_agents, now: datetime.datetime | None = None) -> l
                 sent_to.add(cid)
             ac = _chat_of(agent)
             if ac and ac not in sent_to:
-                out.append({"chat_id": ac, "text": f"⏰ ხელშეკრულება {code} დასაბრუნებელი იყო {i.get('due_at')}-მდე. "
-                                                   f"გთხოვთ დაუყოვნებლივ დააბრუნოთ.", "issue_id": i["issue_id"],
+                # აგენტს კოდი არ ეგზავნება (კოდი მხოლოდ ადმინს/მენეჯერს ჩანს)
+                out.append({"chat_id": ac, "text": f"⏰ ხელშეკრულება ({i.get('property_address') or 'შეხვედრა'}) დასაბრუნებელი იყო "
+                                                   f"{i.get('due_at')}-მდე. გთხოვთ დაუყოვნებლივ დააბრუნოთ.", "issue_id": i["issue_id"],
                             "flag": "overdue_notified_at"})
         elif due <= horizon:
             if str(i.get("reminder_sent_at") or "").strip():
                 continue
             ac = _chat_of(agent)
             if ac:
-                out.append({"chat_id": ac, "text": f"🔔 შეხსენება: ხელშეკრულება {code} უნდა დააბრუნოთ {i.get('due_at')}-მდე.",
+                out.append({"chat_id": ac, "text": f"🔔 შეხსენება: ხელშეკრულება ({i.get('property_address') or 'შეხვედრა'}) "
+                                                   f"უნდა დააბრუნოთ {i.get('due_at')}-მდე.",
                             "issue_id": i["issue_id"], "flag": "reminder_sent_at"})
     return out
 

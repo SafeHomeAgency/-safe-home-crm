@@ -3462,7 +3462,7 @@ function ctIssueRow(i, idx, withAgent) {
   return `<div class="list-row clickable" data-ct-issue="${idx}">
     <div class="avatar">${i.overdue ? "⏰" : "📑"}</div>
     <div class="main">
-      <div class="title" style="font-family:monospace;letter-spacing:.5px">${esc(i.control_code)}${i.overdue ? ` <span class="badge red">ვადაგადაცილებული</span>` : ""}</div>
+      <div class="title" ${i.control_code ? `style="font-family:monospace;letter-spacing:.5px"` : `style="white-space:normal"`}>${esc(i.control_code || i.property_address || i.type_label || "ხელშეკრულება")}${i.overdue ? ` <span class="badge red">ვადაგადაცილებული</span>` : ""}</div>
       <div class="sub">${withAgent ? esc(i.agent_name) + " · " : ""}${esc(i.type_label || "")} · ${esc(i.property_address || "")}</div>
       <div class="sub">გაიცა: ${esc(i.issued_at)} · დასაბრუნებელი: <b>${esc(i.due_at)}</b></div>
     </div>
@@ -3478,11 +3478,14 @@ function renderContracts(p) {
   let html = "";
 
   if (!manager) {                                   // ---- აგენტი: მინიმალისტური ხედი
-    html += `<div class="card"><h2>📑 ჩემი გატანილი ხელშეკრულებები <span class="cnt">${active.length}</span></h2>
+    html += `<div class="card"><h2>➕ ახალი ხელშეკრულების მოთხოვნა</h2>
+      <div class="sub" style="margin-bottom:8px">აირჩიეთ შეხვედრა, რომელზეც ხელშეკრულება გჭირდებათ (კლიენტისა და ბინის მონაცემები ავტომატურად შეივსება):</div>
+      <div id="ctMeetList"><div class="sub">შეხვედრები იტვირთება…</div></div>
+    </div>
+    <div class="card"><h2>📑 ჩემთან გატანილი ხელშეკრულებები <span class="cnt">${active.length}</span></h2>
       ${active.length ? active.map((i, k) => ctIssueRow(i, k, false)).join("") : `<div class="empty">ამჟამად ხელშეკრულება არ გაქვთ გატანილი</div>`}
     </div>
-    <div class="card"><h2>📋 ჩემი მოთხოვნები <span class="cnt">${reqs.length}</span></h2>
-      <div class="sub" style="margin-bottom:8px">ახალი მოთხოვნისთვის: „შეხვედრები“ → აირჩიეთ შეხვედრა → „+ ხელშეკრულების მოთხოვნა“.</div>
+    <div class="card"><h2>📋 ჩემი მოთხოვნების ისტორია <span class="cnt">${reqs.length}</span></h2>
       ${reqs.length ? reqs.map((r, k) => ctReqRow(r, k)).join("") : `<div class="empty">მოთხოვნა ჯერ არ გაქვთ</div>`}
     </div>`;
     return html;
@@ -3594,6 +3597,9 @@ function bindContractsActions(p) {
   document.querySelectorAll("[data-ct-sec]").forEach((b) => {
     b.onclick = () => { state.ctSection = b.dataset.ctSec; renderContent(); };
   });
+  // აგენტი: ბოლო შეხვედრების სია, საიდანაც პირდაპირ იგზავნება მოთხოვნა
+  const ml = document.getElementById("ctMeetList");
+  if (ml) ctLoadMeetList(ml, caps);
   document.querySelectorAll("[data-ct-req]").forEach((el) => {
     el.onclick = () => { const r = reqs[parseInt(el.dataset.ctReq, 10)]; if (r) ctOpenRequest(r.request_id); };
   });
@@ -3643,6 +3649,33 @@ function bindContractsActions(p) {
   };
 }
 
+/* ახალი მოთხოვნა ხელშეკრულებების ტაბიდანაც: ბოლო შეხვედრები (30 დღე) + ღილაკი თითოეულზე */
+async function ctLoadMeetList(box, caps) {
+  try {
+    const own = state.data && state.data.is_team_lead ? "&scope=own" : "";
+    const resp = await api("/api/meetings?period=month" + own);
+    const rows = (resp.rows || []).slice(0, 30);
+    if (!rows.length) { box.innerHTML = `<div class="empty">ბოლო 30 დღეში შეხვედრა არ გაქვთ დაფიქსირებული. ჯერ დააფიქსირეთ შეხვედრა (/meeting).</div>`; return; }
+    box.innerHTML = rows.map((m, k) => `<div class="list-row" style="align-items:center">
+        <div class="avatar">🏠</div>
+        <div class="main"><div class="title" style="white-space:normal">${esc(m.address || m.district || "მისამართი უცნობია")}</div>
+          <div class="sub">${esc(m.meeting_date || "")} ${esc(m.time || "")}</div></div>
+        <div class="side"><button class="btn" data-ct-pick="${k}" style="padding:8px 10px;font-size:12px">+ მოთხოვნა</button></div></div>`).join("");
+    box.querySelectorAll("[data-ct-pick]").forEach((b) => {
+      b.onclick = async () => {
+        const m = rows[parseInt(b.dataset.ctPick, 10)];
+        b.disabled = true;
+        try {
+          const d = await api("/api/contracts/meeting/" + encodeURIComponent(m.meeting_id));
+          if (!d.can_create) { toast("ამ შეხვედრაზე მოთხოვნას ვერ შექმნით"); b.disabled = false; return; }
+          ctOpenRequestForm(m, d);
+        } catch (e) { toast(e.message); }
+        b.disabled = false;
+      };
+    });
+  } catch (e) { box.innerHTML = `<div class="empty">${esc(e.message)}</div>`; }
+}
+
 /* მოთხოვნის დეტალი + მოქმედებები (უფლებების მიხედვით; სერვერი ამას მაინც ამოწმებს) */
 async function ctOpenRequest(rid) {
   let d;
@@ -3661,7 +3694,7 @@ async function ctOpenRequest(rid) {
   const status = r.request_status;
   let extra = `<div class="share-box"><div class="lbl">📑 გაცემა/დაბრუნების ისტორია</div>${issues.length ? issues.map((i, k) => `
       <div class="list-row clickable" data-ctm-issue="${k}"><div class="main">
-        <div class="title" style="font-family:monospace">${esc(i.control_code)} ${i.open ? (i.overdue ? `<span class="badge red">ვადაგადაცილებული</span>` : `<span class="badge amber">აგენტთანაა</span>`) : `<span class="badge gray">${esc(i.outcome_label || i.outcome)}</span>`}</div>
+        <div class="title" ${i.control_code ? `style="font-family:monospace"` : ""}>${esc(i.control_code || "ეგზემპლარი " + (k + 1))} ${i.open ? (i.overdue ? `<span class="badge red">ვადაგადაცილებული</span>` : `<span class="badge amber">აგენტთანაა</span>`) : `<span class="badge gray">${esc(i.outcome_label || i.outcome)}</span>`}</div>
         <div class="sub">გაიცა ${esc(i.issued_at)} (${esc(i.issued_by)}) · ვადა ${esc(i.due_at)}</div>
         ${i.returned_at ? `<div class="sub">დაბრუნდა ${esc(i.returned_at)} · მიიღო ${esc(i.received_by)}${i.return_condition ? " · " + esc(i.return_condition) : ""}</div>` : ""}
       </div></div>`).join("") : `<div class="sub">ჯერ არ გაცემულა</div>`}</div>`;
@@ -3733,7 +3766,7 @@ function ctOpenIssue(i, caps) {
     { label: "კომენტარი", value: i.notes },
   ];
   const canReturn = caps && caps.can_handle_physical && i.open;
-  openDetail("გაცემა — " + i.control_code, fields, canReturn ? `<div class="chip-row" style="margin-top:12px"><button class="btn" id="ctRetBtn">↩️ დაბრუნების რეგისტრაცია</button></div>` : "");
+  openDetail("გაცემა" + (i.control_code ? " — " + i.control_code : ""), fields, canReturn ? `<div class="chip-row" style="margin-top:12px"><button class="btn" id="ctRetBtn">↩️ დაბრუნების რეგისტრაცია</button></div>` : "");
   const b = document.getElementById("ctRetBtn");
   if (b) b.onclick = () => ctOpenReturnForm(i);
 }
@@ -3816,7 +3849,7 @@ async function ctLoadMeetingBox(m) {
         <div class="title" style="white-space:normal">${esc(r.type_label)} · ${esc(r.issued_count)}/${esc(r.copy_count)} ეგზ.</div>
         <div class="sub">${esc(r.request_id)} · ${esc(r.request_created_at)}</div></div><div class="side">${ctReqBadge(r)}</div></div>`).join("")
       : `<div class="sub">ამ შეხვედრაზე მოთხოვნა ჯერ არ არის</div>`}
-    ${issues.length ? `<div class="sub" style="margin-top:8px"><b>გაცემის ისტორია</b></div>` + issues.map((i) => `<div class="sub" style="font-family:monospace">• ${esc(i.control_code)} · გაიცა ${esc(i.issued_at)} · ვადა ${esc(i.due_at)}${i.returned_at ? " · დაბრუნდა " + esc(i.returned_at) + " (" + esc(i.outcome_label || i.outcome) + ")" : (i.overdue ? " · ⏰ ვადაგადაცილებული" : "")}</div>`).join("") : ""}
+    ${issues.length ? `<div class="sub" style="margin-top:8px"><b>გაცემის ისტორია</b></div>` + issues.map((i) => `<div class="sub">• ${i.control_code ? esc(i.control_code) + " · " : ""}გაიცა ${esc(i.issued_at)} · ვადა ${esc(i.due_at)}${i.returned_at ? " · დაბრუნდა " + esc(i.returned_at) + " (" + esc(i.outcome_label || i.outcome) + ")" : (i.overdue ? " · ⏰ ვადაგადაცილებული" : "")}</div>`).join("") : ""}
     ${d.can_create ? `<button class="btn" id="ctNewReq" style="margin-top:10px">+ ხელშეკრულების მოთხოვნა</button>` : ""}`;
   box.querySelectorAll("[data-ctm-req]").forEach((el) => { el.onclick = () => ctOpenRequest(el.dataset.ctmReq); });
   const nb = document.getElementById("ctNewReq");
@@ -3834,7 +3867,7 @@ function ctOpenRequestForm(m, d) {
     { label: "კლიენტის ტელეფონი", value: m.client_phone },
   ], `<div class="qa-compose" style="margin-top:10px">
       <label class="sub">ხელშეკრულების ტიპი</label>
-      <select id="ctType"><option value="">— აირჩიეთ —</option>${Object.keys(types).map((k) => `<option value="${esc(k)}">${esc(types[k])}${(d.available || {})[k] != null ? ` (თავისუფალია: ${d.available[k]})` : ""}</option>`).join("")}</select>
+      <select id="ctType"><option value="">— აირჩიეთ —</option>${Object.keys(types).map((k) => `<option value="${esc(k)}">${esc(types[k])}${d.available && d.available[k] != null ? ` (თავისუფალია: ${d.available[k]})` : ""}</option>`).join("")}</select>
       <label class="sub">ეგზემპლარების რაოდენობა</label>
       <input id="ctCopies" type="number" min="1" max="10" value="1">
       <textarea id="ctNotes" rows="2" placeholder="კომენტარი (საჭიროების შემთხვევაში)"></textarea>

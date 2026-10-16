@@ -119,6 +119,10 @@ def register(app, *, authed, is_team_lead, audit, rate_limited, get_agents, get_
         d["client_phone_masked"] = m.mask_phone(i.get("client_phone"))
         if full:
             d["client_phone"] = i.get("client_phone", "")
+        if not ctx.manager_view:
+            # რიგითი აგენტი: საკონტროლო კოდი (და ფიზიკური ეგზემპლარის ID) არ ჩანს — მხოლოდ ადმინს/მენეჯერს/თანამშრომელს
+            d["control_code"] = ""
+            d["copy_id"] = ""
         return d
 
     def _pub_copy(c: dict) -> dict:
@@ -239,14 +243,17 @@ def register(app, *, authed, is_team_lead, audit, rate_limited, get_agents, get_
         reqs = _scope_requests(ctx, reqs)
         rids = {r["request_id"] for r in reqs}
         issues = [i for i in store.list_issues() if str(i.get("request_id")) in rids]
-        stock = store.stock_by_type()
         can_create = bool(ctx.admin or (ctx.agent_id and str(meeting.get("agent_id")) == ctx.agent_id)
                           or (ctx.lead and str(meeting.get("agent_id")) in _team_ids(ctx.team)))
+        # მარაგის რაოდენობა მხოლოდ ადმინს/მენეჯერს/თანამშრომელს ჩანს (რიგით აგენტს — არა)
+        available = None
+        if ctx.manager_view:
+            available = {k: v["available"] + v["reserved"] for k, v in store.stock_by_type().items()}
         return jsonify(
             requests=[_pub_request(r, ctx) for r in sorted(reqs, key=lambda r: str(r.get("request_created_at", "")), reverse=True)],
             issues=[_pub_issue(i, ctx) for i in sorted(issues, key=lambda i: str(i.get("issued_at", "")), reverse=True)],
             types={k: v["label"] for k, v in m.CONTRACT_TYPES.items()},
-            available={k: v["available"] + v["reserved"] for k, v in stock.items()},
+            available=available,
             can_create=can_create, caps=_caps(ctx))
 
     @app.post("/api/contracts/requests")
@@ -274,7 +281,10 @@ def register(app, *, authed, is_team_lead, audit, rate_limited, get_agents, get_
         free = stock.get("available", 0)
         warn = ""
         if created and free < int(row.get("copy_count") or 1):
-            warn = f"ამჟამად ამ ტიპის თავისუფალი ეგზემპლარი: {free}. მოთხოვნა მიღებულია, გაცემა მარაგის შევსების შემდეგ მოხდება."
+            if ctx.manager_view:
+                warn = f"ამჟამად ამ ტიპის თავისუფალი ეგზემპლარი: {free}. მოთხოვნა მიღებულია, გაცემა მარაგის შევსების შემდეგ მოხდება."
+            else:
+                warn = "მოთხოვნა მიღებულია. გაცემა მოხდება, როგორც კი ეგზემპლარი მზად იქნება."
         if created:
             audit(ctx.agent, ctx.admin, "contract_request_created", "contract_request", row["request_id"],
                   metadata={"meeting_id": row["meeting_id"], "type": row["contract_type"], "copies": row["copy_count"]})
@@ -489,9 +499,10 @@ def register(app, *, authed, is_team_lead, audit, rate_limited, get_agents, get_
                                     data.get("due_at") or "", data.get("notes") or "")
         audit(ctx.agent, ctx.admin, "contract_copies_issued", "contract_request", request_id,
               metadata={"count": len(issues), "codes": [i["control_code"] for i in issues]})
-        codes = ", ".join(i["control_code"] for i in issues)
+        # აგენტს საკონტროლო კოდი არ ეგზავნება — მხოლოდ რაოდენობა, ტიპი, მისამართი და ვადა
         _safe_notify(_agent_chat(r.get("agent_id")),
-                     f"📑 გადმოგეცათ ხელშეკრულება: {codes}\nდაბრუნების ვადა: {issues[0]['due_at']}\nმოთხოვნა: {request_id}")
+                     f"📑 გადმოგეცათ ხელშეკრულება ({len(issues)} ეგზ.) — {r.get('property_address') or 'შეხვედრა'}\n"
+                     f"დაბრუნების ვადა: {issues[0]['due_at']}\nმოთხოვნა: {request_id}")
         return jsonify(ok=True, issues=[_pub_issue(i, ctx, full=True) for i in issues])
 
     @app.post("/api/contracts/issues/<issue_id>/return")
@@ -518,8 +529,7 @@ def register(app, *, authed, is_team_lead, audit, rate_limited, get_agents, get_
             signed_number=str(data.get("signed_contract_number") or ""))
         audit(ctx.agent, ctx.admin, "contract_copy_returned", "contract_issue", issue_id,
               metadata={"outcome": new.get("outcome") if new else ""})
-        _safe_notify(holder_chat, f"✅ დაბრუნება დაფიქსირდა: {i.get('control_code')} — "
-                                  f"{m.OUTCOMES.get((new or {}).get('outcome'), '')}")
+        _safe_notify(holder_chat, f"✅ ხელშეკრულების დაბრუნება დაფიქსირდა — {i.get('property_address') or i.get('request_id')}")
         return jsonify(ok=True, issue=_pub_issue(new or i, ctx, full=True))
 
     @app.post("/api/contracts/copies/<copy_id>/review")
