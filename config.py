@@ -120,6 +120,8 @@ RATE_LIMITS = {
     "myhome_account": (10, 60),  # ადმინის ფორმა: MyHome ანგარიშის დამატება
     "contracts_read": (120, 60),   # ხელშეკრულებების მოდული: სიები/დეტალები (წაკითხვა)
     "contracts_write": (40, 60),   # ხელშეკრულებების მოდული: მოთხოვნა/გაცემა/დაბრუნება
+    "finance_read": (120, 60),     # ფინანსური ტრეკერი: დაშბორდი/სიები (წაკითხვა)
+    "finance_write": (60, 60),     # ფინანსური ტრეკერი: გარიგება/ხარჯი (ჩაწერა)
 }
 RATE_LIMIT_ENABLED = os.environ.get("RATE_LIMIT_ENABLED", "1").strip().lower() not in ("0", "false", "no")
 
@@ -167,6 +169,17 @@ KPI_WARNING_PENALTY = float(os.environ.get("KPI_WARNING_PENALTY", "0.10"))
 # ჯერ არ დაუწყია — ონლაინ რეჟიმს ფიქსირებული საწყისი საათი არა აქვს,
 # ამიტომ ეს მხოლოდ ერთხელადი, დღის შუა საათის შეხსენებაა.
 ONLINE_START_REMINDER_HOUR = int(os.environ.get("ONLINE_START_REMINDER_HOUR", "12"))
+
+# --- ფინანსური ტრეკერი (მხოლოდ დირექტორის უფროსისთვის) ---------------------
+# FINANCE_CHAT_IDS — Telegram ID-ები (მძიმით), ვისაც ფინანსურ ტაბზე წვდომა აქვს. ცარიელია = არავის (ადმინებიც ვერ ხედავენ),
+# სანამ Railway-ზე არ დააყენებთ. ეს განზრახ ცალკეა ADMIN_CHAT_IDS-ისგან: ადმინებს/დირექტორს ფინანსები არ უჩანთ.
+FINANCE_CHAT_IDS = {
+    int(x.strip())
+    for x in os.environ.get("FINANCE_CHAT_IDS", "").split(",")
+    if x.strip().lstrip("-").isdigit()
+}
+# რომელ საათზე (თბილისი) მოდის ფინანსური შეხსენებები (ანგარიშგება ყოველ 2 თვეში, კონტრაქტის ვადის ამოწურვა)
+FINANCE_REMINDER_HOUR = int(os.environ.get("FINANCE_REMINDER_HOUR", "10"))
 
 # --- ხელშეკრულებების აღრიცხვა (Contract Management) --------------------
 # CONTRACT_STAFF_CHAT_IDS — Telegram ID-ები (მძიმით), ვისაც ფიზიკური გაცემა/მიღება შეუძლია (ადმინებს ეს ყოველთვის აქვთ).

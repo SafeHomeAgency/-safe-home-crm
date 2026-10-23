@@ -2827,6 +2827,16 @@ contracts_api.register(
 )
 
 
+# ფინანსური ტრეკერი: /api/finance/... — მხოლოდ FINANCE_CHAT_IDS-ში მყოფებისთვის (ადმინებისთვისაც კი დახურულია)
+import finance_api  # noqa: E402
+
+finance_api.register(
+    app, authed=_authed_agent, audit=_audit, rate_limited=rate_limited, get_agents=lambda: sheets.get_agents(),
+    chat_id_fn=_requester_chat_id,
+    send_document=lambda chat_id, filename, content, caption="": _send_telegram_document(chat_id, filename, content, caption),
+)
+
+
 # ჩავარდნილი MyHome job-ების ერთიანად ხელახლა გაშვება (ადმინი) — უსაფრთხოების წესებით
 import myhome_bulk_retry  # noqa: E402
 

@@ -3447,6 +3447,13 @@ const CT_PH_CLS = { AVAILABLE: "green", RESERVED: "amber", ISSUED: "amber", RETU
   DAMAGED: "red", LOST: "red", UNDER_REVIEW: "amber" };
 
 function ctPost(path, body) { return api(path, { method: "POST", body: JSON.stringify(body || {}) }); }
+/* შეცდომა/მინიშნება პირდაპირ ფორმაში (მოდალის შიგნით) — რომ მომხმარებელმა აუცილებლად დაინახოს, რატომ არ სრულდება მოქმედება */
+function ctErr(msg) {
+  const el = document.getElementById("ctMsg");
+  if (el) { el.textContent = "⚠️ " + msg; el.hidden = false; }
+  else toast(msg);
+}
+const CT_MSG = `<div id="ctMsg" class="sub" hidden style="color:var(--red);font-weight:650"></div>`;
 function ctReload() { delete lazyCache.contracts; closeDetail(); renderContent(); }
 function ctIdemKey() {
   try { if (window.crypto && crypto.randomUUID) return crypto.randomUUID(); } catch (e) { /* ignore */ }
@@ -3705,6 +3712,9 @@ async function ctOpenRequest(rid) {
   if (caps.can_handle_physical && status === "PARTIALLY_ISSUED") btns.push(`<button class="btn secondary" id="ctCloseRem">დარჩენილის გაუქმება</button>`);
   if (status === "REQUESTED" || status === "APPROVED") btns.push(`<button class="btn danger" id="ctCancel">✖ გაუქმება</button>`);
   if (btns.length) extra += `<div class="chip-row" style="margin-top:12px;gap:8px">${btns.join("")}</div>`;
+  if ((status === "APPROVED" || status === "PARTIALLY_ISSUED") && !caps.can_handle_physical) {
+    extra += `<div class="sub" style="margin-top:10px">ℹ️ ფიზიკურ გაცემას ადასტურებს მხოლოდ ადმინი ან პასუხისმგებელი თანამშრომელი. თქვენთან გაცემის ღილაკი ამიტომ არ ჩანს.</div>`;
+  }
   if (d.audit && d.audit.length) {
     extra += `<div class="share-box"><div class="lbl">🧾 აუდიტი</div>${d.audit.map((e) => `<div class="sub">${esc(e.timestamp)} · ${esc(e.action)} · ${esc(e.actor_id)}</div>`).join("")}</div>`;
   }
@@ -3732,24 +3742,26 @@ async function ctOpenIssueForm(r) {
     { label: "აგენტი", value: r.agent_name }, { label: "ტიპი", value: r.type_label }, { label: "გასაცემია კიდევ", value: left },
   ], `<div class="qa-compose" style="margin-top:8px">
       <div class="sub"><b>აირჩიეთ ეგზემპლარი (მაქს. ${left})</b> — თავისუფალი: ${rows.length}</div>
-      ${rows.length ? rows.map((c) => `<label class="chip" style="display:flex;gap:8px;align-items:center;padding:8px"><input type="checkbox" class="ctPick" value="${esc(c.copy_id)}">
+      ${rows.length ? rows.map((c, k) => `<label class="chip" style="display:flex;gap:8px;align-items:center;padding:8px"><input type="checkbox" class="ctPick" value="${esc(c.copy_id)}" ${k < left ? "checked" : ""}>
         <span style="font-family:monospace">${esc(c.control_code)}</span> ${c.physical_status === "RESERVED" ? "· დაჯავშნილია" : ""} ${c.storage_location ? "· " + esc(c.storage_location) : ""}</label>`).join("")
-        : `<div class="empty">თავისუფალი ეგზემპლარი არ არის — ჯერ დაამატეთ მარაგი</div>`}
+        : `<div class="empty">გასაცემად თავისუფალი ეგზემპლარი არ არის — ჯერ დაამატეთ მარაგი: „ხელშეკრულებები“ → „მარაგი“ → „➕ დამატება“</div>`}
       <label class="sub">დაბრუნების ვადა (ცარიელი = სისტემის ნაგულისხმევი ვადა ახლიდან)</label>
       <input id="ctDue" type="datetime-local">
       <input id="ctIssueNote" placeholder="კომენტარი (არასავალდებულო)">
+      ${CT_MSG}
       <button class="btn" id="ctIssueGo" ${rows.length ? "" : "disabled"}>📤 გაცემის დადასტურება</button>
     </div>`);
   document.getElementById("ctIssueGo").onclick = async function () {
     const ids = [...document.querySelectorAll(".ctPick:checked")].map((x) => x.value);
-    if (!ids.length) { toast("აირჩიეთ ეგზემპლარი"); return; }
-    if (ids.length > left) { toast(`მაქსიმუმ ${left}`); return; }
+    if (!ids.length) { ctErr("აირჩიეთ მინიმუმ ერთი ეგზემპლარი (მონიშნეთ ჩექბოქსი)"); return; }
+    if (ids.length > left) { ctErr(`ამ მოთხოვნაზე მაქსიმუმ ${left} ეგზემპლარის გაცემაა შესაძლებელი — მოხსენით ზედმეტი`); return; }
     this.disabled = true;
+    this.textContent = "იგზავნება…";
     try {
       const due = document.getElementById("ctDue").value;
       await ctPost(`/api/contracts/requests/${r.request_id}/issue`, { copy_ids: ids, due_at: due ? due.replace("T", " ") : "", notes: document.getElementById("ctIssueNote").value });
       toast("გაცემა დაფიქსირდა ✅"); ctReload();
-    } catch (e) { toast(e.message); this.disabled = false; }
+    } catch (e) { ctErr(e.message); this.disabled = false; this.textContent = "📤 გაცემის დადასტურება"; }
   };
 }
 
@@ -3787,6 +3799,7 @@ function ctOpenReturnForm(i) {
       <input id="ctCond" placeholder="მდგომარეობა (მაგ. სუფთა / დაჭმუჭნილი)">
       <input id="ctSigned" placeholder="ხელმოწერილი ხელშეკრულების №, თუ არსებობს" hidden>
       <input id="ctReason" placeholder="მიზეზი/შენიშვნა (მაგ. ბინა არ მოეწონა)">
+      ${CT_MSG}
       <button class="btn" id="ctRetGo">✅ დაბრუნების დადასტურება</button>
     </div>`);
   const out = document.getElementById("ctOut");
@@ -3805,7 +3818,7 @@ function ctOpenReturnForm(i) {
         reason: document.getElementById("ctReason").value, signed_contract_number: document.getElementById("ctSigned").value,
       });
       toast("დაბრუნება დაფიქსირდა ✅"); ctReload();
-    } catch (e) { toast(e.message); this.disabled = false; }
+    } catch (e) { ctErr(e.message); this.disabled = false; }
   };
 }
 
@@ -3871,13 +3884,14 @@ function ctOpenRequestForm(m, d) {
       <label class="sub">ეგზემპლარების რაოდენობა</label>
       <input id="ctCopies" type="number" min="1" max="10" value="1">
       <textarea id="ctNotes" rows="2" placeholder="კომენტარი (საჭიროების შემთხვევაში)"></textarea>
+      ${CT_MSG}
       <button class="btn" id="ctSend">📑 მოთხოვნის გაგზავნა</button>
     </div>`);
   document.getElementById("ctSend").onclick = async function () {
     const type = document.getElementById("ctType").value;
     const n = parseInt(document.getElementById("ctCopies").value, 10);
-    if (!type) { toast("აირჩიეთ ხელშეკრულების ტიპი"); return; }
-    if (!n || n < 1 || n > 10) { toast("რაოდენობა 1–10"); return; }
+    if (!type) { ctErr("აირჩიეთ ხელშეკრულების ტიპი"); return; }
+    if (!n || n < 1 || n > 10) { ctErr("რაოდენობა უნდა იყოს 1–10"); return; }
     this.disabled = true;
     try {
       const r = await ctPost("/api/contracts/requests", { meeting_id: m.meeting_id, contract_type: type, copy_count: n, notes: document.getElementById("ctNotes").value, idempotency_key: key });
@@ -3885,7 +3899,7 @@ function ctOpenRequestForm(m, d) {
       if (r.stock_warning) alert(r.stock_warning);
       delete lazyCache.contracts;
       closeDetail();
-    } catch (e) { toast(e.message); this.disabled = false; }
+    } catch (e) { ctErr(e.message); this.disabled = false; }
   };
 }
 
@@ -4097,14 +4111,508 @@ async function openCrm2Card(c) {
   catch (e) { box.innerHTML += `<div class="empty">⚠️ ${esc(e.message)}</div>`; }
 }
 
+/* ================================================ ფინანსური ტრეკერი (დირექტორის ტაბი) =====
+   წვდომა მხოლოდ სერვერზე მითითებულ Telegram ID-ებს (Railway: FINANCE_CHAT_IDS). ტაბი ჩანს მხოლოდ მაშინ, როცა
+   /api/finance/access აბრუნებს allowed=true; რეალურ შემოწმებას სერვერი აკეთებს ყოველ მოთხოვნაზე.
+   არსებულ ტაბებს არ ეხება: ემატება tabsFor-ში, renderContent-ში და load()-ის ბოლოს. */
+const FIN_TAB = { id: "finance", label: "ფინანსები", icon: "💰" };
+const FIN_SECTIONS = [["dash", "📊 დაშბორდი"], ["deals", "🧾 გარიგებები"], ["exp", "💸 ხარჯები"], ["rep", "📑 ანგარიში"], ["rem", "🔔 შეხსენებები"]];
+const FIN_C = { income: "#e9c46a", exp: "#f26d6d", profit: "#34d399", agents: "#4aa8d8", tl: "#a78bfa" };
+state.fin = state.fin || { section: "dash", from: "", to: "", q: "", agent: "", seq: 0 };
+
+const finGet = (path) => api(path);
+const finSend = (method, path, body) => api(path, { method, body: JSON.stringify(body || {}) });
+function finNow() { const d = new Date(); return d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0"); }
+function finAdd(ym, n) { const p = ym.split("-").map(Number); const t = p[0] * 12 + (p[1] - 1) + n; return Math.floor(t / 12) + "-" + String(t % 12 + 1).padStart(2, "0"); }
+function finEnsureRange() { const f = state.fin; if (!f.to) f.to = finNow(); if (!f.from) f.from = finAdd(f.to, -11); }
+function finQS() { finEnsureRange(); return "from=" + encodeURIComponent(state.fin.from) + "&to=" + encodeURIComponent(state.fin.to); }
+function finMoney(n, cur) {
+  const v = Number(n || 0);
+  return v.toLocaleString("en-US", { minimumFractionDigits: 0, maximumFractionDigits: 2 }) + (cur === "USD" ? " $" : " ₾");
+}
+function finShort(n) { const a = Math.abs(n); return (n < 0 ? "-" : "") + (a >= 1000 ? (Math.round(a / 100) / 10) + "k" : Math.round(a)); }
+/* "2,5" → "2.5"; "1,200.50" → "1200.50" (ათწილადი მძიმე არ უნდა აღიქვას ათასების გამყოფად) */
+function finNum(s) { s = String(s == null ? "" : s).trim().replace(/\s+/g, ""); if (s.includes(",") && !s.includes(".")) s = s.replace(",", "."); return s.replace(/,/g, ""); }
+function finMoLabel(ym) { const p = String(ym).split("-"); return p[1] + "/" + p[0].slice(2); }
+function finToneClass(v) { return v < 0 ? "neg" : "pos"; }
+
+/* ---------------------------------------------------------------- დიაგრამები (SVG, გარე ბიბლიოთეკის გარეშე) */
+function finChart(series) {
+  if (!series.length) return "";
+  const n = series.length, colW = Math.max(30, Math.min(52, Math.floor(340 / n))), barW = Math.max(7, Math.floor(colW * 0.32));
+  const padL = 4, padR = 4, padT = 14, padB = 22, H = 190, W = padL + padR + n * colW;
+  const maxV = Math.max(1, ...series.map((s) => Math.max(s.company_income, s.expenses, s.profit)));
+  const minV = Math.min(0, ...series.map((s) => s.profit));
+  const rng = maxV - minV, plotH = H - padT - padB;
+  const Y = (v) => padT + ((maxV - v) / rng) * plotH, y0 = Y(0);
+  let g = "";
+  for (let i = 0; i <= 3; i++) {
+    const v = minV + (rng * i) / 3, y = Y(v);
+    g += `<line x1="0" x2="${W}" y1="${y}" y2="${y}" stroke="rgba(147,166,188,.16)"/><text x="2" y="${y - 2}" class="chart-lbl">${finShort(v)}</text>`;
+  }
+  const bar = (cx, v, color) => {
+    const y = Math.min(Y(v), y0), h = Math.max(1, Math.abs(Y(v) - y0));
+    return `<rect x="${cx}" y="${y}" width="${barW}" height="${h}" rx="3" fill="${color}"/>`;
+  };
+  let bars = "", pts = [], hits = "", labels = "";
+  series.forEach((s, i) => {
+    const cx = padL + i * colW + colW / 2;
+    bars += bar(cx - barW - 1, s.company_income, FIN_C.income) + bar(cx + 1, s.expenses, FIN_C.exp);
+    pts.push([cx, Y(s.profit)]);
+    labels += `<text x="${cx}" y="${H - 6}" text-anchor="middle" class="chart-lbl">${finMoLabel(s.month)}</text>`;
+    hits += `<rect data-fin-mo="${i}" x="${padL + i * colW}" y="0" width="${colW}" height="${H}" fill="transparent" style="cursor:pointer"/>`;
+  });
+  const line = `<polyline points="${pts.map((p) => p.join(",")).join(" ")}" fill="none" stroke="${FIN_C.profit}" stroke-width="2" stroke-linejoin="round"/>`
+    + pts.map((p) => `<circle cx="${p[0]}" cy="${p[1]}" r="3" fill="${FIN_C.profit}"/>`).join("");
+  return `<div class="fin-scroll"><svg viewBox="0 0 ${W} ${H}" style="min-width:${W}px;width:100%;display:block">${g}${bars}${line}${labels}${hits}</svg></div>`;
+}
+
+function finDonut(parts) {
+  const total = parts.reduce((a, p) => a + p.value, 0);
+  if (!total) return `<div class="empty">მონაცემი ჯერ არ არის</div>`;
+  let off = 25;
+  const segs = parts.filter((p) => p.value > 0).map((p) => {
+    const pc = (p.value / total) * 100;
+    const s = `<circle r="15.9155" cx="21" cy="21" fill="transparent" stroke="${p.color}" stroke-width="6" stroke-dasharray="${pc} ${100 - pc}" stroke-dashoffset="${off}"/>`;
+    off -= pc;
+    return s;
+  }).join("");
+  return `<div class="fin-donut">
+    <svg viewBox="0 0 42 42" width="132" height="132">
+      <circle r="15.9155" cx="21" cy="21" fill="transparent" stroke="rgba(147,166,188,.12)" stroke-width="6"/>${segs}
+      <text x="21" y="20.5" text-anchor="middle" style="font-size:5px;font-weight:800;fill:var(--text)">${finShort(total)}</text>
+      <text x="21" y="26" text-anchor="middle" style="font-size:3px;fill:var(--hint)">საკომისიო ₾</text>
+    </svg>
+    <div class="fin-legend">${parts.map((p) => `<div><span class="dot" style="background:${p.color}"></span>${esc(p.label)}<b>${finMoney(p.value)}</b><span class="pc">${Math.round((p.value / total) * 100)}%</span></div>`).join("")}</div>
+  </div>`;
+}
+
+function finBars(rows, key, color, empty) {
+  if (!rows.length) return `<div class="empty">${esc(empty || "მონაცემი ჯერ არ არის")}</div>`;
+  const max = Math.max(1, ...rows.map((r) => r[key]));
+  return rows.map((r) => `<div class="bar-row"><div class="top"><span>${esc(r.name)}${r.deals ? ` <span style="color:var(--hint);font-weight:500">· ${r.deals}</span>` : ""}</span><span>${finMoney(r[key])}</span></div>
+    <div class="track"><div class="fill" style="width:${Math.max(2, (r[key] / max) * 100)}%;${color ? `background:${color};box-shadow:none` : ""}"></div></div></div>`).join("");
+}
+
+/* ---------------------------------------------------------------- მთავარი ხედი */
+async function renderFinance(content) {
+  const f = state.fin, acc = state.finAccess || {};
+  if (!acc.allowed) {
+    content.innerHTML = acc.setup
+      ? `<div class="card"><h2>💰 ფინანსური ტრეკერი — ჩასართავია</h2>
+          <div class="sub" style="white-space:normal;line-height:1.55">ფინანსურ ტაბს მხოლოდ ის Telegram ID ხედავს, რომელიც სერვერზეა მითითებული. დაყენება (ერთხელ):<br>
+          1) Railway → თქვენი პროექტი → <b>Variables</b><br>2) ახალი ცვლადი: <b>FINANCE_CHAT_IDS</b> = <b style="font-family:monospace;user-select:all">${esc(acc.your_id)}</b><br>
+          3) შეინახეთ და დაელოდეთ ხელახალ გაშვებას, შემდეგ თავიდან გახსენით Mini App.<br>
+          ამის შემდეგ ტაბი ჩანს მხოლოდ ამ ID-ზე — სხვა ადმინებს/მენეჯერებს ვერ დაინახავენ.</div>
+          <div class="chip-row" style="margin-top:12px"><button class="btn" id="finCopyId">📋 ID-ის კოპირება</button></div></div>`
+      : `<div class="card"><div class="empty">ამ განყოფილებაზე წვდომა არ გაქვთ</div></div>`;
+    const cp = document.getElementById("finCopyId");
+    if (cp) cp.onclick = () => { try { navigator.clipboard.writeText(String(acc.your_id)); toast("დაკოპირდა"); } catch (e) { toast("ID: " + acc.your_id); } };
+    return;
+  }
+  finEnsureRange();
+  const seq = ++f.seq;
+  content.innerHTML = `<div class="card"><div class="empty">იტვირთება…</div></div>`;
+  let dash, extra = null;
+  try {
+    dash = await finGet("/api/finance/dashboard?" + finQS());
+    if (f.section === "deals") extra = await finGet("/api/finance/deals?" + finQS() + "&q=" + encodeURIComponent(f.q) + "&agent_id=" + encodeURIComponent(f.agent)
+      + "&ptype=" + encodeURIComponent(f.ptype || "") + "&cur=" + encodeURIComponent(f.cur || "") + "&exp=" + encodeURIComponent(f.exp || ""));
+    else if (f.section === "exp") extra = await finGet("/api/finance/expenses?" + finQS());
+  } catch (e) {
+    if (seq !== f.seq) return;
+    content.innerHTML = `<div class="card"><div class="empty">⚠️ ${esc(e.message)}</div><div class="chip-row" style="justify-content:center"><button class="btn secondary" id="finRetry">თავიდან ცდა</button></div></div>`;
+    document.getElementById("finRetry").onclick = () => renderContent();
+    return;
+  }
+  if (seq !== f.seq || state.tab[state.role] !== "finance") return; // ამასობაში სხვა ტაბზე გადავიდა
+  state.finDash = dash;
+  content.innerHTML = finShell(dash) + finBody(dash, extra);
+  finBind(dash, extra);
+}
+
+function finShell(d) {
+  const f = state.fin, rem = d.reminders || {};
+  const rc = (rem.report_due || []).length + (rem.expiring || []).length + (rem.expired || []).length;
+  const sections = FIN_SECTIONS.map(([id, l]) => `<button data-fin-sec="${id}" class="${f.section === id ? "active" : ""}">${l}${id === "rem" && rc ? ` <span class="badge red">${rc}</span>` : ""}</button>`).join("");
+  const now = finNow();
+  const presets = [["ეს თვე", now, now], ["3 თვე", finAdd(now, -2), now], ["6 თვე", finAdd(now, -5), now], ["ეს წელი", now.slice(0, 4) + "-01", now], ["12 თვე", finAdd(now, -11), now]];
+  return `<div class="card"><div class="period-switch fin-sec" id="finSections">${sections}</div>
+    ${f.section === "rem" ? "" : `<div class="fin-range">
+      <input type="month" id="finFrom" value="${esc(f.from)}"><span>—</span><input type="month" id="finTo" value="${esc(f.to)}">
+    </div>
+    <div class="chip-row">${presets.map(([l, a, b]) => `<button class="chip ${f.from === a && f.to === b ? "sel" : ""}" data-fin-preset="${a}|${b}">${l}</button>`).join("")}</div>`}
+  </div>`;
+}
+
+function finBody(d, extra) {
+  const f = state.fin;
+  if (f.section === "deals") return finDealsView(d, extra);
+  if (f.section === "exp") return finExpensesView(d, extra);
+  if (f.section === "rep") return finReportView(d);
+  if (f.section === "rem") return finRemindersView(d);
+  return finDashView(d);
+}
+
+function finDashView(d) {
+  const s = d.summary, t = s.totals, ds = s.distribution, rem = d.reminders || {};
+  const stat = (n, l, cls) => `<div class="stat"><div class="num fin-num ${cls || ""}">${n}</div><div class="lbl">${esc(l)}</div></div>`;
+  let h = "";
+  if (s.unconverted_usd) h += `<div class="card" style="border-color:rgba(245,185,66,.5)"><div class="sub" style="white-space:normal;color:var(--amber);font-weight:650">⚠️ ${s.unconverted_usd.deals} გარიგება დოლარშია და ჯერ არ ჩაითვალა ჯამებში — ქვემოთ მიუთითეთ დოლარის კურსი.</div></div>`;
+  const rc = (rem.report_due || []).length, ec = (rem.expiring || []).length, xc = (rem.expired || []).length;
+  if (rc + ec + xc) h += `<div class="card fin-alert" data-fin-go="rem"><b>🔔 ყურადღება:</b> ${rc ? `რეპორტინგი: <b>${rc}</b> · ` : ""}${ec ? `იწურება: <b>${ec}</b> · ` : ""}${xc ? `ვადაგასული: <b>${xc}</b>` : ""}<span style="float:right">›</span></div>`;
+  h += `<div class="card"><h2>💰 შეჯამება <span class="cnt">${finMoLabel(s.from)} — ${finMoLabel(s.to)}</span></h2>
+    <div class="grid3">
+      ${stat(finMoney(t.company_income), "კომპანიის შემოსავალი", "gold")}
+      ${stat(finMoney(t.expenses), "ხარჯები", "")}
+      ${stat(finMoney(t.profit), "წმინდა მოგება", finToneClass(t.profit))}
+      ${stat(t.margin_pct == null ? "—" : t.margin_pct + "%", "მარჟა", finToneClass(t.profit))}
+      ${stat(finMoney(t.commission), "სრული საკომისიო", "")}
+      ${stat(t.deals, "გარიგება", "")}
+      ${stat(finMoney(t.agent_payout), "აგენტებს", "")}
+      ${stat(finMoney(t.tl_payout), "თიმლიდერებს", "")}
+      ${stat(finMoney(t.deals ? t.commission / t.deals : 0), "საშ. საკომისიო", "")}
+    </div></div>`;
+  h += `<div class="card"><h2>📈 შემოსავალი / ხარჯი / მოგება</h2>
+    <div class="fin-legend inline"><span><i class="dot" style="background:${FIN_C.income}"></i>შემოსავალი</span><span><i class="dot" style="background:${FIN_C.exp}"></i>ხარჯი</span><span><i class="dot" style="background:${FIN_C.profit}"></i>მოგება</span></div>
+    ${finChart(s.series)}<div class="sub" id="finMoInfo" style="white-space:normal;margin-top:6px">დააჭირეთ თვის სვეტს დეტალებისთვის</div></div>`;
+  h += `<div class="card"><h2>🥧 საკომისიოს განაწილება</h2>${finDonut([
+    { label: "კომპანია", value: ds.company, color: FIN_C.income }, { label: "აგენტები", value: ds.agents, color: FIN_C.agents }, { label: "თიმლიდერები", value: ds.team_leaders, color: FIN_C.tl }])}</div>`;
+  h += `<div class="card"><h2>🏆 აგენტები — კომპანიის შემოსავალი</h2>${finBars([...s.by_agent].sort((a, b) => b.company_income - a.company_income).slice(0, 10), "company_income")}</div>`;
+  h += `<div class="card"><h2>📍 რაიონები — კომპანიის შემოსავალი</h2>${finBars(s.by_district.slice(0, 8), "company_income")}</div>`;
+  h += `<div class="card"><h2>🏠 ქონების ტიპი</h2>${finBars(s.by_property_type, "company_income")}</div>`;
+  h += `<div class="card"><h2>💸 ხარჯები კატეგორიებით</h2>${finBars(s.expenses_by_category.map((c) => ({ name: c.name, amount: c.amount })), "amount", FIN_C.exp, "ხარჯი ამ პერიოდში არ არის")}</div>`;
+  h += `<div class="card"><h2>⭐ საუკეთესო გარიგებები</h2>${s.top_deals.length ? s.top_deals.map((x) => `<div class="list-row clickable" data-fin-deal="${esc(x.deal_id)}"><div class="main"><div class="title" style="white-space:normal">${esc(x.address || x.invoice_no || "—")}</div><div class="sub">${esc(x.date)} · ${esc(x.agent_name || "—")}</div></div><div class="side"><b>${finMoney(x.company_income)}</b></div></div>`).join("") : `<div class="empty">გარიგება არ არის</div>`}</div>`;
+  h += `<div class="card"><h2>⚙️ დოლარის კურსი</h2><div class="qa-compose"><input id="finRate" inputmode="decimal" placeholder="მაგ. 2.70" value="${d.usd_rate == null ? "" : esc(d.usd_rate)}">
+    <button class="btn" id="finRateSave">შენახვა</button></div><div class="sub" style="white-space:normal;margin-top:6px">USD გარიგებები/ხარჯები ჯამებში ლარად გადაითვლება ამ კურსით (1 $ = X ₾). ერთი კურსი ყველა პერიოდზე.</div></div>`;
+  return h;
+}
+
+function finDealRow(d) {
+  let badge = "";
+  if (d.contract_expiry) {
+    const days = Math.round((new Date(d.contract_expiry + "T00:00:00") - new Date(new Date().toDateString())) / 864e5);
+    badge = days < 0 ? `<span class="badge red">ვადაგასული</span>` : days <= 60 ? `<span class="badge amber">${days} დღე</span>` : "";
+  }
+  return `<div class="list-row clickable" style="align-items:flex-start" data-fin-deal="${esc(d.deal_id)}"><div class="avatar">🧾</div>
+    <div class="main"><div class="title" style="white-space:normal">${esc(d.address || d.recipient || "—")}</div>
+      <div class="sub">${esc(d.date)} · ${esc(d.invoice_no)}${d.district ? " · " + esc(d.district) : ""}</div>
+      <div class="sub">${esc(d.agent_name || "—")} · საკომისიო ${finMoney(d.commission, d.currency)}</div></div>
+    <div class="side"><b>${finMoney(d.company_income, d.currency)}</b><div>${badge}</div></div></div>`;
+}
+
+function finDealsView(d, x) {
+  const f = state.fin, agents = d.lookups.agents;
+  return `<div class="card"><div class="qa-compose">
+      <input id="finQ" type="search" placeholder="🔎 ძებნა: ინვოისი, ტელეფონი, პირადი №, მისამართი, ვადა, კლიენტი…" value="${esc(f.q)}">
+      <select id="finAgentF"><option value="">ყველა აგენტი</option>${agents.map((a) => `<option value="${esc(a.agent_id)}" ${f.agent === a.agent_id ? "selected" : ""}>${esc(a.name)}</option>`).join("")}</select>
+      <select id="finTypeF"><option value="">ყველა ტიპი</option>${d.lookups.property_types.map((p) => `<option value="${esc(p)}" ${f.ptype === p ? "selected" : ""}>${esc(p)}</option>`).join("")}</select>
+      <select id="finCurF"><option value="">ყველა ვალუტა</option><option value="GEL" ${f.cur === "GEL" ? "selected" : ""}>₾ GEL</option><option value="USD" ${f.cur === "USD" ? "selected" : ""}>$ USD</option></select>
+      <select id="finExpF"><option value="">ვადა: ყველა</option><option value="soon" ${f.exp === "soon" ? "selected" : ""}>იწურება (≤60 დღე)</option><option value="expired" ${f.exp === "expired" ? "selected" : ""}>ვადაგასული</option><option value="none" ${f.exp === "none" ? "selected" : ""}>ვადის გარეშე</option></select>
+      <div class="chip-row"><button class="btn" id="finNewDeal">➕ ახალი გარიგება</button><button class="btn secondary" id="finCsvDeals">📤 CSV</button></div>
+    </div>
+    <h2 style="margin-top:12px">🧾 გარიგებები <span class="cnt">${x.count}</span></h2>
+    ${x.rows.length ? x.rows.map(finDealRow).join("") : `<div class="empty">ამ პერიოდში გარიგება არ არის</div>`}
+    ${x.count > x.rows.length ? `<div class="sub" style="text-align:center;margin-top:8px">ნაჩვენებია პირველი ${x.rows.length} — დააზუსტეთ პერიოდი/ძებნა</div>` : ""}</div>`;
+}
+
+function finExpenseRow(e) {
+  return `<div class="list-row clickable" data-fin-exp="${esc(e.expense_id)}"><div class="avatar">💸</div>
+    <div class="main"><div class="title" style="white-space:normal">${esc(e.category)}${e.description ? " — " + esc(e.description) : ""}</div>
+      <div class="sub">${esc(e.date)}${e.recurring === "yes" ? ` · ყოველთვიური${e.until_month ? " (" + esc(e.until_month) + "-მდე)" : ""}` : ""}</div></div>
+    <div class="side"><b>${finMoney(e.amount, e.currency)}</b>${e.recurring === "yes" ? `<div><span class="badge amber">🔁</span></div>` : ""}</div></div>`;
+}
+
+function finExpensesView(d, x) {
+  return `<div class="card"><div class="chip-row"><button class="btn" id="finNewExp">➕ ახალი ხარჯი</button><button class="btn secondary" id="finCsvExp">📤 CSV</button></div>
+    <h2 style="margin-top:12px">💸 ხარჯები <span class="cnt">${x.count}</span></h2>
+    ${x.rows.length ? x.rows.map(finExpenseRow).join("") : `<div class="empty">ამ პერიოდში ხარჯი არ არის</div>`}
+    <div class="sub" style="white-space:normal;margin-top:8px">🔁 ყოველთვიური ხარჯი ითვლება დაწყების თვიდან ყოველ თვეს (ან მითითებულ თვემდე).</div></div>`;
+}
+
+function finReportView(d) {
+  const s = d.summary, t = s.totals;
+  const trs = (rows, key) => rows.length ? rows.map((r) => `<div class="list-row"><div class="main"><div class="title" style="white-space:normal">${esc(r.name)}</div>
+      <div class="sub">${r.deals} გარიგება · საკომისიო ${finMoney(r.commission)}</div></div><div class="side"><b>${finMoney(r[key])}</b></div></div>`).join("") : `<div class="empty">მონაცემი არ არის</div>`;
+  return `<div class="card"><h2>📑 ანგარიში <span class="cnt">${finMoLabel(s.from)} — ${finMoLabel(s.to)}</span></h2>
+      <div class="list-row"><div class="main"><div class="title">გარიგება</div></div><div class="side"><b>${t.deals}</b></div></div>
+      <div class="list-row"><div class="main"><div class="title">რეალიზაციის ჯამი</div></div><div class="side"><b>${finMoney(t.value)}</b></div></div>
+      <div class="list-row"><div class="main"><div class="title">სრული საკომისიო</div></div><div class="side"><b>${finMoney(t.commission)}</b></div></div>
+      <div class="list-row"><div class="main"><div class="title">აგენტებს გადასახდელი</div></div><div class="side"><b>${finMoney(t.agent_payout)}</b></div></div>
+      <div class="list-row"><div class="main"><div class="title">თიმლიდერებს გადასახდელი</div></div><div class="side"><b>${finMoney(t.tl_payout)}</b></div></div>
+      <div class="list-row"><div class="main"><div class="title">კომპანიის შემოსავალი</div></div><div class="side"><b style="color:${FIN_C.income}">${finMoney(t.company_income)}</b></div></div>
+      <div class="list-row"><div class="main"><div class="title">ხარჯები</div></div><div class="side"><b>${finMoney(t.expenses)}</b></div></div>
+      <div class="list-row"><div class="main"><div class="title">წმინდა მოგება</div></div><div class="side"><b style="color:${t.profit < 0 ? "var(--red)" : "var(--green)"}">${finMoney(t.profit)}</b></div></div>
+      <div class="chip-row" style="margin-top:12px"><button class="btn secondary" id="finCsvDeals">📤 გარიგებები CSV</button><button class="btn secondary" id="finCsvExp">📤 ხარჯები CSV</button></div>
+      <div class="sub" style="white-space:normal;margin-top:6px">CSV ფაილი გამოგეგზავნებათ Telegram-ში (ქართული სათაურებით, Excel/Google Sheets-ში იხსნება).</div></div>
+    <div class="card"><h2>🧑‍💼 აგენტების მიხედვით <span class="cnt">${s.by_agent.length}</span></h2>${trs(s.by_agent, "company_income")}<div class="sub" style="margin-top:6px">მარჯვნივ — კომპანიის შემოსავალი</div></div>
+    <div class="card"><h2>👥 თიმლიდერების მიხედვით</h2>${trs(s.by_team_leader, "tl_payout")}<div class="sub" style="margin-top:6px">მარჯვნივ — თიმლიდერის წილი</div></div>
+    <div class="card"><h2>📍 რაიონების მიხედვით</h2>${trs(s.by_district, "company_income")}</div>
+    <div class="card"><h2>🏠 ქონების ტიპის მიხედვით</h2>${trs(s.by_property_type, "company_income")}</div>`;
+}
+
+function finRemRow(r, kind) {
+  const right = kind === "report" ? `<span class="badge amber">${r.months} თვე</span>`
+    : kind === "expiring" ? `<span class="badge amber">${r.days_left} დღე</span>` : `<span class="badge red">${-r.days_left} დღით ვადაგასული</span>`;
+  return `<div class="list-row" style="align-items:flex-start"><div class="main clickable" data-fin-deal="${esc(r.deal_id)}" style="cursor:pointer">
+      <div class="title" style="white-space:normal">${esc(r.address || "—")}</div>
+      <div class="sub">${esc(r.client_name || "—")} · ${esc(r.agent_name || "—")} · ${esc(r.invoice_no)}</div>
+      ${kind !== "report" ? `<div class="sub">ვადა: ${esc(r.contract_expiry)}</div>` : `<div class="sub">ხელშეკრულებიდან: ${esc(r.date)}</div>`}</div>
+    <div class="side">${right}${kind === "report" ? `<div style="margin-top:6px"><button class="btn" data-fin-done="${esc(r.deal_id)}" style="padding:7px 9px;font-size:12px">✅ გაკეთდა</button></div>` : ""}</div></div>`;
+}
+
+function finRemindersView(d) {
+  const r = d.reminders || {};
+  const sec = (title, rows, kind, empty) => `<div class="card"><h2>${title} <span class="cnt">${rows.length}</span></h2>${rows.length ? rows.map((x) => finRemRow(x, kind)).join("") : `<div class="empty">${empty}</div>`}</div>`;
+  return sec("📊 რეპორტინგის დრო", r.report_due || [], "report", "ამ თვეს რეპორტინგი არავისზე გმართებთ ✅")
+    + sec("⏳ ხელშეკრულება იწურება", r.expiring || [], "expiring", "მალე ვადა არავის გასდის ✅")
+    + sec("⛔ ვადაგასული", r.expired || [], "expired", "ვადაგასული არ არის ✅")
+    + `<div class="card"><div class="sub" style="white-space:normal">ℹ️ რეპორტინგი — ყოველ N თვეში ხელშეკრულების გაფორმებიდან (ნაგულისხმევად 2). ვადის შეხსენება — ვადამდე 60 და 30 დღით ადრე. ეს შეხსენებები Telegram-შიც მოგივათ ყოველდღე 10:00-ზე (ერთხელ თითო მოვლენაზე). პარამეტრები ცალკე გარიგებაზე იცვლება.</div></div>`;
+}
+
+/* ---------------------------------------------------------------- მოდალები */
+function finModal(title, html) {
+  const backdrop = document.getElementById("modalBackdrop"), box = document.getElementById("modalBox");
+  box.innerHTML = `<h3>${esc(title)}<button class="close" id="modalClose">✕</button></h3>${html}`;
+  backdrop.hidden = false;
+  document.getElementById("modalClose").onclick = closeDetail;
+  backdrop.onclick = (e) => { if (e.target === backdrop) closeDetail(); };
+}
+const FIN_MSG = `<div id="finMsg" class="sub" hidden style="color:var(--red);font-weight:650;white-space:normal"></div>`;
+function finErr(msg) { const el = document.getElementById("finMsg"); if (el) { el.textContent = "⚠️ " + msg; el.hidden = false; } else toast(msg); }
+function finIn(id, label, val, attrs) { return `<label class="fin-l" for="${id}">${esc(label)}</label><input id="${id}" value="${esc(val == null ? "" : val)}" ${attrs || ""}>`; }
+function finSel(id, label, opts, sel, first) {
+  const list = opts.slice(); if (sel && !list.some((o) => o[0] === sel)) list.push([sel, sel]);
+  return `<label class="fin-l" for="${id}">${esc(label)}</label><select id="${id}">${first != null ? `<option value="">${esc(first)}</option>` : ""}${list.map(([v, l]) => `<option value="${esc(v)}" ${v === sel ? "selected" : ""}>${esc(l)}</option>`).join("")}</select>`;
+}
+const finV = (id) => { const el = document.getElementById(id); return el ? el.value : ""; };
+
+async function finOpenDeal(id) {
+  let x;
+  try { x = (await finGet("/api/finance/deals/" + encodeURIComponent(id))).deal; } catch (e) { toast(e.message); return; }
+  const c = x.currency;
+  const fields = [
+    ["ინვოისის ნომერი", x.invoice_no], ["თარიღი", x.date], ["მომწოდებელი", x.provider], ["ქონების ტიპი", x.property_type],
+    ["მიმღები", x.recipient], ["მიმღების ტელეფონი", x.recipient_phone], ["მიმღების პირადი №", x.recipient_pid], ["საკადასტრო კოდი", x.cadastral_code],
+    ["რაიონი", x.district], ["მისამართი", x.address], ["რეალიზაციის ღირებულება", finMoney(x.value, c)], ["თანამშრომლობის %", x.coop_percent + "%"],
+    ["საკომისიო", finMoney(x.commission, c)], ["აგენტი", `${x.agent_name || "—"} (${x.agent_percent}%) → ${finMoney(x.agent_payout, c)}`],
+    ["თიმლიდერი", x.team_leader ? `${x.team_leader} (${x.tl_percent}%) → ${finMoney(x.tl_payout, c)}` : ""],
+    ["კომპანიის შემოსავალი", finMoney(x.company_income, c)], ["კონტრაქტის ვადა", x.contract_expiry], ["კლიენტი", x.client_name],
+    ["კლიენტის ტელეფონი", x.client_phone], ["კლიენტის პირადი №", x.client_pid],
+    ["შეხსენებები", `რეპორტინგი ყოველ ${x.remind_report_months} თვეში · ვადამდე ${x.remind_expiry_days} დღით ადრე`], ["შენიშვნა", x.notes],
+  ].map(([label, value]) => ({ label, value }));
+  openDetail("🧾 " + (x.invoice_no || "გარიგება"), fields,
+    `<div class="chip-row" style="margin-top:12px;gap:8px"><button class="btn" id="finEditDeal">✏️ რედაქტირება</button><button class="btn danger" id="finDelDeal">🗑 წაშლა</button></div>`);
+  document.getElementById("finEditDeal").onclick = () => finDealForm(x);
+  document.getElementById("finDelDeal").onclick = async (ev) => {
+    if (!confirm("გარიგება წაიშალოს? (ჩანაწერი ცხრილში შენახული დარჩება, მაგრამ ჯამებში აღარ ჩაითვლება)")) return;
+    ev.target.disabled = true;
+    try { await finSend("DELETE", "/api/finance/deals/" + encodeURIComponent(x.deal_id)); toast("წაიშალა"); closeDetail(); renderContent(); }
+    catch (e) { toast(e.message); ev.target.disabled = false; }
+  };
+}
+
+function finDealForm(x) {
+  const d = state.finDash, L = d.lookups, edit = !!x;
+  x = x || { date: d.today, currency: "GEL", coop_percent: "100", agent_percent: "", tl_percent: "", remind_report_months: "2", remind_expiry_days: "60" };
+  // ხელით საკომისიო ივსება მხოლოდ თუ ავტომატურისგან განსხვავდება
+  const auto = Math.round(parseFloat(x.value || 0) * parseFloat(x.coop_percent || 0)) / 100;
+  const manualComm = edit && Math.abs(parseFloat(x.commission) - auto) > 0.009 ? x.commission : "";
+  const tls = [...new Set(L.agents.filter((a) => a.role === "team_lead").map((a) => a.name))];
+  const num = `type="text" inputmode="decimal"`;
+  finModal(edit ? "✏️ გარიგების რედაქტირება" : "➕ ახალი გარიგება", `<div class="qa-compose fin-form">
+    <div class="fin-h">ინვოისი და ქონება</div>
+    ${finIn("fdInv", "ინვოისის № (ცარიელი = ავტომატური)", edit ? x.invoice_no : "", 'placeholder="INV-YYYYMM-0001"')}
+    ${finIn("fdDate", "თარიღი", x.date, 'type="date"')}
+    ${finIn("fdProv", "მომწოდებელი", x.provider)}
+    ${finSel("fdType", "ქონების ტიპი", L.property_types.map((p) => [p, p]), x.property_type, "— აირჩიეთ —")}
+    ${finIn("fdRec", "მიმღები (მესაკუთრე)", x.recipient)}
+    ${finIn("fdRPhone", "მიმღების ტელეფონი", x.recipient_phone, 'inputmode="tel"')}
+    ${finIn("fdRPid", "მიმღების პირადი ნომერი", x.recipient_pid, 'inputmode="numeric"')}
+    ${finIn("fdCad", "საკადასტრო კოდი", x.cadastral_code)}
+    ${finIn("fdDist", "რაიონი", x.district)}
+    ${finIn("fdAddr", "მისამართი", x.address)}
+    <div class="fin-h">თანხა და განაწილება</div>
+    ${finIn("fdVal", "რეალიზაციის ღირებულება", x.value, num)}
+    ${finSel("fdCur", "ვალუტა", [["GEL", "₾ GEL"], ["USD", "$ USD"]], x.currency)}
+    ${finIn("fdCoop", "თანამშრომლობის პროცენტი %", x.coop_percent, num)}
+    ${finIn("fdComm", "საკომისიო (ცარიელი = ღირებულება × პროცენტი)", manualComm, num + ' placeholder="ავტომატური"')}
+    ${finSel("fdAgent", "აგენტი", L.agents.map((a) => [a.agent_id, a.name + (a.team ? " · " + a.team : "")]), x.agent_id, "— აგენტის გარეშე —")}
+    ${finIn("fdAPct", "აგენტის პროცენტი % (საკომისიოდან)", x.agent_percent, num)}
+    ${finIn("fdTL", "თიმლიდერი", x.team_leader, 'list="fdTLs"')}<datalist id="fdTLs">${tls.map((n) => `<option value="${esc(n)}">`).join("")}</datalist>
+    ${finIn("fdTPct", "თიმლიდერის პროცენტი % (საკომისიოდან)", x.tl_percent, num)}
+    <div class="fin-calc" id="fdCalc"></div>
+    <div class="fin-h">კლიენტი და ხელშეკრულება</div>
+    ${finIn("fdExp", "კონტრაქტის ვადა", x.contract_expiry, 'type="date"')}
+    ${finIn("fdCName", "კლიენტის სახელი", x.client_name)}
+    ${finIn("fdCPhone", "კლიენტის ტელეფონი", x.client_phone, 'inputmode="tel"')}
+    ${finIn("fdCPid", "კლიენტის პირადი ნომერი", x.client_pid, 'inputmode="numeric"')}
+    <div class="fin-h">შეხსენებები და შენიშვნა</div>
+    ${finIn("fdRep", "რეპორტინგი ყოველ N თვეში (0 = გამორთვა)", x.remind_report_months, 'type="number" min="0" max="24"')}
+    ${finIn("fdExpDays", "ვადის შეხსენება N დღით ადრე (0 = გამორთვა)", x.remind_expiry_days, 'type="number" min="0" max="365"')}
+    <label class="fin-l" for="fdNotes">შენიშვნა</label><textarea id="fdNotes">${esc(x.notes || "")}</textarea>
+    ${FIN_MSG}
+    <button class="btn" id="fdSave">${edit ? "💾 შენახვა" : "✅ დამატება"}</button>
+  </div>`);
+  const calc = () => {
+    const r2 = (n) => Math.round((n + Number.EPSILON) * 100) / 100;
+    const val = parseFloat(finNum(finV("fdVal"))) || 0, coop = parseFloat(finNum(finV("fdCoop"))) || 0;
+    const cm = finNum(finV("fdComm"));
+    const com = cm !== "" ? parseFloat(cm) || 0 : r2((val * coop) / 100);
+    const ap = parseFloat(finNum(finV("fdAPct"))) || 0, tp = parseFloat(finNum(finV("fdTPct"))) || 0;
+    const a = r2((com * ap) / 100), t = r2((com * tp) / 100), c = r2(com - a - t), cur = finV("fdCur");
+    document.getElementById("fdCalc").innerHTML = `<b>გამოთვლა:</b> საკომისიო <b>${finMoney(com, cur)}</b> · აგენტი <b>${finMoney(a, cur)}</b> · თიმლიდერი <b>${finMoney(t, cur)}</b><br>`
+      + `კომპანიის შემოსავალი: <b style="color:${c < 0 ? "var(--red)" : FIN_C.income}">${finMoney(c, cur)}</b>${ap + tp > 100 ? `<br><span style="color:var(--red)">⚠️ პროცენტების ჯამი 100-ს აღემატება</span>` : ""}`;
+  };
+  ["fdVal", "fdCur", "fdCoop", "fdComm", "fdAPct", "fdTPct"].forEach((id) => { const el = document.getElementById(id); el.oninput = calc; el.onchange = calc; });
+  document.getElementById("fdAgent").onchange = () => {
+    const a = L.agents.find((z) => z.agent_id === finV("fdAgent"));
+    const tl = a && L.agents.find((z) => z.role === "team_lead" && z.team && z.team === a.team && z.agent_id !== a.agent_id);
+    if (tl && !finV("fdTL")) document.getElementById("fdTL").value = tl.name;
+  };
+  calc();
+  document.getElementById("fdSave").onclick = async (ev) => {
+    const body = {
+      invoice_no: finV("fdInv").trim(), date: finV("fdDate"), provider: finV("fdProv"), property_type: finV("fdType"),
+      recipient: finV("fdRec"), recipient_phone: finV("fdRPhone"), recipient_pid: finV("fdRPid"), cadastral_code: finV("fdCad"),
+      district: finV("fdDist"), address: finV("fdAddr"), value: finNum(finV("fdVal")), currency: finV("fdCur"),
+      coop_percent: finNum(finV("fdCoop")), commission: finNum(finV("fdComm")), agent_id: finV("fdAgent"),
+      agent_name: "", agent_percent: finNum(finV("fdAPct")) || "0", team_leader: finV("fdTL"), tl_percent: finNum(finV("fdTPct")) || "0",
+      contract_expiry: finV("fdExp"), client_name: finV("fdCName"), client_phone: finV("fdCPhone"), client_pid: finV("fdCPid"),
+      remind_report_months: finV("fdRep"), remind_expiry_days: finV("fdExpDays"), notes: finV("fdNotes"),
+    };
+    if (!body.value) { finErr("მიუთითეთ რეალიზაციის ღირებულება"); return; }
+    if (!body.date) { finErr("მიუთითეთ თარიღი"); return; }
+    ev.target.disabled = true;
+    try {
+      if (edit) await finSend("PUT", "/api/finance/deals/" + encodeURIComponent(x.deal_id), body);
+      else await finSend("POST", "/api/finance/deals", body);
+      tg && tg.HapticFeedback && tg.HapticFeedback.notificationOccurred("success");
+      toast(edit ? "შენახულია ✅" : "გარიგება დაემატა ✅");
+      closeDetail(); renderContent();
+    } catch (e) { finErr(e.message); ev.target.disabled = false; }
+  };
+}
+
+function finExpenseForm(x) {
+  const d = state.finDash, L = d.lookups, edit = !!x;
+  x = x || { date: d.today, currency: "GEL", recurring: "no" };
+  finModal(edit ? "✏️ ხარჯის რედაქტირება" : "➕ ახალი ხარჯი", `<div class="qa-compose fin-form">
+    ${finIn("feDate", "თარიღი (განმეორებადისთვის — დაწყების თარიღი)", x.date, 'type="date"')}
+    ${finSel("feCat", "კატეგორია", L.expense_categories.map((c) => [c, c]), x.category, "— აირჩიეთ —")}
+    ${finIn("feDesc", "აღწერა", x.description)}
+    ${finIn("feAmt", "თანხა", x.amount, 'type="text" inputmode="decimal"')}
+    ${finSel("feCur", "ვალუტა", [["GEL", "₾ GEL"], ["USD", "$ USD"]], x.currency)}
+    <label class="chk-row"><input type="checkbox" id="feRec" ${x.recurring === "yes" ? "checked" : ""}> 🔁 ყოველთვიური (მეორდება ყოველ თვეს)</label>
+    <div id="feUntilBox" ${x.recurring === "yes" ? "" : "hidden"}>${finIn("feUntil", "ბოლო თვე (ცარიელი = უვადოდ)", x.until_month, 'type="month"')}</div>
+    ${FIN_MSG}
+    <button class="btn" id="feSave">${edit ? "💾 შენახვა" : "✅ დამატება"}</button>
+    ${edit ? `<button class="btn danger" id="feDel">🗑 წაშლა</button>` : ""}
+  </div>`);
+  document.getElementById("feRec").onchange = (e) => { document.getElementById("feUntilBox").hidden = !e.target.checked; };
+  document.getElementById("feSave").onclick = async (ev) => {
+    const body = { date: finV("feDate"), category: finV("feCat"), description: finV("feDesc"), amount: finNum(finV("feAmt")), currency: finV("feCur"),
+      recurring: document.getElementById("feRec").checked ? "yes" : "no", until_month: document.getElementById("feRec").checked ? finV("feUntil") : "" };
+    if (!body.category) { finErr("აირჩიეთ კატეგორია"); return; }
+    if (!body.amount) { finErr("მიუთითეთ თანხა"); return; }
+    ev.target.disabled = true;
+    try {
+      if (edit) await finSend("PUT", "/api/finance/expenses/" + encodeURIComponent(x.expense_id), body);
+      else await finSend("POST", "/api/finance/expenses", body);
+      toast("შენახულია ✅"); closeDetail(); renderContent();
+    } catch (e) { finErr(e.message); ev.target.disabled = false; }
+  };
+  const del = document.getElementById("feDel");
+  if (del) del.onclick = async () => {
+    if (!confirm("ხარჯი წაიშალოს?")) return;
+    del.disabled = true;
+    try { await finSend("DELETE", "/api/finance/expenses/" + encodeURIComponent(x.expense_id)); toast("წაიშალა"); closeDetail(); renderContent(); }
+    catch (e) { toast(e.message); del.disabled = false; }
+  };
+}
+
+/* ---------------------------------------------------------------- მოვლენები */
+function finBind(d, extra) {
+  const f = state.fin;
+  document.querySelectorAll("[data-fin-sec]").forEach((b) => { b.onclick = () => { f.section = b.dataset.finSec; renderContent(); }; });
+  const range = () => { const a = finV("finFrom"), b = finV("finTo"); if (a && b) { f.from = a; f.to = b; renderContent(); } };
+  const fe = document.getElementById("finFrom"), te = document.getElementById("finTo");
+  if (fe) fe.onchange = range;
+  if (te) te.onchange = range;
+  document.querySelectorAll("[data-fin-preset]").forEach((b) => { b.onclick = () => { const p = b.dataset.finPreset.split("|"); f.from = p[0]; f.to = p[1]; renderContent(); }; });
+  document.querySelectorAll("[data-fin-go]").forEach((b) => { b.onclick = () => { f.section = b.dataset.finGo; renderContent(); }; });
+  document.querySelectorAll("[data-fin-deal]").forEach((b) => { b.onclick = () => finOpenDeal(b.dataset.finDeal); });
+  document.querySelectorAll("[data-fin-exp]").forEach((b) => {
+    b.onclick = () => { const e = (extra.rows || []).find((r) => r.expense_id === b.dataset.finExp); if (e) finExpenseForm(e); };
+  });
+  document.querySelectorAll("[data-fin-done]").forEach((b) => {
+    b.onclick = async () => {
+      b.disabled = true;
+      try { await finSend("POST", `/api/finance/deals/${encodeURIComponent(b.dataset.finDone)}/report-done`); toast("დაფიქსირდა ✅"); renderContent(); }
+      catch (e) { toast(e.message); b.disabled = false; }
+    };
+  });
+  const q = document.getElementById("finQ");
+  if (q) q.onchange = () => { f.q = q.value.trim(); renderContent(); };
+  const af = document.getElementById("finAgentF");
+  if (af) af.onchange = () => { f.agent = af.value; renderContent(); };
+  [["finTypeF", "ptype"], ["finCurF", "cur"], ["finExpF", "exp"]].forEach(([id, k]) => {
+    const el = document.getElementById(id);
+    if (el) el.onchange = () => { f[k] = el.value; renderContent(); };
+  });
+  const nd = document.getElementById("finNewDeal"); if (nd) nd.onclick = () => finDealForm(null);
+  const ne = document.getElementById("finNewExp"); if (ne) ne.onclick = () => finExpenseForm(null);
+  const csv = (id, kind) => {
+    const b = document.getElementById(id);
+    if (b) b.onclick = async () => {
+      b.disabled = true;
+      try { const r = await finGet(`/api/finance/export?kind=${kind}&${finQS()}`); toast(`ფაილი გამოგეგზავნათ Telegram-ში (${r.rows} ჩანაწერი)`); }
+      catch (e) { toast(e.message); }
+      b.disabled = false;
+    };
+  };
+  csv("finCsvDeals", "deals"); csv("finCsvExp", "expenses");
+  const rs = document.getElementById("finRateSave");
+  if (rs) rs.onclick = async () => {
+    rs.disabled = true;
+    try { await finSend("POST", "/api/finance/settings", { usd_rate: finNum(finV("finRate")) }); toast("კურსი შენახულია ✅"); renderContent(); }
+    catch (e) { toast(e.message); rs.disabled = false; }
+  };
+  // დიაგრამა: თვის სვეტზე დაჭერა → დეტალები
+  const info = document.getElementById("finMoInfo");
+  if (info && d.summary) {
+    const series = d.summary.series;
+    const show = (i) => {
+      const s = series[i]; if (!s) return;
+      info.innerHTML = `<b>${esc(s.month)}</b> · შემოსავალი <b style="color:${FIN_C.income}">${finMoney(s.company_income)}</b> · ხარჯი <b style="color:${FIN_C.exp}">${finMoney(s.expenses)}</b> · მოგება <b style="color:${s.profit < 0 ? "var(--red)" : "var(--green)"}">${finMoney(s.profit)}</b> · გარიგება ${s.deals}`;
+    };
+    document.querySelectorAll("[data-fin-mo]").forEach((r) => { r.onclick = () => show(parseInt(r.dataset.finMo, 10)); });
+  }
+}
+
+async function finLoadAccess() {
+  try {
+    const a = await api("/api/finance/access");
+    const changed = JSON.stringify(a) !== JSON.stringify(state.finAccess || null);
+    state.finAccess = a;
+    if (changed) renderTabbar();
+  } catch (e) { /* წვდომა არ აქვს ან ქსელი — ტაბი უბრალოდ არ გამოჩნდება */ }
+}
+
 /* `adminOnly` ტაბები (მაგ. აგენტების/მენეჯერების მართვა) დირექტორის
    დონის მოქმედებაა — თიმლიდერს (რომელიც ტექნიკურად იმავე "admin"
    role-ზეა Mini App-ში, საკუთარი გუნდის ფილტრირებული ხედვით) არ
    უჩნდება, რომ არ დაერიოს პირამიდის სტრუქტურაში. */
 function tabsFor(role) {
-  const tabs = role === "admin" ? ADMIN_TABS : AGENT_TABS;
+  let tabs = role === "admin" ? ADMIN_TABS : AGENT_TABS;
   if (role === "admin" && state.data && state.data.is_team_lead) {
-    return tabs.filter((t) => !t.adminOnly);
+    tabs = tabs.filter((t) => !t.adminOnly);
+  }
+  // 💰 ფინანსები: მხოლოდ სერვერის მიერ დადასტურებულ ID-ს (ან ადმინს ინსტრუქციისთვის, სანამ ჯერ არავინ არის მითითებული)
+  const fa = state.finAccess;
+  if (fa && (fa.allowed || (fa.setup && role === "admin"))) {
+    tabs = tabs.slice();
+    tabs.splice(1, 0, FIN_TAB);
   }
   return tabs;
 }
@@ -4130,6 +4638,7 @@ async function renderContent() {
   const tab = state.tab[state.role];
 
   try {
+    if (tab === "finance") { await renderFinance(content); return; }
     if (LAZY_ENDPOINTS[tab]) {
       if (!lazyCache[tab]) {
         content.innerHTML = `<div class="card"><div class="empty">იტვირთება…</div></div>`;
@@ -4259,6 +4768,7 @@ async function load() {
     updateSubtitle();
     renderRoleSwitch(hasAgent, hasAdmin);
     renderContent();
+    finLoadAccess();
   } catch (e) {
     document.getElementById("content").innerHTML =
       `<div class="card"><div class="empty">⚠️ ${esc(e.message)}</div></div>`;

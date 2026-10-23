@@ -1761,6 +1761,25 @@ def _retry_due(row: dict) -> bool:
     return at is None or at <= datetime.datetime.now()
 
 
+def _label_allowed_teams(manager_label: str) -> set:
+    """იმ გუნდების ID-ები, რომლებიც ამ ანგარიშის იარლიყზეა მიბმული (იხ. sheets_gspread.job_belongs_to_label_team)."""
+    lab = str(manager_label or "").strip().lower()
+    return {
+        str(a.get("team", "")).strip() for a in get_myhome_accounts()
+        if str(a.get("manager_label", "")).strip().lower() == lab and str(a.get("team", "")).strip()
+    }
+
+
+def job_belongs_to_label_team(row: dict, allowed_teams: set, agents_by_id: dict) -> bool:
+    """თითო ანგარიში მხოლოდ თავისი გუნდის განცხადებებს იღებს (job-ის გუნდიც და აგენტის ახლანდელი გუნდიც მიბმულ გუნდებშია)."""
+    if not allowed_teams:
+        return True
+    if str(row.get("team", "")).strip() not in allowed_teams:
+        return False
+    agent = agents_by_id.get(str(row.get("agent_id")))
+    return bool(agent) and str(agent.get("team", "")).strip() in allowed_teams
+
+
 def claim_next_myhome_job(manager_label: str, worker_id: str = "") -> dict | None:
     """worker.py გამოძახებით: ამ მენეჯერის ანგარიშზე უძველესი "QUEUED"
     job-ის დაკავება. **ატომურია**: `UPDATE ... WHERE job_id = ? AND
@@ -1775,8 +1794,12 @@ def claim_next_myhome_job(manager_label: str, worker_id: str = "") -> dict | Non
             "ORDER BY created_at ASC",
             (manager_label,),
         )
+        allowed = _label_allowed_teams(manager_label)
+        agents_by_id = {str(a.get("agent_id")): a for a in get_agents()} if allowed else {}
         for row in rows:
             if not _retry_due(row):
+                continue
+            if not job_belongs_to_label_team(row, allowed, agents_by_id):
                 continue
             rc = db.execute(
                 "UPDATE myhome_jobs SET status = 'PROCESSING', started_at = %s, worker_id = %s, "

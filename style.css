@@ -437,7 +437,7 @@ body {
   opacity: 0;
   pointer-events: none;
   transition: opacity .22s ease, transform .22s ease;
-  z-index: 30;
+  z-index: 90;            /* მოდალზე (50) და ქვედა პანელზე (60) მაღლა — ადრე შეტყობინება მოდალის უკან იმალებოდა */
   max-width: 90%;
   text-align: center;
   box-shadow: 0 8px 24px rgba(0, 0, 0, .35);
@@ -564,6 +564,11 @@ body {
   font-family: inherit;
   width: 100%;
 }
+/* checkbox/radio ფორმაში არ უნდა გაიწელოს (width:100% ზემოთ ტექსტურ ველებზეა გათვლილი) */
+.qa-compose input[type=checkbox], .qa-compose input[type=radio] {
+  width: 22px; height: 22px; min-height: 0; padding: 0; flex: none; accent-color: var(--gold);
+}
+.qa-compose label.chip { cursor: pointer; }
 .qa-compose input:focus { outline: 1px solid var(--gold); }
 .qa-compose input::placeholder { color: var(--hint); }
 
@@ -678,3 +683,25 @@ button.chip { cursor: pointer; font-family: inherit; }
 .att-table td { padding: 8px 6px; border-bottom: 1px solid var(--hairline); white-space: nowrap; }
 .att-table tr.clickable { cursor: pointer; }
 .qa-compose input[type=date], .qa-compose input[type=month] { min-height: 40px; }
+
+/* ---------- ფინანსური ტრეკერი (დირექტორის ტაბი) ---------- */
+.fin-sec { flex-wrap: wrap; }
+.fin-range { display: flex; align-items: center; gap: 8px; margin-top: 10px; }
+.fin-range input { flex: 1; min-width: 0; min-height: 40px; border-radius: var(--radius-sm); border: 1px solid var(--navy-3); background: rgba(10, 20, 32, .5); color: var(--text); padding: 0 10px; font-family: inherit; }
+.fin-num { font-size: 16px !important; }
+.stat .num.pos { background: none; -webkit-background-clip: border-box; background-clip: border-box; color: var(--green); }
+.stat .num.neg { background: none; -webkit-background-clip: border-box; background-clip: border-box; color: var(--red); }
+.stat .num.gold { background: none; -webkit-background-clip: border-box; background-clip: border-box; color: var(--gold-light); }
+.fin-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+.fin-donut { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+.fin-legend { font-size: 12.5px; flex: 1; min-width: 150px; }
+.fin-legend > div { display: flex; align-items: center; gap: 7px; padding: 4px 0; }
+.fin-legend b { margin-left: auto; }
+.fin-legend .pc { color: var(--hint); width: 34px; text-align: right; }
+.fin-legend.inline { display: flex; gap: 14px; flex-wrap: wrap; margin-bottom: 6px; flex: none; }
+.fin-legend .dot, .fin-legend i.dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; flex: none; }
+.fin-alert { cursor: pointer; border-color: rgba(245, 185, 66, .5); font-size: 13.5px; }
+.fin-form .fin-l { font-size: 11.5px; color: var(--hint); margin: 4px 0 -2px; font-weight: 600; }
+.fin-form .fin-h { font-weight: 800; color: var(--gold-light); margin-top: 10px; font-size: 13px; border-top: 1px solid var(--border); padding-top: 10px; }
+.fin-form .fin-h:first-child { border-top: none; padding-top: 0; margin-top: 0; }
+.fin-calc { background: rgba(10, 20, 32, .55); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 10px 12px; font-size: 12.5px; line-height: 1.6; }

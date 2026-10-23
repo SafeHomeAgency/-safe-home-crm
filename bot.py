@@ -2429,6 +2429,64 @@ async def check_myhome_challenge_alert(context: ContextTypes.DEFAULT_TYPE):
                 log.warning("challenge-შეტყობინება ადმინს ვერ გაეგზავნა", exc_info=True)
 
 
+_login_alert_at = [0.0]
+
+
+async def check_myhome_login_alert(context: ContextTypes.DEFAULT_TYPE):
+    """ექსთენშენის Chrome-პროფილი MyHome/tnet-ში შესული არ არის (NOT_LOGGED_IN) -> განცხადებები არ იდება, სანამ ვინმე
+    ამ პროფილში არ შევა. ადმინს ვაფრთხილებთ (საათში მაქს. ერთხელ), რომ ბოტის ფანჯარაში შეიყვანოს ლოგინი."""
+    try:
+        now = datetime.datetime.now()
+        accounts: set[str] = set()
+        for j in sheets.get_myhome_jobs():
+            if "NOT_LOGGED_IN" not in str(j.get("error_message") or ""):
+                continue
+            stamp = crm_time.parse_server_dt(j.get("completed_at") or "") or crm_time.parse_server_dt(j.get("next_retry_at") or "")
+            if stamp and abs((now - stamp).total_seconds()) <= 30 * 60:
+                accounts.add(str(j.get("manager_label") or "?"))
+    except Exception:
+        log.exception("MyHome login-შემოწმება ვერ მოხერხდა")
+        return
+    if accounts and time.time() - _login_alert_at[0] > 3600:
+        _login_alert_at[0] = time.time()
+        for admin_id in config.ADMIN_CHAT_IDS:
+            try:
+                await context.bot.send_message(
+                    chat_id=admin_id,
+                    text=("🔑 MyHome-ის განცხადებები ვერ იდება: ბოტის Chrome-პროფილი (" + ", ".join(sorted(accounts)) + ") "
+                          "MyHome/tnet-ში შესული არ არის.\n"
+                          "გახსენით კომპიუტერზე ბოტის Chrome ფანჯარა (შესვლის გვერდი უკვე ღიაა), შედით ანგარიშით — "
+                          "შემდეგ ბოტი თავისით გააგრძელებს, job-ები რიგში რჩება."))
+            except Exception:
+                log.warning("login-შეტყობინება ადმინს ვერ გაეგზავნა", exc_info=True)
+
+
+async def send_finance_reminders(context: ContextTypes.DEFAULT_TYPE):
+    """ფინანსური შეხსენებები (მხოლოდ FINANCE_CHAT_IDS-ს): რეპორტინგი ხელშეკრულებიდან ყოველ 2 თვეში და ხელშეკრულების
+    ვადის ამოწურვამდე (~2 თვით და 1 თვით ადრე). ერთი მოვლენა ერთხელ იგზავნება (მარკერი გარიგების სტრიქონში)."""
+    if not config.FINANCE_CHAT_IDS:
+        return
+    try:
+        import finance_store
+        items = finance_store.pending_notifications()
+    except Exception:
+        log.exception("ფინანსური შეხსენებების შემოწმება ვერ გაეშვა")
+        return
+    for it in items:
+        ok = False
+        for cid in sorted(config.FINANCE_CHAT_IDS):
+            try:
+                await context.bot.send_message(chat_id=cid, text=it["text"])
+                ok = True
+            except Exception:
+                log.warning("ფინანსური შეხსენება ვერ გაიგზავნა (%s)", cid, exc_info=True)
+        if ok:
+            try:
+                finance_store.mark_notified(it["deal_id"], it["flag"], it["value"])
+            except Exception:
+                log.exception("ფინანსური შეხსენების მარკერი ვერ ჩაიწერა (%s)", it.get("deal_id"))
+
+
 async def check_contract_deadlines(context: ContextTypes.DEFAULT_TYPE):
     """ხელშეკრულებების ვადები: შეხსენება აგენტს ვადამდე; დაგვიანების შეტყობინება აგენტს/გუნდის ლიდერს/პასუხისმგებელს/ადმინს.
     დაგვიანება გამოითვლება აქტიური გაცემის (Issue) ჩანაწერიდან; ერთი და იგივე შეტყობინება ორჯერ არ იგზავნება."""
@@ -2900,6 +2958,13 @@ def main():
         contracts_store.ensure_tabs()
     except Exception:
         log.exception("ხელშეკრულებების ცხრილების მომზადება ვერ მოხერხდა — მოდული პირველ გამოყენებაზე სცდის ხელახლა")
+    # ფინანსური ტრეკერის ცხრილები (FinDeals/FinExpenses/FinSettings) — მხოლოდ თუ ფუნქცია ჩართულია (FINANCE_CHAT_IDS დაყენებულია)
+    if config.FINANCE_CHAT_IDS:
+        try:
+            import finance_store
+            finance_store.ensure_tabs()
+        except Exception:
+            log.exception("ფინანსური ცხრილების მომზადება ვერ მოხერხდა — პირველ გამოყენებაზე სცდის ხელახლა")
 
     app = Application.builder().token(config.TELEGRAM_BOT_TOKEN).build()
     app.add_error_handler(on_error)
@@ -3093,8 +3158,13 @@ def main():
         app.job_queue.run_repeating(check_manager_notifications, interval=300, first=90)
         app.job_queue.run_repeating(check_myhome_jobs_stale, interval=300, first=150)
         app.job_queue.run_repeating(check_myhome_challenge_alert, interval=300, first=170)
+        app.job_queue.run_repeating(check_myhome_login_alert, interval=300, first=190)
         app.job_queue.run_repeating(check_worker_heartbeat, interval=300, first=240)
         app.job_queue.run_repeating(check_contract_deadlines, interval=900, first=260)
+        app.job_queue.run_daily(
+            send_finance_reminders,
+            time=datetime.time(hour=config.FINANCE_REMINDER_HOUR, minute=0, tzinfo=ZoneInfo(config.TIMEZONE)),
+        )
         app.job_queue.run_daily(
             send_contracts_daily_summary,
             time=datetime.time(hour=config.CONTRACT_SUMMARY_HOUR, minute=5, tzinfo=ZoneInfo(config.TIMEZONE)),

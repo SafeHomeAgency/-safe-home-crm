@@ -2292,6 +2292,28 @@ def _retry_due(row: dict) -> bool:
     return at is None or at <= datetime.datetime.now()
 
 
+def _label_allowed_teams(manager_label: str) -> set:
+    """იმ გუნდების ID-ები, რომლებიც CRM-ის "MyHomeAccounts"-ში ამ ანგარიშის იარლიყზეა მიბმული."""
+    lab = str(manager_label or "").strip().lower()
+    return {
+        str(a.get("team", "")).strip() for a in get_myhome_accounts()
+        if str(a.get("manager_label", "")).strip().lower() == lab and str(a.get("team", "")).strip()
+    }
+
+
+def job_belongs_to_label_team(row: dict, allowed_teams: set, agents_by_id: dict) -> bool:
+    """თითო მენეჯერის ანგარიში მხოლოდ **თავისი გუნდის** განცხადებებს იღებს: job-ის გუნდიც და აგენტის **ახლანდელი**
+    გუნდიც (Agents ცხრილიდან) ამ ანგარიშზე მიბმულ გუნდებში უნდა იყოს. ძველი job-ები (აგენტი სხვა გუნდში გადავიდა) ან სხვა
+    გუნდის ჩანაწერები არ გაიცემა — რიგში რჩება გაუცემლად. თუ იარლიყს არც ერთი გუნდი არ აქვს მიბმული (ძველი/უცნობი იარლიყი),
+    ძველი ქცევა რჩება (შეზღუდვის გარეშე)."""
+    if not allowed_teams:
+        return True
+    if str(row.get("team", "")).strip() not in allowed_teams:
+        return False
+    agent = agents_by_id.get(str(row.get("agent_id")))
+    return bool(agent) and str(agent.get("team", "")).strip() in allowed_teams
+
+
 def claim_next_myhome_job(manager_label: str, worker_id: str = "") -> dict | None:
     """worker.py გამოძახებით: ამ მენეჯერის ანგარიშზე უძველესი "QUEUED"
     job-ის დაკავება -> "PROCESSING". Google Sheets-ს ტრანზაქცია არ აქვს,
@@ -2305,9 +2327,12 @@ def claim_next_myhome_job(manager_label: str, worker_id: str = "") -> dict | Non
     ავტო-retry job არ გაიცემა."""
     manager_label = str(manager_label or "").strip()
     with _lock:
+        allowed = _label_allowed_teams(manager_label)
+        agents_by_id = {str(a.get("agent_id")): a for a in get_agents()} if allowed else {}
         candidates = [
             r for r in get_myhome_jobs(status="QUEUED")
             if str(r.get("manager_label", "")).strip() == manager_label and _retry_due(r)
+            and job_belongs_to_label_team(r, allowed, agents_by_id)
         ]
     candidates.sort(key=lambda r: str(r.get("created_at", "")))
     for cand in candidates:
