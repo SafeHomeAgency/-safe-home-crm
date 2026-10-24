@@ -2257,7 +2257,7 @@ function _renderMyHomeRow(r, showAgentName) {
     <div class="list-row" data-mh-row="${esc(r.job_id)}" style="cursor:pointer">
       <div class="avatar">🏠</div>
       <div class="main">
-        <div class="title">MyHome ID: ${esc(r.myhome_listing_id)}${showAgentName ? " · " + esc(r.agent_name) : ""}</div>
+        <div class="title">${r.listing_source === "ssge" ? "ss.ge" : "MyHome"} ID: ${esc(r.myhome_listing_id)}${r.publish_target === "both" ? " → MyHome+ss.ge" : (r.publish_target === "ssge" && r.listing_source !== "ssge" ? " → ss.ge" : (r.publish_target === "myhome" && r.listing_source === "ssge" ? " → MyHome" : ""))}${showAgentName ? " · " + esc(r.agent_name) : ""}</div>
         <div class="sub">${MYHOME_JOB_STATUS_LABEL[r.status] || esc(r.status)}${r.deal_type ? " · " + esc(r.deal_type) : ""}${r.cooperation_percent ? " · " + esc(r.cooperation_percent) + "%" : ""}${r.final_price ? " · 💰 " + esc(r.final_price) : ""}</div>
         ${r.address ? `<div class="sub">📍 ${esc(r.address)}${r.district ? ", " + esc(r.district) : ""}</div>` : ""}
         ${r.notes ? `<div class="sub">📝 ${esc(r.notes)}</div>` : ""}
@@ -2292,7 +2292,10 @@ function _openMyHomeDetail(jobId) {
     { label: "დასრულდა", value: r.completed_at },
     { label: "ცდების რაოდენობა", value: r.retry_count },
     { label: "შეცდომა", value: r.error_message },
-    { label: "MyHome ლინკი", value: r.status === "COMPLETED" ? `https://myhome.ge/pr/${r.myhome_listing_id}` : "" },
+    { label: "MyHome ლინკი", value: r.status === "COMPLETED" && r.listing_source !== "ssge" && r.publish_target !== "ssge" ? `https://myhome.ge/pr/${r.myhome_listing_id}` : "" },
+    { label: "წყარო (საიტი)", value: r.listing_source === "ssge" ? "ss.ge" : "" },
+    { label: "სად უნდა დადებულიყო", value: r.publish_target === "ssge" ? "ss.ge" : (r.publish_target === "both" ? "MyHome + ss.ge" : "") },
+    { label: "ss.ge-ზე დადებული განცხადება", value: r.ssge_listing_id ? `https://home.ss.ge/ka/udzravi-qoneba/${r.ssge_listing_id}` : "" },
   ], canRetry ? `<button class="btn" id="mhDetailRetry" style="margin-top:10px;width:100%">🔁 ხელახლა გაშვება</button>` : "");
   const retryBtn = document.getElementById("mhDetailRetry");
   if (retryBtn) retryBtn.onclick = () => _mhRetryJob(jobId, retryBtn);
@@ -2482,6 +2485,15 @@ function renderMyHomeJobs(rows, role) {
     <div class="card">
       <h2>🏘️ MyHome ლისტინგის დამატება</h2>
       <div class="qa-compose">
+        <select id="mhSource" title="საიდან ავიღოთ განცხადება">
+          <option value="myhome">📥 წყარო: MyHome-ის განცხადება (ID)</option>
+          <option value="ssge">📥 წყარო: ss.ge-ს განცხადება (ID ან ბმული)</option>
+        </select>
+        <select id="mhTarget" title="სად დავდოთ">
+          <option value="myhome">📤 დადება: მხოლოდ MyHome-ზე</option>
+          <option value="ssge">📤 დადება: მხოლოდ ss.ge-ზე</option>
+          <option value="both">📤 დადება: MyHome-ზეც და ss.ge-ზეც</option>
+        </select>
         <input id="mhListingId" type="text" inputmode="numeric" placeholder="MyHome ID (მაგ. 20134412)">
         <input id="mhOwnerNumber" type="text" inputmode="tel" placeholder="მესაკუთრის ნომერი (სავალდებულო)">
         <input id="mhPercent" type="text" inputmode="decimal" placeholder="თანამშრომლობის საკომისიო % — გადავა ბაზაში (არასავალდებულო)">
@@ -2549,6 +2561,14 @@ function bindMyHomeJobsActions() {
   if (moreBtn) moreBtn.onclick = async () => { state.mhLimit = (state.mhLimit || 150) + 150; delete lazyCache.myhomejobs; await renderContent(); };
   const retryBtn = document.getElementById("mhRetryBtn");
   if (retryBtn) retryBtn.onclick = runBulkRetry;
+  const srcSel = document.getElementById("mhSource");
+  if (srcSel) srcSel.onchange = () => {
+    const inp = document.getElementById("mhListingId");
+    if (inp) {
+      inp.placeholder = srcSel.value === "ssge" ? "ss.ge ID ან ბმული (მაგ. 37071652)" : "MyHome ID (მაგ. 20134412)";
+      inp.inputMode = srcSel.value === "ssge" ? "text" : "numeric";
+    }
+  };
   const btn = document.getElementById("mhSubmit");
   if (btn) {
     btn.onclick = async () => {
@@ -2560,7 +2580,11 @@ function bindMyHomeJobsActions() {
       // აქედან ავსებს ბაზის "pets" სვეტს; სერვერის/ბაზის ცვლილება არ სჭირდება.
       const petsLine = "ცხოველები: " + (document.getElementById("mhNoPets").checked ? "არა" : "კი");
       const notes = [(document.getElementById("mhNotes").value || "").trim(), petsLine].filter(Boolean).join("\n");
-      if (!listingId || !/^\d+$/.test(listingId)) { toast("შეიყვანეთ სწორი MyHome ID (მხოლოდ ციფრები)"); return; }
+      const listingSource = (document.getElementById("mhSource") || {}).value || "myhome";
+      const publishTarget = (document.getElementById("mhTarget") || {}).value || "myhome";
+      if (listingSource === "ssge") {
+        if (!listingId || !/\d{7,9}/.test(listingId)) { toast("შეიყვანეთ სწორი ss.ge ID (ციფრები) ან განცხადების ბმული"); return; }
+      } else if (!listingId || !/^\d+$/.test(listingId)) { toast("შეიყვანეთ სწორი MyHome ID (მხოლოდ ციფრები)"); return; }
       if (!ownerNumber) { toast("შეიყვანეთ მესაკუთრის ნომერი"); return; }
       btn.disabled = true;
       try {
@@ -2572,6 +2596,8 @@ function bindMyHomeJobsActions() {
             cooperation_percent: percent,
             final_price: price,
             notes,
+            listing_source: listingSource,
+            publish_target: publishTarget,
           }),
         });
         tg && tg.HapticFeedback && tg.HapticFeedback.notificationOccurred("success");

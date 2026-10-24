@@ -239,6 +239,10 @@ MYHOME_JOBS_HEADERS = [
     "worker_id", "claim_token", "failure_stage", "next_retry_at",
     # ბიზნეს-დღე (Asia/Tbilisi) — "აგენტი + MyHome ID + დღე" ერთჯერადობისთვის
     "business_date",
+    # ss.ge მხარდაჭერა (ბოლოში, ძველი სტრიქონები არ ირევა; ცარიელი = ძველი ქცევა, ანუ MyHome -> MyHome):
+    # listing_source — რომელი საიტიდან არის `myhome_listing_id`-ში მითითებული ID ("myhome"/"ssge");
+    # publish_target — სად უნდა დაიდოს ("myhome"/"ssge"/"both"); ssge_listing_id — ss.ge-ზე დადებული ახალი განცხადების ID.
+    "listing_source", "publish_target", "ssge_listing_id",
 ]
 
 # PHASE 1.5: Audit log — ვინ (Telegram ID) რა გააკეთა. metadata — JSON,
@@ -2394,7 +2398,7 @@ def _retry_count(row: dict) -> int:
 
 def finish_myhome_job(job_id: str, worker_id: str, status: str, error_message: str = "",
                        deal_type: str = "", address: str = "", district: str = "",
-                       city: str = "", failure_stage: str = "") -> dict:
+                       city: str = "", failure_stage: str = "", ssge_listing_id: str = "") -> dict:
     """worker-ის შედეგის მიღება მკაცრი შემოწმებით (ყველაფერი ერთ `_lock`-ში,
     ახალი წაკითხვით). აბრუნებს:
       {"ok": bool, "code": "ok"|"duplicate"|"not_found"|"not_processing"|
@@ -2428,6 +2432,8 @@ def finish_myhome_job(job_id: str, worker_id: str, status: str, error_message: s
         row_stage = str(row.get("failure_stage") or "")
         failure_stage = row_stage if row_stage in ("payment", "paid") else str(failure_stage or "")
         updates = {"error_message": error_message, "failure_stage": failure_stage}
+        if ssge_listing_id:          # ss.ge-ზე უკვე დადებული განცხადების ID — ჩავარდნისასაც ინახება (ხელახლა არ დადგეს)
+            updates["ssge_listing_id"] = str(ssge_listing_id)[:20]
         retry_scheduled = False
         if status == "COMPLETED":
             updates.update({"status": "COMPLETED", "completed_at": _now(), "error_message": "",

@@ -101,6 +101,7 @@ MYHOME_JOBS_HEADERS = [
     "owner_number",
     "worker_id", "claim_token", "failure_stage", "next_retry_at",
     "business_date",
+    "listing_source", "publish_target", "ssge_listing_id",
 ]
 WORKER_HEARTBEAT_HEADERS = [
     "worker_id", "status", "last_heartbeat", "current_job_id", "stage", "updated_at",
@@ -1845,7 +1846,7 @@ def _retry_count(row: dict) -> int:
 
 def finish_myhome_job(job_id: str, worker_id: str, status: str, error_message: str = "",
                        deal_type: str = "", address: str = "", district: str = "",
-                       city: str = "", failure_stage: str = "") -> dict:
+                       city: str = "", failure_stage: str = "", ssge_listing_id: str = "") -> dict:
     """იხ. sheets_gspread.finish_myhome_job (იდენტური წესები). აქ გადასვლა
     ატომურია: `UPDATE ... WHERE job_id = ? AND status = 'PROCESSING'`."""
     status = str(status or "").strip().upper()
@@ -1889,6 +1890,9 @@ def finish_myhome_job(job_id: str, worker_id: str, status: str, error_message: s
                 sets = ["status = 'FAILED'", "completed_at = %s", "next_retry_at = ''",
                         "error_message = %s", "failure_stage = %s"]
                 params = [_now(), error_message, str(failure_stage or "")]
+        if ssge_listing_id:
+            sets.append("ssge_listing_id = %s")
+            params.append(str(ssge_listing_id)[:20])
         params.append(str(job_id))
         rc = db.execute(
             f"UPDATE myhome_jobs SET {', '.join(sets)} WHERE job_id = %s AND status = 'PROCESSING'",

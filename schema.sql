@@ -437,3 +437,50 @@ CREATE TABLE IF NOT EXISTS app_settings (
     updated_at           TEXT NOT NULL DEFAULT '',
     updated_by           TEXT NOT NULL DEFAULT ''
 );
+
+-- =====================================================================
+-- PHASE 1.5: უსაფრთხოება და სტაბილურობა (მხოლოდ დამატებებია, IF NOT EXISTS)
+-- =====================================================================
+
+-- job-ის დაკავების/ავტო-retry-ის ველები
+ALTER TABLE myhome_jobs ADD COLUMN IF NOT EXISTS worker_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE myhome_jobs ADD COLUMN IF NOT EXISTS claim_token TEXT NOT NULL DEFAULT '';
+ALTER TABLE myhome_jobs ADD COLUMN IF NOT EXISTS failure_stage TEXT NOT NULL DEFAULT '';
+ALTER TABLE myhome_jobs ADD COLUMN IF NOT EXISTS next_retry_at TEXT NOT NULL DEFAULT '';
+
+-- worker heartbeat: ერთი სტრიქონი worker-ზე
+CREATE TABLE IF NOT EXISTS worker_heartbeat (
+    worker_id            TEXT PRIMARY KEY,
+    status               TEXT NOT NULL DEFAULT 'online',
+    last_heartbeat       TEXT NOT NULL DEFAULT '',
+    current_job_id       TEXT NOT NULL DEFAULT '',
+    stage                TEXT NOT NULL DEFAULT '',
+    updated_at           TEXT NOT NULL DEFAULT ''
+);
+
+-- audit_log: რეალური Telegram ID + შედეგი (ძველი ჩანაწერები უცვლელია)
+ALTER TABLE audit_log ADD COLUMN IF NOT EXISTS actor_telegram_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE audit_log ADD COLUMN IF NOT EXISTS actor_role TEXT NOT NULL DEFAULT '';
+ALTER TABLE audit_log ADD COLUMN IF NOT EXISTS job_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE audit_log ADD COLUMN IF NOT EXISTS metadata TEXT NOT NULL DEFAULT '';
+ALTER TABLE audit_log ADD COLUMN IF NOT EXISTS result TEXT NOT NULL DEFAULT '';
+
+-- ბიზნეს-წესი: უნიკალურია agent_id + myhome_id + ბიზნეს-დღე (Asia/Tbilisi).
+-- სხვა აგენტი/სხვა დღე/ფასი — არ ითვლება. ძველ სტრიქონებზე (business_date='')
+-- ინდექსი არ მოქმედებს (partial).
+ALTER TABLE myhome_jobs ADD COLUMN IF NOT EXISTS business_date TEXT NOT NULL DEFAULT '';
+CREATE UNIQUE INDEX IF NOT EXISTS uq_myhome_jobs_agent_listing_day
+    ON myhome_jobs (agent_id, myhome_listing_id, business_date) WHERE business_date <> '';
+
+-- ინდექსები (მხოლოდ რეალურად გამოყენებული query-ებისთვის):
+-- ყოველი API მოთხოვნა agent-ს telegram_chat_id-ით პოულობს (find_agent_by_chat_id)
+CREATE INDEX IF NOT EXISTS idx_agents_telegram_chat_id ON agents (telegram_chat_id);
+-- worker-ის job-ის დაკავება: WHERE status = 'QUEUED' AND manager_label = ...
+CREATE INDEX IF NOT EXISTS idx_myhome_jobs_status_manager ON myhome_jobs (status, manager_label);
+-- "ვინ რა გააკეთა" — audit-ის ძებნა მოქმედი პირით/დროით
+CREATE INDEX IF NOT EXISTS idx_audit_log_actor ON audit_log (actor_telegram_id, occurred_at);
+-- ss.ge მხარდაჭერა: დავალებაში წყარო-საიტი, სამიზნე საიტი და ss.ge-ზე დადებული ახალი განცხადების ID.
+-- ცარიელი მნიშვნელობა = ძველი ქცევა (MyHome -> MyHome).
+ALTER TABLE myhome_jobs ADD COLUMN IF NOT EXISTS listing_source TEXT NOT NULL DEFAULT '';
+ALTER TABLE myhome_jobs ADD COLUMN IF NOT EXISTS publish_target TEXT NOT NULL DEFAULT '';
+ALTER TABLE myhome_jobs ADD COLUMN IF NOT EXISTS ssge_listing_id TEXT NOT NULL DEFAULT '';

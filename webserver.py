@@ -24,6 +24,7 @@ import hmac
 import json
 import logging
 import os
+import re
 import urllib.parse
 import urllib.request
 
@@ -483,6 +484,22 @@ def crm_time_digits(value) -> str:
     return "".join(ch for ch in str(value or "") if ch.isdigit())
 
 
+def _site_name(source) -> str:
+    """Telegram-ის ტექსტებისთვის: წყარო-საიტის სახელი (ცარიელი/ძველი job = MyHome)."""
+    return "ss.ge" if str(source or "").strip().lower() == "ssge" else "MyHome"
+
+
+def _target_note(target, source="myhome") -> str:
+    t = str(target or "").strip().lower()
+    if t == "both":
+        return " → MyHome + ss.ge"
+    if t == "ssge" and str(source or "").lower() != "ssge":
+        return " → ss.ge"
+    if t == "myhome" and str(source or "").lower() == "ssge":
+        return " → MyHome"
+    return ""
+
+
 @app.get("/api/myhome-jobs")
 def api_myhome_jobs():
     """აგენტს — საკუთარი job-ები; თიმლიდერს — თავისი თიმის; ადმინს —
@@ -529,9 +546,21 @@ def api_myhome_jobs_create():
         return jsonify(error="მხოლოდ დარეგისტრირებული აგენტისთვის"), 403
 
     body = request.get_json(silent=True) or {}
+    # ss.ge მხარდაჭერა: წყარო-საიტი (საიდან ვკითხულობთ) და სამიზნე (სად ვდებთ). ცარიელი = ძველი ქცევა (MyHome -> MyHome)
+    listing_source = str(body.get("listing_source") or "myhome").strip().lower()
+    publish_target = str(body.get("publish_target") or "myhome").strip().lower()
+    if listing_source not in ("myhome", "ssge"):
+        return jsonify(error="წყარო-საიტი უნდა იყოს MyHome ან ss.ge"), 400
+    if publish_target not in ("myhome", "ssge", "both"):
+        return jsonify(error="დასადები საიტი უნდა იყოს MyHome, ss.ge ან ორივე"), 400
     listing_id = str(body.get("myhome_listing_id") or "").strip()
-    if not listing_id or not listing_id.isdigit():
-        return jsonify(error="MyHome ID არასწორია — მხოლოდ ციფრები"), 400
+    if listing_source == "ssge" and listing_id and not listing_id.isdigit():
+        # ss.ge ბმულიდანაც ვიღებთ ID-ს (…/udzravi-qoneba/qiravdeba-…-37071652 ან …/37071652)
+        m_id = re.search(r"(\d{7,9})(?!.*\d)", listing_id)
+        listing_id = m_id.group(1) if m_id else listing_id
+    if not listing_id or not listing_id.isdigit() or (listing_source == "ssge" and not 6 <= len(listing_id) <= 10):
+        return jsonify(error=("ss.ge ID არასწორია — მხოლოდ ციფრები (ან განცხადების ბმული)" if listing_source == "ssge"
+                              else "MyHome ID არასწორია — მხოლოდ ციფრები")), 400
 
     # მესაკუთრის ნომერი სავალდებულოდ აგენტისგანვე ვიღებთ — myhome.ge-ს
     # საკუთარი "ნომრის ნახვა" ხშირად დროებით იბლოკება (ანგარიშის/IP-ის
@@ -564,19 +593,21 @@ def api_myhome_jobs_create():
         "final_price": str(body.get("final_price") or "").strip(),
         "notes": str(body.get("notes") or "").strip(),
         "owner_number": owner_number,
+        "listing_source": listing_source,
+        "publish_target": publish_target,
     })
     if job_id is None:
         hint = " (ჩავარდნილის გასაშვებად გამოიყენეთ „ხელახლა ცდა“)" if (existing or {}).get("status") == "FAILED" else ""
-        return jsonify(error="ამ MyHome ID-ს დღეს უკვე შეიყვანეთ — ერთსა და იმავე ID-ს ერთი აგენტი "
+        return jsonify(error=f"ამ {_site_name(listing_source)} ID-ს დღეს უკვე შეიყვანეთ — ერთსა და იმავე ID-ს ერთი აგენტი "
                              "დღეში ერთხელ შეიყვანს" + hint,
                        code="duplicate_today", row=existing), 409
     row = sheets.find_myhome_job(job_id)
     _audit(agent, admin, "myhome_job_create", "myhome_job", job_id, job_id,
-           {"myhome_listing_id": listing_id, "team": team})
+           {"myhome_listing_id": listing_id, "team": team, "listing_source": listing_source, "publish_target": publish_target})
     if agent.get("telegram_chat_id"):
         _send_telegram_message(
             int(agent["telegram_chat_id"]),
-            f"🏠 MyHome ID {listing_id} დაემატა რიგში (QUEUED) — შეგატყობინებთ დამუშავებისას.",
+            f"🏠 {_site_name(listing_source)} ID {listing_id}{_target_note(publish_target, listing_source)} დაემატა რიგში (QUEUED) — შეგატყობინებთ დამუშავებისას.",
         )
     return jsonify(ok=True, row=row)
 
@@ -2590,7 +2621,7 @@ def internal_myhome_jobs_next():
     if agent and agent.get("telegram_chat_id"):
         _send_telegram_message(
             int(agent["telegram_chat_id"]),
-            f"⏳ MyHome ID {row.get('myhome_listing_id')} — მუშავდება...",
+            f"⏳ {_site_name(row.get('listing_source'))} ID {row.get('myhome_listing_id')} — მუშავდება...",
         )
     return jsonify(row=row)
 
@@ -2626,6 +2657,7 @@ def internal_myhome_jobs_complete(job_id):
         district=str(body.get("district") or "").strip(),
         city=str(body.get("city") or "").strip(),
         failure_stage=str(body.get("failure_stage") or "").strip(),
+        ssge_listing_id="".join(ch for ch in str(body.get("ssge_listing_id") or "") if ch.isdigit())[:20],
     )
     if not res["ok"]:
         sheets.add_audit_event("", "worker", "myhome_job_finish_rejected", "myhome_job", job_id, job_id,
@@ -2649,13 +2681,19 @@ def internal_myhome_jobs_complete(job_id):
     )
     if agent and agent.get("telegram_chat_id"):
         listing = row.get("myhome_listing_id")
+        site = _site_name(row.get("listing_source"))
+        ss_new = str(row.get("ssge_listing_id") or "").strip()
         if status == "COMPLETED":
-            text = f"✅ MyHome ID {listing} — წარმატებით აიტვირთა."
+            text = f"✅ {site} ID {listing} — წარმატებით აიტვირთა{_target_note(row.get('publish_target'), row.get('listing_source'))}."
+            if ss_new:
+                text += f"\n🔗 ss.ge: https://home.ss.ge/ka/udzravi-qoneba/{ss_new}"
         elif res["retry_scheduled"]:
-            text = (f"⚠️ MyHome ID {listing} — დროებით ვერ აიტვირთა ({error_message or 'უცნობი მიზეზი'}). "
+            text = (f"⚠️ {site} ID {listing} — დროებით ვერ აიტვირთა ({error_message or 'უცნობი მიზეზი'}). "
                     f"ავტომატურად გავიმეორებთ ({row.get('retry_count')}/{config.MYHOME_JOB_MAX_RETRIES}).")
         else:
-            text = f"❌ MyHome ID {listing} — ვერ აიტვირთა. მიზეზი: {error_message or 'უცნობი'}"
+            text = f"❌ {site} ID {listing} — ვერ აიტვირთა. მიზეზი: {error_message or 'უცნობი'}"
+            if ss_new:
+                text += f"\nℹ️ ss.ge-ზე უკვე დაიდო: https://home.ss.ge/ka/udzravi-qoneba/{ss_new} (ხელახლა ნუ გაუშვებთ ორჯერ)"
         _send_telegram_message(int(agent["telegram_chat_id"]), text)
     return jsonify(ok=True, row=row, retry_scheduled=res["retry_scheduled"])
 
