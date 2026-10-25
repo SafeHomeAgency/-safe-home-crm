@@ -1,1 +1,4 @@
-﻿ამ საქაღალდის 5 ფაილი ატვირთე GitHub-ზე (ჩაანაცვლებს ძველებს) და Railway-ზე Redeploy გააკეთე: app.js, style.css, listings_model.py, listings_store.py, listings_api.py. (ახალი ფილტრები: საძინებლები/ფართი/სართული/სართულიანობა/ცხოველები)
+﻿ამ საქაღალდის 11 ფაილი ატვირთე GitHub-ზე (ჩაანაცვლებს ძველებს) და Railway-ზე Redeploy გააკეთე:
+app.js, style.css, webserver.py, bot.py, listings_store.py, listings_api.py, hubmeet_model.py, hubmeet_store.py, hubmeet_api.py, district_shuffle.py, listings_model.py
+
+ახალი: district_shuffle.py (რაიონების ავტომატური განაწილება ორშაბათს), კლიენტები/დავალებები განცხადებების ტაბში (📥 სამუშაო), 📍 ჩემი რაიონები ფილტრი, ახალი ფილტრები (საძინებელი/ფართი/სართული/ცხოველები).

@@ -123,7 +123,7 @@ def create(listing: dict, requester: dict, viewer: dict, data: dict) -> dict:
         "client_name": name, "client_phone": phone, "meeting_date": date, "meeting_time": time, "rental_months": rental,
         "move_in_date": move_in, "budget_usd": budget, "tenants": m.s(data.get("tenants"), 200), "coop_terms": m.s(data.get("coop_terms"), 300),
         "owner_availability": m.s(data.get("owner_availability"), 200), "notes": m.s(data.get("notes"), 500),
-        "outcome": "", "reject_reason": "", "history": "", "created_at": now_str(), "updated_at": now_str(), "reminded": "", "nudged": "",
+        "outcome": "", "reject_reason": "", "history": "", "created_at": now_str(), "updated_at": now_str(), "reminded": "", "nudged": "", "task_id": m.s(data.get("task_id"), 24),
     }
     owner_side, _req = sides(row, viewer)
     row["status"] = m.PLANNED if (not coop or owner_side) else m.PENDING

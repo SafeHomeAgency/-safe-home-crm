@@ -1450,6 +1450,14 @@ def api_tasks_new():
         # ავლით) — რომ დირექტორსაც სჩანდეს, თავად რას აკეთებს.
         if body.get("assign_to_self") and agent:
             target_agent_id = agent.get("agent_id")
+        elif str(body.get("agent_id") or "").strip():
+            # Property Hub-იდან ზოგადი კლიენტი კონკრეტულ აგენტზეც შეიძლება (ავტო-არჩევის გვერდის ავლით); თიმლიდერი — მხოლოდ საკუთარი გუნდი
+            target_agent_id = str(body.get("agent_id")).strip()
+            tgt0 = next((a for a in sheets.get_agents() if str(a.get("agent_id")) == target_agent_id), None)
+            if not tgt0 or str(tgt0.get("active", "yes")).strip().lower() == "no":
+                return jsonify(error="ეს აგენტი აღარაა აქტიური"), 400
+            if not admin and (not my_team or str(tgt0.get("team", "")).strip() != my_team):
+                return jsonify(error="მხოლოდ საკუთარი გუნდის აგენტზე შეგიძლიათ დამატება"), 403
         else:
             target_agent_id = sheets.pick_agent_for_priority(priority, team=my_team)
         if not target_agent_id:
@@ -2578,6 +2586,74 @@ def api_districts_mine():
     return jsonify(_district_week_payload(agent))
 
 
+# ---- რაიონების ავტომატური კვირეული გადანაწილება (district_shuffle.py): ორშაბათს დილით ბოტი თავად აკეთებს; ადმინს შეუძლია ხელითაც
+def _district_auto_payload() -> dict:
+    import district_shuffle
+    st = district_shuffle.settings(sheets)
+    this_week = crm_time.week_start()
+    last = None
+    for r in sorted(sheets.get_district_assignments(), key=lambda r: str(r.get("week_start", "")), reverse=True):
+        if str(r.get("assigned_by", "")).strip() == district_shuffle.AUTO_BY:
+            last = str(r.get("week_start", ""))
+            break
+    return {"enabled": st["enabled"], "exclude": st["exclude"], "last_auto_week": last,
+            "this_week_done": district_shuffle.auto_done(sheets, this_week)}
+
+
+@app.get("/api/districts/auto")
+def api_districts_auto():
+    agent, admin, err = _authed_agent()
+    if err:
+        return err
+    if not admin:
+        return jsonify(error="მხოლოდ ადმინისთვის"), 403
+    return jsonify(_district_auto_payload())
+
+
+@app.post("/api/districts/auto")
+@rate_limited("bulk_notify")
+def api_districts_auto_set():
+    agent, admin, err = _authed_agent()
+    if err:
+        return err
+    if not admin:
+        return jsonify(error="მხოლოდ ადმინისთვის"), 403
+    body = request.get_json(silent=True) or {}
+    if "enabled" in body:
+        sheets.set_app_setting("district_auto", "1" if body.get("enabled") else "0", "admin")
+    if "exclude" in body:
+        ids = _clean_id_list(body.get("exclude"), 100)
+        sheets.set_app_setting("district_shuffle_exclude", ",".join(ids), "admin")
+    _audit(agent, admin, "districts_auto_settings", "district_auto", "", metadata={k: body.get(k) for k in ("enabled", "exclude") if k in body})
+    return jsonify(ok=True, **_district_auto_payload())
+
+
+@app.post("/api/districts/shuffle")
+@rate_limited("bulk_notify")
+def api_districts_shuffle():
+    """ადმინი: რაიონების ავტომატური გადანაწილება ახლავე (`week` — ამ ან მომავალი კვირა; `dry_run` — მხოლოდ გადახედვა; `overwrite_manual` —
+    ხელით მინიჭებულსაც გადაწერს). აგენტები იღებენ Telegram შეტყობინებას."""
+    agent, admin, err = _authed_agent()
+    if err:
+        return err
+    if not admin:
+        return jsonify(error="მხოლოდ ადმინისთვის"), 403
+    import district_shuffle
+    body = request.get_json(silent=True) or {}
+    ws = crm_time.week_start(crm_time.parse_user_date(body.get("week", "")) or crm_time.local_today())
+    if ws < crm_time.week_start():
+        return jsonify(error="გასული კვირის რაიონების შეცვლა არ შეიძლება"), 400
+    if ws > crm_time.week_start() + datetime.timedelta(days=7):
+        return jsonify(error="მხოლოდ ამ ან მომავალი კვირის განაწილებაა შესაძლებელი"), 400
+    res = district_shuffle.run(sheets, ws, notify=lambda chat_id, text: _send_telegram_message(chat_id, text),
+                               overwrite_manual=bool(body.get("overwrite_manual")), dry_run=bool(body.get("dry_run")))
+    names = {str(a.get("agent_id")): a.get("name") for a in sheets.get_agents()}
+    _audit(agent, admin, "districts_shuffle", "district_assignment", res["week_start"],
+           metadata={"assigned": res["assigned"], "skipped_manual": res["skipped_manual"], "dry_run": res["dry_run"]})
+    return jsonify(ok=True, week_start=res["week_start"], assigned=res["assigned"], skipped_manual=res["skipped_manual"], dry_run=res["dry_run"],
+                   preview=[{"agent_id": aid, "name": names.get(aid, ""), "districts": ds} for aid, ds in res["assignments"].items()][:80])
+
+
 # --------------------------------------------------- internal (worker.py)
 # MyHome სქრეპერის queue worker (home-automation რეპო, ცალკე, Windows
 # კომპიუტერზე მომუშავე პროცესი) იძახებს ამ ორ endpoint-ს. ეს
@@ -2889,6 +2965,7 @@ listings_api.register(
     app, authed=_authed_agent, audit=_audit, rate_limited=rate_limited,
     get_jobs=lambda: sheets.get_myhome_jobs(status="COMPLETED"),
     interest=lambda: hubmeet_store.interest_counts(30),
+    my_districts=lambda agent_id: _agent_districts_for(agent_id, crm_time.week_start().strftime(crm_time.DATE_FMT)),
 )
 
 
@@ -2911,6 +2988,10 @@ def _hub_create_base_meeting(fields: dict) -> str:
 def _hub_crm_hook(h: dict, meeting_id: str) -> None:
     """CRM კლიენტის გამდიდრება: სახელი/ბიუჯეტი/გარიგების ტიპი (არსებულ არაცარიელს ცარიელით არ ვშლით; მინიჭებას/სტატუსს არ ვეხებით)."""
     import crm2_store
+    try:
+        crm2_store.ensure_tabs()
+    except Exception:  # noqa: BLE001
+        pass
     fields = {"name": h.get("client_name") or "", "source": "hub"}
     if h.get("budget_usd"):
         fields["budget"] = str(h.get("budget_usd"))
@@ -2937,6 +3018,7 @@ hubmeet_api.register(
     team_lead_for=_team_lead_for_team, notify=lambda chat_id, text: _send_telegram_message(chat_id, text),
     admin_chat_ids=lambda: list(config.ADMIN_CHAT_IDS), find_listing=_hub_find_listing,
     create_base_meeting=_hub_create_base_meeting, crm_hook=_hub_crm_hook, contract_counts=_hub_contract_counts,
+    get_tasks=lambda: sheets.get_tasks(), find_listing_ref=lambda ref: listings_store.find_by_ref(ref),
 )
 
 

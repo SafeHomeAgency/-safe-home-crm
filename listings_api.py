@@ -72,7 +72,7 @@ def on_job_finished(job_row: dict, snapshot) -> None:
         log.exception("Property Hub: ჩანაწერის შენახვა ვერ მოხერხდა (job %s)", (job_row or {}).get("job_id"))
 
 
-def register(app, *, authed, audit, rate_limited, get_jobs, interest=None) -> None:
+def register(app, *, authed, audit, rate_limited, get_jobs, interest=None, my_districts=None) -> None:
     """authed() -> (agent, admin, err); audit(agent, admin, action, entity_type, entity_id, metadata=...); get_jobs() -> MyHomeJobs სტრიქონები; interest() -> {listing_id: შეხვედრების რაოდენობა} ("ცხელი ბინის" ნიშნისთვის)."""
 
     def _interest():
@@ -81,6 +81,20 @@ def register(app, *, authed, audit, rate_limited, get_jobs, interest=None) -> No
         except Exception:  # noqa: BLE001
             log.exception("Property Hub: დაინტერესების რაოდენობა ვერ ჩაიტვირთა")
             return {}
+
+    def _filters(agent):
+        """ფილტრები + „ჩემი რაიონები“ (ამ კვირის მინიჭებული რაიონები; მინიჭება არ არის — ცარიელი სია, ანუ არაფერი ემთხვევა)."""
+        f = parse_filters()
+        f["my_districts_names"] = None
+        if request.args.get("my_districts") in ("1", "true", "yes"):
+            names = []
+            try:
+                names = list(my_districts(str((agent or {}).get("agent_id") or "")) or []) if my_districts and agent else []
+            except Exception:  # noqa: BLE001
+                log.exception("Property Hub: ჩემი რაიონები ვერ ჩაიტვირთა")
+            f["district_any"] = names
+            f["my_districts_names"] = names
+        return f
 
     def _guard(fn):
         @functools.wraps(fn)
@@ -101,7 +115,9 @@ def register(app, *, authed, audit, rate_limited, get_jobs, interest=None) -> No
     @rate_limited("listings_read")
     @_guard
     def listings_list(agent, admin):
-        res = store.query(parse_filters(), viewer_of(agent, admin))
+        f = _filters(agent)
+        res = store.query(f, viewer_of(agent, admin))
+        res["my_districts"] = f.get("my_districts_names")
         ic = _interest()
         for it in res["items"]:
             it["interest"] = ic.get(it["listing_id"], 0)
@@ -111,7 +127,7 @@ def register(app, *, authed, audit, rate_limited, get_jobs, interest=None) -> No
     @rate_limited("listings_read")
     @_guard
     def listings_map(agent, admin):
-        return jsonify(store.map_points(parse_filters(), viewer_of(agent, admin)))
+        return jsonify(store.map_points(_filters(agent), viewer_of(agent, admin)))
 
     @app.get("/api/listings/insights")
     @rate_limited("listings_read")

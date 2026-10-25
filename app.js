@@ -3382,7 +3382,41 @@ function renderDistricts(p) {
       <button class="btn danger" id="dwClear">🧹 გასუფთავება</button>
     </div>
   </div>`;
-  return weekNav + agentsHtml + pickerHtml;
+  const isAdm = state.role === "admin" && !(state.data && state.data.is_team_lead);
+  return (isAdm ? `<div class="card" id="dwAutoBox"><div class="empty">იტვირთება…</div></div>` : "") + weekNav + agentsHtml + pickerHtml;
+}
+
+/* 🔀 ავტომატური კვირეული განაწილება (მხოლოდ ადმინი): ორშაბათს 08:30-ზე ბოტი ყველა აქტიურ აგენტს ანიჭებს საკუთარ, გასულ კვირებში არ განმეორებულ რაიონებს */
+async function dwAuto(box, week, refetch) {
+  let st;
+  try { st = await api("/api/districts/auto"); } catch (e) { box.hidden = true; return; }
+  const draw = (s) => {
+    box.innerHTML = `<h2>🔀 ავტომატური განაწილება</h2>
+      <div class="att-note">ყოველ ორშაბათს 08:30-ზე ბოტი ყველა აქტიურ აგენტს თავად ანაწილებს საკუთარ რაიონებზე — აგენტებს შორის არ მეორდება და გასულ კვირებში ნამუშევარი რაიონები შეძლებისდაგვარად არ ბრუნდება. ხელით მინიჭებულს არ ვეხებით.</div>
+      <div class="list-row" style="margin:8px 0"><div class="main"><div class="title">ავტომატური გაშვება ორშაბათს</div>
+        <div class="sub">${s.this_week_done ? "✅ ამ კვირის განაწილება გაკეთებულია" : "ამ კვირის განაწილება ჯერ არ გაკეთებულა"}${s.last_auto_week ? ` · ბოლოს: ${esc(s.last_auto_week)}` : ""}</div></div>
+        <div class="side"><button class="chip ${s.enabled ? "sel" : ""}" id="dwAutoToggle">${s.enabled ? "ჩართულია" : "გამორთულია"}</button></div></div>
+      <div class="actions"><button class="btn secondary" id="dwShufPrev">👁 გადახედვა</button><button class="btn" id="dwShufNow">🔀 გადანაწილება ახლა</button></div>
+      <div id="dwShufOut" class="sub" style="margin-top:8px;white-space:normal"></div>`;
+    document.getElementById("dwAutoToggle").onclick = async () => {
+      try { draw(await api("/api/districts/auto", { method: "POST", body: JSON.stringify({ enabled: !s.enabled }) })); toast(!s.enabled ? "✅ ჩაირთო" : "გამოირთო"); }
+      catch (e) { toast(e.message || "შეცდომა"); }
+    };
+    const run = async (dry) => {
+      const out = document.getElementById("dwShufOut");
+      if (!dry && !confirm("ყველა აქტიურ აგენტს ახლავე გადაენაწილება რაიონები (ხელით მინიჭებულს არ შევეხებით) და შეტყობინება გაეგზავნება. გავაგრძელოთ?")) return;
+      out.textContent = "მიმდინარეობს…";
+      try {
+        const r = await api("/api/districts/shuffle", { method: "POST", body: JSON.stringify({ week, dry_run: dry }) });
+        out.innerHTML = `${dry ? "👁 გადახედვა" : "✅ გადანაწილდა"}: <b>${r.assigned}</b> აგენტი${r.skipped_manual ? ` · ხელით დარჩა: ${r.skipped_manual}` : ""}<br>` +
+          (r.preview || []).slice(0, 12).map((x) => `• ${esc(x.name)}: ${esc((x.districts || []).join(", "))}`).join("<br>") + ((r.preview || []).length > 12 ? "<br>…" : "");
+        if (!dry) { toast("✅ რაიონები გადანაწილდა"); refetch(); }
+      } catch (e) { out.textContent = e.message || "შეცდომა"; }
+    };
+    document.getElementById("dwShufPrev").onclick = () => run(true);
+    document.getElementById("dwShufNow").onclick = () => run(false);
+  };
+  draw(st);
 }
 
 function bindDistricts(p) {
@@ -3390,6 +3424,8 @@ function bindDistricts(p) {
   const agents = p.agents || [];
   const refetch = () => { delete lazyCache.districts; renderContent(); };
   const wk = () => p.week_start || todayIso();
+  const autoBox = document.getElementById("dwAutoBox");
+  if (autoBox) dwAuto(autoBox, p.week_start || todayIso(), refetch);
   const goWeek = (iso) => { state.distWeek = iso; state.distAgents.clear(); state.distPick.clear(); refetch(); };
   const prev = document.getElementById("dwPrev"); if (prev) prev.onclick = () => goWeek(addDaysIso(wk(), -7));
   const next = document.getElementById("dwNext"); if (next) next.onclick = () => goWeek(addDaysIso(wk(), 7));
@@ -4637,7 +4673,7 @@ const HUB_CITIES = { თბილისი: [41.7151, 44.8271, 12], ბათუ
 const HUB_FR_RANK = { green: 0, orange: 1, red: 2, grey: 3 };
 state.hub = state.hub || {
   q: "", deal: "", ptype: "", rooms: [], pmin: "", pmax: "", district: "", fresh: [], mine: false, favOnly: false, agent: "", sort: "new",
-  bedrooms: [], amin: "", amax: "", fmin: "", fmax: "", tmin: "", tmax: "", notFirst: false, notLast: false, pets: "",
+  bedrooms: [], amin: "", amax: "", fmin: "", fmax: "", tmin: "", tmax: "", notFirst: false, notLast: false, pets: "", myDist: false, myDistNames: null, lead: null,
   view: "list", page: 1, items: [], total: 0, facets: null, meta: null, seq: 0, panel: false, loading: false, err: "", ins: null, insOpen: false,
   map: null, mapSeq: 0,
 };
@@ -4706,7 +4742,7 @@ function hubEff() {                        // ეფექტური ფილ
 function hubActiveCount() {                // ფილტრების რაოდენობა ⚙️ ღილაკის ბეჯისთვის
   const h = state.hub;
   return [h.ptype, h.district, h.pmin, h.pmax, h.amin, h.amax, h.fmin, h.fmax, h.tmin, h.tmax, h.pets].filter(Boolean).length
-    + (h.rooms.length ? 1 : 0) + (h.bedrooms.length ? 1 : 0) + (h.notFirst ? 1 : 0) + (h.notLast ? 1 : 0);
+    + (h.rooms.length ? 1 : 0) + (h.bedrooms.length ? 1 : 0) + (h.notFirst ? 1 : 0) + (h.notLast ? 1 : 0) + (h.myDist ? 1 : 0);
 }
 function hubQS(page, forMap) {
   const h = state.hub, e = hubEff(), p = [];
@@ -4718,6 +4754,7 @@ function hubQS(page, forMap) {
   if (h.notFirst) p.push("not_first=1");
   if (h.notLast) p.push("not_last=1");
   if (h.mine) p.push("mine=1");
+  if (h.myDist) p.push("my_districts=1");
   if (h.favOnly) { const f = hubFavs(); p.push("ids=" + encodeURIComponent(f.length ? f.join(",") : "-")); p.push("inactive=1"); }
   if (!forMap) { add("sort", h.sort); p.push("page=" + page); p.push("per_page=24"); }
   return p.join("&");
@@ -4768,13 +4805,16 @@ function hubDrawChips() {
   el.innerHTML = `
     <div class="hub-row">${HUB_DEALS.map(([v, l]) => `<button class="hub-chip ${hubEff().deal === v ? "on" : ""}" data-hub-deal="${esc(v)}">${esc(l)}</button>`).join("")}
       <button class="hub-chip ${h.mine ? "on" : ""}" data-hub-mine="1">⭐ ჩემი${h.meta ? ` (${h.meta.mine_total})` : ""}</button>
-      <button class="hub-chip ${h.favOnly ? "on" : ""}" data-hub-favonly="1">♥ ფავორიტები (${hubFavs().length})</button></div>
+      <button class="hub-chip ${h.favOnly ? "on" : ""}" data-hub-favonly="1">♥ ფავორიტები (${hubFavs().length})</button>
+      <button class="hub-chip ${h.myDist ? "on" : ""}" data-hub-mydist="1">📍 ჩემი რაიონები</button></div>
+    ${h.myDist ? `<div class="hub-note" style="margin-bottom:8px">${h.myDistNames && h.myDistNames.length ? "📍 ამ კვირის რაიონები: " + h.myDistNames.map(esc).join(", ") : "ამ კვირას რაიონი ჯერ არ გაქვთ მინიჭებული — ორშაბათს ავტომატურად გადანაწილდება ან მენეჯერი მოგანიჭებთ."}</div>` : ""}
     <div class="hub-row">${["green", "orange", "red", "grey"].map((c) => `<button class="hub-chip fr-${c} ${h.fresh.includes(c) ? "on" : ""}" data-hub-fr="${c}"><i></i>${HUB_FR[c]}${fc[c] != null ? ` <b>${fc[c]}</b>` : ""}</button>`).join("")}</div>
     ${sm.chips.length ? `<div class="hub-row hub-smart"><span class="hub-k" style="margin:0">ჭკვიანი ძიება:</span>${sm.chips.map((c) => `<span class="hub-chip on">${esc(c)}</span>`).join("")}</div>` : ""}`;
   const fb = document.getElementById("hubFilterBtn");
   if (fb) { const n = hubActiveCount(); fb.textContent = "⚙️" + (n ? " " + n : ""); fb.classList.toggle("hub-on", n > 0); }
   el.querySelectorAll("[data-hub-deal]").forEach((b) => { b.onclick = () => { hubHaptic(); h.deal = b.dataset.hubDeal; hubReload(); }; });
   el.querySelectorAll("[data-hub-mine]").forEach((b) => { b.onclick = () => { hubHaptic(); h.mine = !h.mine; hubReload(); }; });
+  el.querySelectorAll("[data-hub-mydist]").forEach((b) => { b.onclick = () => { hubHaptic(); h.myDist = !h.myDist; hubReload(); }; });
   el.querySelectorAll("[data-hub-favonly]").forEach((b) => { b.onclick = () => { hubHaptic(); h.favOnly = !h.favOnly; hubReload(); }; });
   el.querySelectorAll("[data-hub-fr]").forEach((b) => { b.onclick = () => { hubHaptic(); const c = b.dataset.hubFr; h.fresh = h.fresh.includes(c) ? h.fresh.filter((x) => x !== c) : h.fresh.concat(c); hubReload(); }; });
 }
@@ -4825,7 +4865,7 @@ function hubDrawPanel() {
   document.getElementById("hubApply").onclick = () => { keepInputs(); h.panel = false; hubReload(); };
   document.getElementById("hubReset").onclick = () => {
     Object.assign(h, { q: "", deal: "", ptype: "", rooms: [], pmin: "", pmax: "", district: "", fresh: [], mine: false, favOnly: false, agent: "", sort: "new", panel: false,
-      bedrooms: [], amin: "", amax: "", fmin: "", fmax: "", tmin: "", tmax: "", notFirst: false, notLast: false, pets: "" });
+      bedrooms: [], amin: "", amax: "", fmin: "", fmax: "", tmin: "", tmax: "", notFirst: false, notLast: false, pets: "", myDist: false, myDistNames: null });
     const s = document.getElementById("hubQ"); if (s) s.value = "";
     hubReload();
   };
@@ -4904,7 +4944,7 @@ async function hubLoad(append) {
     const r = await api("/api/listings?" + hubQS(h.page));
     if (seq !== h.seq) return;
     h.items = append ? h.items.concat(r.items) : r.items;
-    h.total = r.total; h.facets = r.facets; h.meta = r.meta;
+    h.total = r.total; h.facets = r.facets; h.meta = r.meta; h.myDistNames = r.my_districts || null;
   } catch (e) {
     if (seq !== h.seq) return;
     h.err = e.message || "შეცდომა"; if (append) h.page -= 1;
@@ -4963,7 +5003,8 @@ async function hubOpenDetail(idOrItem) {
       ${row("მესაკუთრის ნომერი", it.owner_number)}${row("შენიშვნა", it.notes)}${row("წყარო", it.src_site ? it.src_site + " " + (it.src_id || "") : "")}
       <div class="hub-row" style="margin-top:8px"><button class="btn" id="hubVerify">✅ ვადასტურებ — აქტუალურია</button>
         <button class="btn secondary" id="hubSold">🏁 ${/ქირ/.test(it.deal_type || "") ? "გაქირავდა" : "გაიყიდა"}</button></div></div>` : ""}
-    <div class="hub-row" style="margin-top:12px">${links}<button class="btn secondary" id="hubCopy">📋 კოპირება</button><button class="btn" id="hubCoop">${it.private ? "📅 შეხვედრა" : "🤝 შეხვედრა + თანამშრომლობა"}</button></div>`;
+    <div class="hub-row" style="margin-top:12px">${links}<button class="btn secondary" id="hubCopy">📋 კოპირება</button><button class="btn" id="hubCoop">${it.private ? "📅 შეხვედრა" : "🤝 შეხვედრა + თანამშრომლობა"}</button>
+      ${state.hub.ins && state.hub.ins.scope !== "mine" ? `<button class="btn secondary" id="hubAssign">👤 კლიენტის გადაბარება</button>` : ""}</div>`;
   backdrop.hidden = false;
   document.getElementById("modalClose").onclick = closeDetail;
   backdrop.onclick = (e) => { if (e.target === backdrop) closeDetail(); };
@@ -4978,6 +5019,7 @@ async function hubOpenDetail(idOrItem) {
     catch (e) { const ta = document.createElement("textarea"); ta.value = txt; document.body.appendChild(ta); ta.select(); try { document.execCommand("copy"); toast("📋 დაკოპირდა"); } catch (e2) { toast(txt.slice(0, 80)); } ta.remove(); }
   };
   document.getElementById("hubCoop").onclick = () => hubBookForm(it);
+  const asg = document.getElementById("hubAssign"); if (asg) asg.onclick = async () => { await hubEnsureLeadsMeta(); hubAssignForm(it); };
   const vb = document.getElementById("hubVerify");
   if (vb) vb.onclick = async () => {
     vb.disabled = true;
@@ -5081,6 +5123,7 @@ function hubSetView(v) {
   if (box) box.hidden = v !== "map";
   const fl = document.getElementById("hubFilters"), ins = document.getElementById("hubIns"), mt = document.getElementById("hubMeet"), inf = document.getElementById("hubMapInfo");
   if (fl) fl.hidden = v === "meet";
+  hubDrawLeadBar();
   if (ins) ins.hidden = v === "meet";
   if (mt) mt.hidden = v !== "meet";
   if (inf && v !== "map") inf.textContent = "";
@@ -5099,7 +5142,7 @@ async function hubLoadIns() {
 const HUB_ST = { pending: "დასადასტურებელი", planned: "დაგეგმილი", done: "ჩატარდა", cancelled: "გაუქმდა", rejected: "უარყოფილია", no_show: "არ გამოცხადდა" };
 const HUB_WD = ["კვირა", "ორშაბათი", "სამშაბათი", "ოთხშაბათი", "ხუთშაბათი", "პარასკევი", "შაბათი"];
 const HUB_COOP_CHIPS = ["მესაკუთრესთან პირდაპირ", "აგენტთან 50/50", "აგენტთან 100%", "შეთანხმებით"];
-state.hub.mv = state.hub.mv || { tab: "upcoming", items: [], meta: null, stats: null, loading: false, err: "" };
+state.hub.mv = state.hub.mv || { tab: "clients", items: [], meta: null, stats: null, loading: false, err: "", leads: [], leadsMeta: null };
 
 function hubIso(d) { return d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") + "-" + String(d.getDate()).padStart(2, "0"); }
 function hubDayLabel(iso) {
@@ -5130,7 +5173,8 @@ function hubAsk(title, html, submitLabel, onSubmit) {
 }
 
 /* ---- ბინიდან შეხვედრის დაგეგმვა ---- */
-function hubBookForm(it) {
+function hubBookForm(it, pre) {
+  pre = pre || state.hub.lead || {};              // კლიენტის დავალებიდან: ტელეფონი/სახელი/task_id წინასწარ ივსება
   const mine = !!it.private;
   const rent = /ქირ/.test(it.deal_type || "");
   const tomorrow = new Date(Date.now() + 86400000);
@@ -5139,8 +5183,9 @@ function hubBookForm(it) {
     <div class="hub-mini">${photo ? `<img referrerpolicy="no-referrer" src="${esc(photo)}" alt="">` : `<div class="hub-noph">🏠</div>`}
       <div><b>${hubMoney(it.price_usd)}${rent ? "/თვე" : ""}</b><div class="muted">${esc([it.district, it.address].filter(Boolean).join(" · "))}</div><div class="muted">${esc(it.agent_name || "")}</div></div></div>
     ${mine ? "" : `<div class="hub-note">🤝 ეს ბინა სხვა აგენტისაა — მოთხოვნა გადაეგზავნება მფლობელ აგენტს დასადასტურებლად. კლიენტის ტელეფონი მას არ გადაეცემა.</div>`}
-    <div class="hub-grid2"><label>კლიენტის სახელი *<input id="bkName" placeholder="მაგ: გიორგი მ."></label>
-      <label>ტელეფონი *<input id="bkPhone" type="tel" inputmode="tel" placeholder="5xx xx xx xx"></label>
+    ${pre.task_id ? `<div class="hub-note">📥 კლიენტის დავალებიდან — შეხვედრა ამ დავალებას მიება.</div>` : ""}
+    <div class="hub-grid2"><label>კლიენტის სახელი *<input id="bkName" placeholder="მაგ: გიორგი მ." value="${esc(pre.client_name || "")}"></label>
+      <label>ტელეფონი *<input id="bkPhone" type="tel" inputmode="tel" placeholder="5xx xx xx xx" value="${esc(pre.client_phone || "")}"></label>
       <label>თარიღი *<input id="bkDate" type="date" min="${hubIso(new Date())}" value="${hubIso(tomorrow)}"></label>
       <label>საათი *<input id="bkTime" type="time" value="12:00"></label></div>
     ${rent ? `<div class="hub-k">გაქირავების პერიოდი (თვე)</div><div class="hub-row" id="bkRentChips">${[3, 6, 12, 24].map((n) => `<button class="hub-chip" data-bk-rent="${n}">${n}</button>`).join("")}
@@ -5158,11 +5203,12 @@ function hubBookForm(it) {
     const r = await api("/api/hub/meetings", { method: "POST", body: JSON.stringify({
       listing_id: it.listing_id, client_name: g("bkName"), client_phone: g("bkPhone"), meeting_date: g("bkDate"), meeting_time: g("bkTime"),
       rental_months: rent ? g("bkRent") : "", move_in_date: rent ? g("bkMove") : "", budget_usd: g("bkBudget"), tenants: g("bkTenants"),
-      coop_terms: g("bkCoop"), owner_availability: g("bkAvail"), notes: g("bkNotes") }) });
+      coop_terms: g("bkCoop"), owner_availability: g("bkAvail"), notes: g("bkNotes"), task_id: pre.task_id || "" }) });
     hubHaptic("ok");
     toast(r.meeting.status === "pending" ? "🤝 მოთხოვნა გაიგზავნა — მფლობელი დაადასტურებს" : "✅ შეხვედრა დაგეგმილია");
     closeDetail();
-    state.hub.mv.tab = "upcoming";
+    state.hub.lead = null; hubDrawLeadBar();
+    state.hub.mv.tab = pre.task_id ? "clients" : "upcoming";
     hubSetView("meet");
   });
   box.querySelectorAll("[data-bk-rent]").forEach((b) => { b.onclick = () => { box.querySelector("#bkRent").value = b.dataset.bkRent; box.querySelectorAll("[data-bk-rent]").forEach((x) => x.classList.toggle("on", x === b)); }; });
@@ -5174,8 +5220,11 @@ async function hubLoadMeet() {
   const mv = state.hub.mv;
   mv.loading = true; mv.err = ""; hubDrawMeet();
   try {
-    const [list, stats] = await Promise.all([api("/api/hub/meetings?view=" + encodeURIComponent(mv.tab) + (mv.tab === "past" ? "&days=60" : "")), api("/api/hub/stats?days=30")]);
-    mv.items = list.items; mv.meta = list.meta; mv.stats = stats;
+    const mtab = mv.tab === "clients" ? "upcoming" : mv.tab;
+    const [list, stats, leads] = await Promise.all([api("/api/hub/meetings?view=" + encodeURIComponent(mtab) + (mtab === "past" ? "&days=60" : "")), api("/api/hub/stats?days=30"),
+      api("/api/hub/leads?view=open").catch(() => ({ items: [], total: 0, unseen_mine: 0, can_manage: false, agents: [] }))]);
+    mv.items = mv.tab === "clients" ? [] : list.items; mv.meta = list.meta; mv.stats = stats; mv.leads = leads.items || []; mv.leadsMeta = leads;
+    hubSetBadge();
   } catch (e) { mv.err = e.message || "შეცდომა"; }
   mv.loading = false;
   hubDrawMeet();
@@ -5206,11 +5255,13 @@ function hubDrawMeet() {
   const mv = state.hub.mv, el = document.getElementById("hubMeet");
   if (!el) return;
   const s = mv.stats, tot = s && s.totals;
-  const tabs = [["upcoming", "მომავალი"], ["pending", `დასადასტურებელი${mv.meta && mv.meta.pending_for_me ? ` (${mv.meta.pending_for_me})` : ""}`], ["past", "ისტორია"]];
+  const lm = mv.leadsMeta || {};
+  const tabs = [["clients", `📥 კლიენტები${lm.total ? ` (${lm.total})` : ""}`], ["upcoming", "📅 შეხვედრები"], ["pending", `დასადასტურებელი${mv.meta && mv.meta.pending_for_me ? ` (${mv.meta.pending_for_me})` : ""}`], ["past", "ისტორია"]];
   const strip = tot ? `<div class="hub-ins-top"><div class="hub-stat"><b>${tot.today}</b><span>დღეს</span></div><div class="hub-stat"><b>${tot.tomorrow}</b><span>ხვალ</span></div>
       <div class="hub-stat ${tot.pending ? "warn" : ""}"><b>${tot.pending}</b><span>დასადასტურებელი</span></div><div class="hub-stat"><b>${tot.done}</b><span>ჩატარდა (30დ)</span></div><div class="hub-stat"><b>${tot.contracts}</b><span>ხელშეკრულება</span></div></div>` : "";
   let body = "";
   if (mv.err) body = `<div class="empty">⚠️ ${esc(mv.err)}</div>`;
+  else if (mv.tab === "clients") body = mv.loading && !mv.leads.length ? hubSkeleton() : hubLeadsBody(mv);
   else if (mv.loading && !mv.items.length) body = hubSkeleton();
   else if (!mv.items.length) body = `<div class="empty">${mv.tab === "pending" ? "დასადასტურებელი მოთხოვნა არ არის 🎉" : "შეხვედრა ჯერ არ არის. გახსენით ბინა და დააჭირეთ „შეხვედრის დაგეგმვა“."}</div>`;
   else {
@@ -5229,6 +5280,117 @@ function hubDrawMeet() {
   el.querySelectorAll("[data-hub-top]").forEach((c) => { c.onclick = () => hubOpenDetail(c.dataset.hubTop); });
   el.querySelectorAll("[data-mt-act]").forEach((b) => {
     b.onclick = () => { const mt = mv.items.find((x) => x.hub_id === b.closest("[data-mt-id]").dataset.mtId); if (mt) hubMeetAct(mt, b.dataset.mtAct); };
+  });
+  el.querySelectorAll("[data-ld-act]").forEach((b) => {
+    b.onclick = () => { const ld = mv.leads.find((x) => x.task_id === b.closest("[data-ld-id]").dataset.ldId); if (ld) hubLeadAct(ld, b.dataset.ldAct); };
+  });
+  const nl = document.getElementById("hubNewLead"); if (nl) nl.onclick = () => hubNewLeadForm();
+}
+
+/* ---- კლიენტები (დავალებები) — ერთ სივრცეში ბინებთან და შეხვედრებთან ერთად ---- */
+function hubLeadCard(ld) {
+  const L = ld.listing, rent = L && /ქირ/.test(L.deal_type || "");
+  const pr = { "მაღალი": "hi", "საშუალო": "mid", "დაბალი": "lo" }[ld.priority] || "mid";
+  const listing = L ? `<div class="hub-ld-ls" data-ld-act="listing">${L.photo ? `<img loading="lazy" referrerpolicy="no-referrer" src="${esc(L.photo)}" alt="" onerror="this.style.display='none'">` : `<div class="hub-noph">🏠</div>`}
+      <div><b>${hubMoney(Number(L.price_usd) || null)}${rent ? "/თვე" : ""}</b><div class="muted">${esc([L.district, L.address].filter(Boolean).join(" · "))}</div>
+      <div class="muted">${esc(L.agent_name || "")}</div></div></div>`
+    : (ld.listing_ref ? `<div class="hub-note">🏠 ბინა: ${esc(ld.listing_ref)} (კატალოგში ვერ მოიძებნა)</div>` : `<div class="hub-note">🧊 ზოგადი კლიენტი (ცივი ლიდი)${ld.deal_type ? " · " + esc(ld.deal_type) : ""} — აირჩიეთ ბინა და დაგეგმეთ შეხვედრა</div>`);
+  const mts = (ld.meetings || []).map((x) => `<span class="hub-tag gold">📅 ${esc(x.meeting_date)} ${esc(x.meeting_time)} · ${esc(x.status_label || x.status)}</span>`).join("");
+  return `<div class="hub-ld pr-${pr}" data-ld-id="${esc(ld.task_id)}">
+    <div class="hub-ld-top"><div><b>${ld.client_phone ? `<a href="tel:${esc(String(ld.client_phone).replace(/[^\d+]/g, ""))}">📞 ${esc(ld.client_phone)}</a>` : "კლიენტი"}</b>
+      ${ld.is_mine && !ld.seen ? `<span class="hub-new">🔔 ახალი</span>` : ""}</div><span class="hub-pillst">${esc(ld.priority || "")}</span></div>
+    <div class="muted">${esc(ld.assigned_to_name || "")}${ld.created_at ? " · " + esc(String(ld.created_at).slice(0, 16)) : ""}${ld.viewing_time ? " · ნახვა: " + esc(ld.viewing_time) : ""}</div>
+    ${listing}
+    ${ld.notes ? `<div class="hub-mt-notes">📝 ${esc(ld.notes)}</div>` : ""}
+    ${mts ? `<div class="hub-mt-tags">${mts}</div>` : ""}
+    <div class="hub-mt-acts">
+      ${ld.is_mine && !ld.seen ? `<button class="btn" data-ld-act="ack">✅ მივიღე</button>` : ""}
+      <button class="btn ${ld.is_mine && !ld.seen ? "secondary" : ""}" data-ld-act="meet">📅 ${L ? "შეხვედრა" : "ბინის არჩევა"}</button>
+      ${(state.hub.mv.leadsMeta || {}).can_manage ? `<button class="btn secondary" data-ld-act="reassign">🔁 გადაბარება</button>` : ""}
+    </div></div>`;
+}
+function hubLeadsBody(mv) {
+  const lm = mv.leadsMeta || {};
+  const bar = `<div class="hub-row" style="margin:6px 0 10px">${lm.can_manage ? `<button class="btn" id="hubNewLead">➕ ახალი კლიენტი (ცივი ლიდი)</button>` : ""}
+    <div class="muted" style="flex:1 1 100%">${lm.can_manage ? "ბინაზე გადასაბარებლად გახსენით ბინა და დააჭირეთ „👤 კლიენტის გადაბარება“." : "მენეჯერის მიერ გადმოცემული კლიენტები ბინებთან ერთად."}</div></div>`;
+  if (!mv.leads.length) return bar + `<div class="empty">ღია კლიენტი არ არის 🎉</div>`;
+  return bar + mv.leads.map(hubLeadCard).join("");
+}
+function hubSetBadge() {
+  const mv = state.hub.mv, n = ((mv.meta && mv.meta.pending_for_me) || 0) + ((mv.leadsMeta && mv.leadsMeta.unseen_mine) || 0);
+  state.hub.pendingForMe = n;
+  const b = document.getElementById("hubMeetBadge"); if (b) { b.textContent = n ? ` ${n}` : ""; b.hidden = !n; }
+}
+async function hubLeadAct(ld, act) {
+  const mv = state.hub.mv;
+  if (act === "listing") { if (ld.listing) hubOpenDetail(ld.listing.listing_id); return; }
+  if (act === "ack") {
+    try { await api("/api/tasks/ack", { method: "POST", body: JSON.stringify({ task_id: ld.task_id }) }); hubHaptic("ok"); toast("✅ კლიენტი მიღებულია"); hubLoadMeet(); }
+    catch (e) { toast(e.message || "შეცდომა"); }
+    return;
+  }
+  if (act === "meet") {
+    const pre = { task_id: ld.task_id, client_phone: ld.client_phone || "" };
+    if (ld.listing) {                                   // ბინა ცნობილია: პირდაპირ შეხვედრის ფორმა წინასწარ შევსებული კლიენტით
+      try { const it = (await api("/api/listings/" + encodeURIComponent(ld.listing.listing_id))).listing; hubBookForm(it, pre); }
+      catch (e) { toast(e.message || "შეცდომა"); }
+    } else {                                            // ზოგადი კლიენტი: გადავდივართ ბინების სიაზე სათანადო გარიგებით, ზედა ზოლში კლიენტი ჩანს
+      state.hub.lead = pre; state.hub.deal = /ყიდვ/.test(ld.deal_type || "") ? "იყიდება" : (/ქირ/.test(ld.deal_type || "") ? "ქირავდება" : "");
+      hubSetView("list"); hubDrawLeadBar(); hubReload(); toast("🏠 აირჩიეთ ბინა — შეხვედრაში კლიენტი უკვე ჩაწერილია");
+    }
+    return;
+  }
+  if (act === "reassign") {
+    const ags = (mv.leadsMeta || {}).agents || [];
+    hubAsk("🔁 კლიენტის გადაბარება", `<label class="hub-lbl">აგენტი<select id="raAgent">${ags.map((a) => `<option value="${esc(a.agent_id)}" ${a.agent_id === ld.assigned_to ? "selected" : ""}>${esc(a.name)}${a.team ? " · " + esc(a.team) : ""}</option>`).join("")}</select></label>`,
+      "გადაბარება", async (bx) => {
+        await api("/api/tasks/reassign", { method: "POST", body: JSON.stringify({ task_id: ld.task_id, to_agent_id: bx.querySelector("#raAgent").value }) });
+        hubHaptic("ok"); toast("🔁 გადაბარებულია"); closeDetail(); hubLoadMeet();
+      });
+  }
+}
+/* ზედა ზოლი ბინების სიაში, როცა ზოგადი კლიენტისთვის ბინას ვარჩევთ */
+function hubDrawLeadBar() {
+  const el = document.getElementById("hubLeadBar"), l = state.hub.lead;
+  if (!el) return;
+  if (!l) { el.hidden = true; el.innerHTML = ""; return; }
+  el.hidden = false;
+  el.innerHTML = `📥 კლიენტი ${esc(l.client_phone || "")} — აირჩიეთ ბინა <button class="hub-link" id="hubLeadCancel">✕ გაუქმება</button>`;
+  document.getElementById("hubLeadCancel").onclick = () => { state.hub.lead = null; hubDrawLeadBar(); };
+}
+function hubNewLeadForm() {
+  const ags = (state.hub.mv.leadsMeta || {}).agents || [];
+  hubAsk("➕ ახალი კლიენტი (ცივი ლიდი)", `
+    <label class="hub-lbl">ტელეფონი *<input id="nlPhone" type="tel" inputmode="tel" placeholder="5xx xx xx xx"></label>
+    <div class="hub-k">გარიგება</div><div class="hub-row" id="nlDeal"><button class="hub-chip on" data-v="ქირა">ქირა</button><button class="hub-chip" data-v="ყიდვა">ყიდვა</button></div>
+    <div class="hub-k">პრიორიტეტი</div><div class="hub-row" id="nlPri"><button class="hub-chip on" data-v="მაღალი">მაღალი</button><button class="hub-chip" data-v="საშუალო">საშუალო</button><button class="hub-chip" data-v="დაბალი">დაბალი</button></div>
+    <label class="hub-lbl">ვის გადაეცეს<select id="nlAgent"><option value="">🤖 ავტომატურად (საუკეთესო აგენტი)</option><option value="__me">👤 ჩემზე</option>${ags.map((a) => `<option value="${esc(a.agent_id)}">${esc(a.name)}${a.team ? " · " + esc(a.team) : ""}</option>`).join("")}</select></label>
+    <label class="hub-lbl">დეტალი / შენიშვნა<textarea id="nlNotes" rows="2" placeholder="რა სჭირდება კლიენტს (ბიუჯეტი, რაიონი...)"></textarea></label>`,
+  "გაგზავნა", async (bx) => {
+    const pick = (id) => (bx.querySelector("#" + id + " .on") || {}).dataset.v;
+    const a = bx.querySelector("#nlAgent").value;
+    const body = { kind: "general", phone: bx.querySelector("#nlPhone").value.trim(), deal_type: pick("nlDeal"), priority: pick("nlPri"), notes: bx.querySelector("#nlNotes").value.trim() };
+    if (a === "__me") body.assign_to_self = true; else if (a) body.agent_id = a;
+    await api("/api/tasks/new", { method: "POST", body: JSON.stringify(body) });
+    hubHaptic("ok"); toast("✅ კლიენტი გაიგზავნა"); closeDetail(); hubLoadMeet();
+  });
+  ["nlDeal", "nlPri"].forEach((id) => document.querySelectorAll("#" + id + " .hub-chip").forEach((b) => { b.onclick = () => document.querySelectorAll("#" + id + " .hub-chip").forEach((x) => x.classList.toggle("on", x === b)); }));
+}
+/* ბინიდან კლიენტის გადაბარება (მენეჯერი): არსებული /api/tasks/new, ბინა მიება დავალებას */
+function hubAssignForm(it) {
+  const ags = (state.hub.mv.leadsMeta || {}).agents || [];
+  const def = ags.find((a) => a.agent_id === it.agent_id) ? it.agent_id : (ags[0] || {}).agent_id;
+  hubAsk("👤 კლიენტის გადაბარება ამ ბინაზე", `
+    <div class="hub-mini"><div class="hub-noph" style="width:56px;height:56px;flex:0 0 56px">🏠</div><div><b>${hubMoney(it.price_usd)}</b><div class="muted">${esc([it.district, it.address].filter(Boolean).join(" · "))}</div></div></div>
+    <label class="hub-lbl">კლიენტის ტელეფონი *<input id="asPhone" type="tel" inputmode="tel" placeholder="5xx xx xx xx"></label>
+    <label class="hub-lbl">აგენტი<select id="asAgent">${ags.map((a) => `<option value="${esc(a.agent_id)}" ${a.agent_id === def ? "selected" : ""}>${esc(a.name)}${a.team ? " · " + esc(a.team) : ""}</option>`).join("")}</select></label>
+    <div class="hub-grid2"><label>ნახვის თარიღი<input id="asDate" type="date" min="${hubIso(new Date())}"></label><label>საათი<input id="asTime" type="time"></label></div>
+    <label class="hub-lbl">დეტალი / შენიშვნა<textarea id="asNotes" rows="2"></textarea></label>`,
+  "გაგზავნა", async (bx) => {
+    const d = bx.querySelector("#asDate").value, tm = bx.querySelector("#asTime").value;
+    await api("/api/tasks/new", { method: "POST", body: JSON.stringify({ kind: "listing", agent_id: bx.querySelector("#asAgent").value, listing_id: String(it.myhome_id || it.ssge_id || it.listing_id),
+      phone: bx.querySelector("#asPhone").value.trim(), viewing_time: d ? (d + (tm ? " " + tm : "")) : "", notes: bx.querySelector("#asNotes").value.trim(), owner_phone: it.owner_number || "" }) });
+    hubHaptic("ok"); toast("✅ კლიენტი გადაეცა აგენტს"); closeDetail(); state.hub.mv.tab = "clients"; hubSetView("meet");
   });
 }
 async function hubMeetPost(mt, path, body, okMsg) {
@@ -5267,10 +5429,17 @@ async function hubContract(mt) {
 }
 async function hubLoadMeetBadge() {
   try {
-    const r = await api("/api/hub/meetings?view=pending");
-    state.hub.pendingForMe = (r.meta && r.meta.pending_for_me) || 0;
-    const b = document.getElementById("hubMeetBadge"); if (b) { b.textContent = state.hub.pendingForMe ? ` ${state.hub.pendingForMe}` : ""; b.hidden = !state.hub.pendingForMe; }
+    const [r, l] = await Promise.all([api("/api/hub/meetings?view=pending"), api("/api/hub/leads?view=open").catch(() => null)]);
+    const mv = state.hub.mv;
+    mv.meta = Object.assign({}, mv.meta, r.meta);
+    if (l) { mv.leadsMeta = l; mv.leads = l.items || []; }
+    hubSetBadge();
   } catch (e) { /* ბეჯი არასავალდებულოა */ }
+}
+async function hubEnsureLeadsMeta() {                 // მენეჯერის აგენტების სია (გადაბარების ფორმებისთვის)
+  const mv = state.hub.mv;
+  if (mv.leadsMeta && mv.leadsMeta.agents) return;
+  try { const l = await api("/api/hub/leads?view=open"); mv.leadsMeta = l; mv.leads = l.items || []; } catch (e) { /* ფორმა სიის გარეშე გაიხსნება */ }
 }
 
 /* ---- ადმინის ინსტრუმენტები: სიახლის ზღვრები + CSV ექსპორტი (ფაილი Telegram-ში მოდის) ---- */
@@ -5300,13 +5469,14 @@ async function renderHub(content) {
   content.innerHTML = `
     <div class="card hub-head">
       <div class="hub-title"><h2>🏙️ განცხადებები</h2><span class="sub" id="hubCount"></span></div>
-      <div class="hub-seg"><button data-hub-view="list" class="${h.view === "list" ? "on" : ""}">📋 სია</button><button data-hub-view="map" class="${h.view === "map" ? "on" : ""}">🗺 რუკა</button><button data-hub-view="meet" class="${h.view === "meet" ? "on" : ""}">📅 შეხვედრები<b id="hubMeetBadge" class="hub-badge" hidden></b></button></div>
+      <div class="hub-seg"><button data-hub-view="list" class="${h.view === "list" ? "on" : ""}">📋 სია</button><button data-hub-view="map" class="${h.view === "map" ? "on" : ""}">🗺 რუკა</button><button data-hub-view="meet" class="${h.view === "meet" ? "on" : ""}">📥 სამუშაო<b id="hubMeetBadge" class="hub-badge" hidden></b></button></div>
       <div id="hubFilters" ${h.view === "meet" ? "hidden" : ""}>
         <div class="hub-search"><input id="hubQ" type="search" placeholder="მაგ: 3 ოთახი საბურთალო 500$-მდე ქირა · ID · მისამართი" value="${esc(h.q)}">
           <button class="btn secondary" id="hubFilterBtn">⚙️</button></div>
         <div id="hubChips"></div><div id="hubPanel" class="hub-panel" hidden></div>
       </div>
     </div>
+    <div id="hubLeadBar" class="hub-leadbar" hidden></div>
     <div class="card hub-ins" id="hubIns" ${h.view === "meet" ? "hidden" : ""}></div>
     <div id="hubMeet" class="hub-meetbox" ${h.view === "meet" ? "" : "hidden"}></div>
     <div id="hubMapBox" class="hub-mapbox" ${h.view === "map" ? "" : "hidden"}><div class="empty">იტვირთება…</div></div>
@@ -5316,7 +5486,7 @@ async function renderHub(content) {
   document.getElementById("hubQ").oninput = (e) => { h.q = e.target.value; clearTimeout(t); t = setTimeout(hubReload, 380); };
   document.getElementById("hubFilterBtn").onclick = () => { h.panel = !h.panel; hubDrawPanel(); };
   document.querySelectorAll("[data-hub-view]").forEach((b) => { b.onclick = () => { hubHaptic(); hubSetView(b.dataset.hubView); }; });
-  hubDrawChips(); hubDrawPanel(); hubDrawList(); hubDrawIns();
+  hubDrawChips(); hubDrawPanel(); hubDrawList(); hubDrawIns(); hubDrawLeadBar();
   hubLoadIns(); hubLoadMeetBadge(); hubSyncFavs();
   if (h.view === "meet") { hubLoadMeet(); return; }
   await hubLoad(false);

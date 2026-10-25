@@ -2510,6 +2510,35 @@ async def check_contract_deadlines(context: ContextTypes.DEFAULT_TYPE):
             contracts_jobs.mark_sent({"issue_id": issue_id, "flag": flag})
 
 
+async def check_district_shuffle(context: ContextTypes.DEFAULT_TYPE):
+    """ორშაბათს (08:30-ის მერე) რაიონების ავტომატური გადანაწილება ყველა აგენტზე — ერთხელ კვირაში; ხელით მინიჭებულს არ ვეხებით.
+    ბოტი რომ ორშაბათს გვიან ჩაირთოს, შემდეგ შემოწმებაზე მაინც გააკეთებს (idempotent: auto ჩანაწერი უკვე არსებობს -> არაფერი)."""
+    try:
+        import crm_time
+        import district_shuffle
+        now = crm_time.local_now()
+        if now.weekday() != 0 or (now.hour, now.minute) < (8, 30):
+            return
+        if not district_shuffle.settings(sheets)["enabled"]:
+            return
+        ws = crm_time.week_start()
+        if district_shuffle.auto_done(sheets, ws):
+            return
+
+        def notify(chat_id, text):
+            context.application.create_task(context.bot.send_message(chat_id=chat_id, text=text))
+
+        res = district_shuffle.run(sheets, ws, notify=notify)
+        log.info("რაიონების ავტომატური განაწილება: %s აგენტი, ხელით დატოვებული %s", res["assigned"], res["skipped_manual"])
+        for admin_id in config.ADMIN_CHAT_IDS:
+            try:
+                await context.bot.send_message(chat_id=admin_id, text=f"🔀 რაიონები ავტომატურად გადანაწილდა ({res['assigned']} აგენტი)" + (f"; ხელით მინიჭებული დარჩა: {res['skipped_manual']}" if res["skipped_manual"] else ""))
+            except Exception:
+                log.warning("ადმინს რაიონების შეტყობინება ვერ გაეგზავნა", exc_info=True)
+    except Exception:
+        log.exception("რაიონების ავტომატური განაწილება ვერ გაეშვა")
+
+
 async def check_hub_meetings(context: ContextTypes.DEFAULT_TYPE):
     """Property Hub: შეხვედრამდე ~90 წუთით ადრე შეხსენება; შეხვედრიდან 3+ საათის მერე — შედეგის ჩაწერის შეხსენება (hubmeet_jobs)."""
     try:
@@ -3178,6 +3207,7 @@ def main():
         app.job_queue.run_repeating(check_worker_heartbeat, interval=300, first=240)
         app.job_queue.run_repeating(check_contract_deadlines, interval=900, first=260)
         app.job_queue.run_repeating(check_hub_meetings, interval=600, first=280)
+        app.job_queue.run_repeating(check_district_shuffle, interval=1800, first=320)
         app.job_queue.run_daily(
             send_finance_reminders,
             time=datetime.time(hour=config.FINANCE_REMINDER_HOUR, minute=0, tzinfo=ZoneInfo(config.TIMEZONE)),

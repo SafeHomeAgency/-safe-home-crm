@@ -23,7 +23,7 @@ log = logging.getLogger("safehome-hubmeet-api")
 
 
 def register(app, *, authed, audit, rate_limited, get_agents, team_lead_for, notify, admin_chat_ids,
-             find_listing, create_base_meeting, crm_hook=None, contract_counts=None) -> None:
+             find_listing, create_base_meeting, crm_hook=None, contract_counts=None, get_tasks=None, find_listing_ref=None) -> None:
     """authed() -> (agent, admin, err); notify(chat_id, text); find_listing(listing_id) -> `Listings` სტრიქონი (შიდა ველებით);
     create_base_meeting(fields) -> meeting_id (ძველ `Meetings` ცხრილში); crm_hook(hub_row, meeting_id) — CRM კლიენტის გამდიდრება (არასავალდებულო)."""
 
@@ -119,6 +119,14 @@ def register(app, *, authed, audit, rate_limited, get_agents, team_lead_for, not
         data = request.get_json(silent=True) or {}
         listing = find_listing(data.get("listing_id"))
         viewer = viewer_of(agent, admin)
+        # კლიენტის დავალებასთან (task) ბმა: მხოლოდ არსებული დავალება, რომელიც ამ აგენტზეა (ან მენეჯერი ქმნის); სხვა შემთხვევაში იგნორირდება
+        tid = m.s(data.get("task_id"), 24)
+        if tid and get_tasks:
+            t = next((x for x in get_tasks() if str(x.get("task_id")) == tid), None)
+            mgr = bool(admin) or str(agent.get("role") or "") == "team_lead"
+            if not t or not (mgr or str(t.get("assigned_to")) == str(agent.get("agent_id"))):
+                tid = ""
+        data = dict(data, task_id=tid if get_tasks else "")
         h = store.create(listing, agent, viewer, data)
         if h["status"] == m.PLANNED:
             _plan_base(h, agent, owner_phone_ok=True)
@@ -155,6 +163,64 @@ def register(app, *, authed, audit, rate_limited, get_agents, team_lead_for, not
         meta = {"pending_for_me": sum(1 for h in vis if m.s(h.get("status")) == m.PENDING and store.sides(h, viewer)[0]),
                 "my_pending": sum(1 for h in vis if m.s(h.get("status")) == m.PENDING and store.sides(h, viewer)[1])}
         return jsonify(items=items, total=len(items), meta=meta, status_labels=m.STATUS_LABELS, outcomes=m.OUTCOMES)
+
+    # ------------------------------------------------------------------ კლიენტები (დავალებები): ერთიანი ინბოქსი — ბინასთან ერთად
+    def _lead_listing(ref: str):
+        """დავალებაში მითითებული ბინა (MyHome/ss.ge ID ან შიდა ID) -> კატალოგის ბინა (საჯარო ველები)."""
+        if not ref or not find_listing_ref:
+            return None
+        L = find_listing_ref(ref)
+        if not L:
+            return None
+        photos = [p for p in str(L.get("photos") or "").split("|") if p.startswith("http")]
+        return {"listing_id": L.get("listing_id"), "address": L.get("address"), "district": L.get("district"), "price_usd": L.get("price_usd"),
+                "deal_type": L.get("deal_type"), "rooms": L.get("rooms"), "area": L.get("area"), "photo": photos[0] if photos else "",
+                "agent_name": L.get("agent_name"), "myhome_id": L.get("myhome_id"), "ssge_id": L.get("ssge_id")}
+
+    @app.get("/api/hub/leads")
+    @rate_limited("hub_read")
+    @_guard
+    def hub_leads(agent, admin):
+        """კლიენტები/დავალებები ბინებთან ერთად: აგენტი — თავისი; თიმლიდერი — გუნდის; ადმინი — ყველა. ვინ რომელ ბინაზე შემოვიდა და რა შეხვედრაა დაგეგმილი."""
+        viewer = viewer_of(agent, admin)
+        view = (request.args.get("view") or "open").strip()
+        agents_all = get_agents()
+        mgr = bool(admin) or viewer["role"] == "team_lead"
+        if admin:
+            scope_ids = None
+        elif viewer["role"] == "team_lead" and viewer["team"]:
+            scope_ids = {str(a.get("agent_id")) for a in agents_all if str(a.get("team", "")).strip() == viewer["team"]}
+        else:
+            scope_ids = {viewer["agent_id"]} if viewer["agent_id"] else set()
+        rows = [t for t in (get_tasks() if get_tasks else []) if scope_ids is None or str(t.get("assigned_to")) in scope_ids]
+        done = lambda t: str(t.get("status")) == "Done"  # noqa: E731
+        rows = [t for t in rows if (done(t) if view == "done" else not done(t))]
+        rows.sort(key=lambda t: str(t.get("created_at", "")), reverse=True)
+        by_task: dict[str, list] = {}
+        for h in store.all_rows():
+            if m.s(h.get("task_id")):
+                by_task.setdefault(m.s(h.get("task_id")), []).append(h)
+        items = []
+        for t in rows[:120]:
+            tid = str(t.get("task_id"))
+            mts = sorted(by_task.get(tid, []), key=lambda h: (m.s(h.get("meeting_date")), m.s(h.get("meeting_time"))))
+            items.append({
+                "task_id": tid, "title": t.get("title", ""), "notes": t.get("description", ""), "assigned_to": str(t.get("assigned_to")),
+                "assigned_to_name": t.get("assigned_to_name", ""), "status": t.get("status", ""), "priority": t.get("priority", ""),
+                "created_at": t.get("created_at", ""), "lead_type": t.get("lead_type", ""), "client_phone": t.get("client_phone", ""),
+                "deal_type": t.get("deal_type", ""), "viewing_time": t.get("viewing_time", ""), "listing_ref": t.get("listing_id", ""),
+                "seen": str(t.get("seen", "")).strip().lower() in ("1", "yes", "true", "y") or bool(str(t.get("seen_at", "")).strip()),
+                "is_mine": str(t.get("assigned_to")) == viewer["agent_id"],
+                "listing": _lead_listing(str(t.get("listing_id") or "")) if t.get("lead_type") == "listing" or t.get("listing_id") else None,
+                "meetings": [{"hub_id": h["hub_id"], "status": h.get("status"), "meeting_date": h.get("meeting_date"), "meeting_time": h.get("meeting_time"),
+                              "status_label": m.STATUS_LABELS.get(m.s(h.get("status")), "")} for h in mts][:5],
+            })
+        agents_out = []
+        if mgr:
+            elig = [a for a in agents_all if str(a.get("active", "yes")).strip().lower() != "no" and (admin or str(a.get("team", "")).strip() == viewer["team"])]
+            agents_out = sorted(({"agent_id": str(a.get("agent_id")), "name": a.get("name", ""), "team": a.get("team", "")} for a in elig), key=lambda r: r["name"] or "")
+        unseen = sum(1 for i in items if i["is_mine"] and not i["seen"])
+        return jsonify(items=items, total=len(items), unseen_mine=unseen, can_manage=mgr, agents=agents_out)
 
     @app.get("/api/hub/stats")
     @rate_limited("hub_read")

@@ -253,7 +253,21 @@ def _match(row: dict, f: dict, viewer: dict, skip: str = "") -> bool:
         return False
     if f.get("pets") and _lc(row.get("pets")) != _lc(f["pets"]):
         return False
+    if f.get("district_any") is not None and not _district_hit(row, f["district_any"]):
+        return False
     return True
+
+
+def _district_hit(row: dict, names: list) -> bool:
+    """„ჩემი რაიონები“: განცხადების რაიონი/მისამართი ემთხვევა კვირის რაიონებიდან რომელიმეს (ძირის მიხედვით — ბრუნვა/მართლწერა არ ხელყოფს)."""
+    hay = f"{_lc(row.get('district'))} {_lc(row.get('address'))}"
+    dist = _lc(row.get("district"))
+    for n in names or []:
+        nm = _lc(n)
+        stem = nm[: max(4, len(nm) - 2)]
+        if nm and (stem in hay or (dist and len(dist) >= 4 and dist[: max(4, len(dist) - 2)] in nm)):
+            return True
+    return False
 
 
 def _sort(rows: list[dict], key: str, now: datetime.datetime) -> list[dict]:
@@ -403,3 +417,18 @@ def get_one(listing_id: str, viewer: dict, now: datetime.datetime | None = None)
     if not r or _lc(r.get("archived")) in ("yes", "true", "1"):
         return None
     return m.project(r, now, is_privileged(r, viewer))
+
+
+def find_by_ref(ref: str) -> dict | None:
+    """ბინა გარე ბმულით/ID-ით: შიდა listing_id, ჩვენი MyHome/ss.ge ID ან წყაროს (მესაკუთრის) ID — დავალებაში მენეჯერი ხშირად ამას წერს.
+    სწრაფი ძებნა ახლადწაკითხული არ არის (cache); აბრუნებს სრულ სტრიქონს — გამომძახებელი თავად ირჩევს რომელი ველები გაიცეს."""
+    r = _s(ref, 60)
+    d = _digits(r)
+    if not r:
+        return None
+    for x in all_rows():
+        if _lc(x.get("archived")) in ("yes", "true", "1"):
+            continue
+        if _s(x.get("listing_id")) == r or (d and (_s(x.get("myhome_id")) == d or _s(x.get("ssge_id")) == d or _s(x.get("src_id")) == d)):
+            return x
+    return None

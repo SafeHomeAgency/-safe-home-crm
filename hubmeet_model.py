@@ -22,7 +22,7 @@ HM_HEADERS = [
     "listing_title", "address", "district", "city", "deal_type", "price_usd", "photo", "myhome_id", "ssge_id",
     "client_name", "client_phone", "meeting_date", "meeting_time", "rental_months", "move_in_date", "budget_usd",
     "tenants", "coop_terms", "owner_availability", "notes",
-    "outcome", "reject_reason", "history", "created_at", "updated_at", "reminded", "nudged",
+    "outcome", "reject_reason", "history", "created_at", "updated_at", "reminded", "nudged", "task_id",
 ]
 ALL_TABS = [(HUB_MEETINGS_SHEET, HM_HEADERS, 2000)]
 
