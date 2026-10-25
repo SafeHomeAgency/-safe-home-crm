@@ -122,6 +122,10 @@ RATE_LIMITS = {
     "contracts_write": (40, 60),   # ხელშეკრულებების მოდული: მოთხოვნა/გაცემა/დაბრუნება
     "finance_read": (120, 60),     # ფინანსური ტრეკერი: დაშბორდი/სიები (წაკითხვა)
     "finance_write": (60, 60),     # ფინანსური ტრეკერი: გარიგება/ხარჯი (ჩაწერა)
+    "listings_read": (240, 60),    # Property Hub: კატალოგი/ძიება/დეტალი (წაკითხვა; ფილტრების შეცვლა ხშირია)
+    "listings_write": (30, 60),    # Property Hub: backfill/ადმინის ფლაგები
+    "hub_read": (240, 60),         # Property Hub: შეხვედრების სია/სტატისტიკა
+    "hub_write": (40, 60),         # Property Hub: შეხვედრის შექმნა/დადასტურება/სტატუსი
 }
 RATE_LIMIT_ENABLED = os.environ.get("RATE_LIMIT_ENABLED", "1").strip().lower() not in ("0", "false", "no")
 

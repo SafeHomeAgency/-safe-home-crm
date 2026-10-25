@@ -2510,6 +2510,22 @@ async def check_contract_deadlines(context: ContextTypes.DEFAULT_TYPE):
             contracts_jobs.mark_sent({"issue_id": issue_id, "flag": flag})
 
 
+async def check_hub_meetings(context: ContextTypes.DEFAULT_TYPE):
+    """Property Hub: შეხვედრამდე ~90 წუთით ადრე შეხსენება; შეხვედრიდან 3+ საათის მერე — შედეგის ჩაწერის შეხსენება (hubmeet_jobs)."""
+    try:
+        import hubmeet_jobs
+        items = hubmeet_jobs.pending_notifications(lambda: sheets.get_agents())
+    except Exception:
+        log.exception("Property Hub შეხვედრების შეხსენებები ვერ გაეშვა")
+        return
+    for it in items:
+        try:
+            await context.bot.send_message(chat_id=it["chat_id"], text=it["text"])
+            hubmeet_jobs.mark_sent(it)
+        except Exception:
+            log.warning("Property Hub შეხსენება ვერ გაიგზავნა (%s)", it.get("chat_id"), exc_info=True)
+
+
 async def send_contracts_daily_summary(context: ContextTypes.DEFAULT_TYPE):
     """ადმინებისა და პასუხისმგებელი თანამშრომლების ყოველდღიური შეჯამება ხელშეკრულებების მარაგსა და ვადებზე."""
     try:
@@ -3161,6 +3177,7 @@ def main():
         app.job_queue.run_repeating(check_myhome_login_alert, interval=300, first=190)
         app.job_queue.run_repeating(check_worker_heartbeat, interval=300, first=240)
         app.job_queue.run_repeating(check_contract_deadlines, interval=900, first=260)
+        app.job_queue.run_repeating(check_hub_meetings, interval=600, first=280)
         app.job_queue.run_daily(
             send_finance_reminders,
             time=datetime.time(hour=config.FINANCE_REMINDER_HOUR, minute=0, tzinfo=ZoneInfo(config.TIMEZONE)),

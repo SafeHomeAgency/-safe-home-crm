@@ -705,3 +705,173 @@ button.chip { cursor: pointer; font-family: inherit; }
 .fin-form .fin-h { font-weight: 800; color: var(--gold-light); margin-top: 10px; font-size: 13px; border-top: 1px solid var(--border); padding-top: 10px; }
 .fin-form .fin-h:first-child { border-top: none; padding-top: 0; margin-top: 0; }
 .fin-calc { background: rgba(10, 20, 32, .55); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 10px 12px; font-size: 12.5px; line-height: 1.6; }
+
+/* ================= Safe Home Property Hub (განცხადებების კატალოგი) ================= */
+.hub-head { padding: 14px; }
+.hub-title { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; margin-bottom: 10px; }
+.hub-title h2 { margin: 0; font-size: 17px; }
+.hub-search { display: flex; gap: 8px; margin-bottom: 10px; }
+.hub-search input { flex: 1; min-width: 0; padding: 11px 13px; border-radius: var(--radius-sm); border: 1px solid var(--hairline); background: rgba(147,166,188,.08); color: var(--text); font-size: 14px; }
+.hub-search .btn { flex: 0 0 auto; padding: 11px 12px; font-size: 13px; }
+.hub-row { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
+.hub-chip { border: 1px solid var(--hairline); background: rgba(147,166,188,.08); color: var(--text); border-radius: 99px; padding: 6px 12px; font-size: 12.5px; font-weight: 600; display: inline-flex; align-items: center; gap: 6px; }
+.hub-chip.on { background: linear-gradient(135deg, var(--gold-soft), var(--gold)); color: var(--btn-text); border-color: transparent; }
+.hub-chip b { font-weight: 800; opacity: .85; }
+.hub-chip i, .hub-fr i { width: 9px; height: 9px; border-radius: 50%; display: inline-block; background: currentColor; }
+.fr-green { color: #34d399; } .fr-orange { color: #f59e42; } .fr-red { color: #f26d6d; } .fr-grey { color: #8c9bb0; }
+.hub-chip.fr-green.on, .hub-chip.fr-orange.on, .hub-chip.fr-red.on, .hub-chip.fr-grey.on { background: rgba(255,255,255,.12); border-color: currentColor; color: inherit; }
+.hub-panel { border-top: 1px solid var(--hairline); margin-top: 6px; padding-top: 10px; }
+.hub-grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 8px; }
+.hub-grid2 label { font-size: 11.5px; color: var(--hint); display: flex; flex-direction: column; gap: 4px; }
+.hub-grid2 select, .hub-grid2 input { padding: 9px 10px; border-radius: 10px; border: 1px solid var(--hairline); background: rgba(147,166,188,.08); color: var(--text); font-size: 13.5px; }
+.hub-k { font-size: 11.5px; color: var(--hint); margin: 6px 0 4px; }
+.hub-grid { display: grid; grid-template-columns: 1fr; gap: 12px; }
+@media (min-width: 560px) { .hub-grid { grid-template-columns: 1fr 1fr; } }
+.hub-card { background: linear-gradient(180deg, var(--navy-3), var(--navy-4)); border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; box-shadow: var(--shadow-soft); cursor: pointer; }
+.hub-card:active { transform: scale(.992); }
+.hub-ph { position: relative; aspect-ratio: 4 / 3; background: #0b1a2a; }
+.hub-ph img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.hub-noph { width: 100%; height: 100%; display: flex; align-items: center; justify-content: center; font-size: 42px; background: linear-gradient(135deg, #12304b, #0b1a2a); color: var(--hint); border-radius: 12px; }
+.hub-fr { position: absolute; left: 8px; top: 8px; background: rgba(8,16,26,.82); backdrop-filter: blur(4px); border-radius: 99px; padding: 4px 10px; font-size: 11.5px; font-weight: 700; display: inline-flex; align-items: center; gap: 6px; }
+.hub-detail-fr .hub-fr { position: static; margin-right: 8px; }
+.hub-cnt { position: absolute; right: 8px; bottom: 8px; background: rgba(8,16,26,.82); border-radius: 99px; padding: 3px 9px; font-size: 11.5px; color: var(--text); }
+.hub-body { padding: 12px 14px 14px; }
+.hub-price { font-size: 22px; font-weight: 800; color: var(--gold-light); letter-spacing: .2px; }
+.hub-price small { font-size: 12.5px; font-weight: 600; color: var(--hint); margin-left: 8px; }
+.hub-facts { display: flex; gap: 16px; margin: 8px 0 6px; }
+.hub-facts div { font-size: 11.5px; color: var(--hint); display: flex; flex-direction: column; }
+.hub-facts b { font-size: 15px; color: var(--text); font-weight: 700; }
+.hub-facts.big { gap: 22px; margin: 10px 0 8px; }
+.hub-facts .muted, .muted { color: var(--hint); font-size: 12px; }
+.hub-loc { font-size: 13px; color: var(--text); opacity: .92; margin: 4px 0 8px; }
+.hub-foot { display: flex; justify-content: space-between; align-items: center; font-size: 12px; color: var(--hint); border-top: 1px solid var(--hairline); padding-top: 8px; }
+.hub-deal { background: rgba(201,162,39,.14); color: var(--gold-light); border-radius: 99px; padding: 2px 9px; font-weight: 700; }
+.hub-more { text-align: center; margin: 14px 0 6px; }
+.hub-gal { display: flex; gap: 6px; overflow-x: auto; scroll-snap-type: x mandatory; margin: 0 -4px 12px; padding: 0 4px; }
+.hub-gal img { flex: 0 0 88%; height: 210px; object-fit: cover; border-radius: 14px; scroll-snap-align: center; background: #0b1a2a; }
+.hub-detail-fr { display: flex; align-items: center; flex-wrap: wrap; gap: 4px; margin: 4px 0 10px; }
+.hub-kvs { border-top: 1px solid var(--hairline); margin-top: 6px; }
+.hub-kv { display: flex; justify-content: space-between; gap: 12px; padding: 8px 0; border-bottom: 1px solid var(--hairline); font-size: 13px; }
+.hub-kv span { color: var(--hint); } .hub-kv b { text-align: right; font-weight: 600; }
+.hub-priv { margin-top: 12px; padding: 10px 12px; border-radius: 14px; border: 1px dashed rgba(201,162,39,.4); background: rgba(201,162,39,.06); }
+.hub-priv .k { font-size: 11.5px; color: var(--gold-light); margin-bottom: 4px; }
+
+/* ---- Property Hub: v2 (რუკა, ჭკვიანი ძიება, მიმოხილვა, ფავორიტები, ანიმაციები) ---- */
+.hub-seg { display: flex; gap: 4px; padding: 4px; background: rgba(147,166,188,.1); border-radius: 14px; margin-bottom: 10px; }
+.hub-seg button { flex: 1; border: none; background: transparent; color: var(--hint); font-weight: 700; font-size: 13.5px; padding: 9px; border-radius: 11px; transition: all .18s ease; }
+.hub-seg button.on { background: linear-gradient(135deg, var(--gold-soft), var(--gold)); color: var(--btn-text); box-shadow: var(--glow-gold); }
+.hub-smart { align-items: center; }
+.hub-card { animation: hubIn .38s cubic-bezier(.2,.7,.3,1) both; transition: transform .15s ease, box-shadow .15s ease; }
+@keyframes hubIn { from { opacity: 0; transform: translateY(12px) scale(.985); } to { opacity: 1; transform: none; } }
+.hub-card:hover { box-shadow: var(--shadow); }
+.hub-fav { position: absolute; right: 8px; top: 8px; width: 34px; height: 34px; border-radius: 50%; border: none; background: rgba(8,16,26,.78); backdrop-filter: blur(4px); color: #fff; font-size: 18px; line-height: 1; transition: transform .15s ease; }
+.hub-fav.on { color: #ff5c7a; transform: scale(1.08); }
+.hub-fav.big { position: static; width: 40px; height: 40px; background: rgba(147,166,188,.14); font-size: 21px; }
+.hub-pricerow { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.hub-skel .hub-ph { background: linear-gradient(100deg, #0e2236 30%, #17324c 50%, #0e2236 70%); background-size: 200% 100%; animation: hubShim 1.2s linear infinite; }
+.sk { height: 14px; border-radius: 8px; margin: 10px 0; background: linear-gradient(100deg, #0e2236 30%, #17324c 50%, #0e2236 70%); background-size: 200% 100%; animation: hubShim 1.2s linear infinite; }
+.sk.w60 { width: 60%; } .sk.w90 { width: 90%; } .sk.w40 { width: 40%; }
+@keyframes hubShim { from { background-position: 100% 0; } to { background-position: -100% 0; } }
+.hub-ins { padding: 12px 14px; }
+.hub-ins:empty { display: none; }
+.hub-ins-top { display: flex; gap: 8px; margin-bottom: 8px; cursor: pointer; }
+.hub-stat { flex: 1; background: rgba(147,166,188,.08); border-radius: 14px; padding: 8px 6px; text-align: center; }
+.hub-stat b { display: block; font-size: 20px; color: var(--gold-light); font-weight: 800; }
+.hub-stat span { font-size: 10.5px; color: var(--hint); }
+.hub-stat.warn b { color: #f59e42; }
+.hub-stack { display: flex; height: 8px; border-radius: 99px; overflow: hidden; background: rgba(147,166,188,.12); }
+.hub-stack span { display: block; height: 100%; }
+.fr-bg-green { background: #34d399; } .fr-bg-orange { background: #f59e42; } .fr-bg-red { background: #f26d6d; } .fr-bg-grey { background: #8c9bb0; }
+.hub-lead { margin-top: 10px; max-height: 280px; overflow-y: auto; }
+.hub-lead-row { display: grid; grid-template-columns: 1fr auto; gap: 4px 10px; padding: 8px 2px; border-bottom: 1px solid var(--hairline); cursor: pointer; }
+.hub-lead-row .n { font-size: 13px; font-weight: 600; } .hub-lead-row .n small { color: var(--hint); font-weight: 500; margin-left: 6px; }
+.hub-lead-row .v { text-align: right; font-size: 12px; color: var(--hint); } .hub-lead-row .v b { color: var(--text); font-size: 15px; margin-right: 6px; }
+.hub-lead-row .hub-stack { grid-column: 1 / -1; height: 5px; }
+.hub-link { background: none; border: none; color: var(--gold-light); font-size: 12px; font-weight: 600; }
+.hub-mapbox { position: relative; height: calc(100vh - 330px); min-height: 380px; border-radius: var(--radius); overflow: hidden; border: 1px solid var(--border); box-shadow: var(--shadow); margin-bottom: 8px; background: #0b1a2a; }
+.hub-mapbox[hidden] { display: none; }
+#hubMapCanvas { position: absolute; inset: 0; }
+.hub-map-top { position: absolute; left: 10px; top: 10px; z-index: 500; }
+.hub-map-top .hub-chip { background: rgba(8,16,26,.86); backdrop-filter: blur(4px); }
+.hub-map-legend { position: absolute; left: 10px; bottom: 10px; z-index: 500; display: flex; gap: 10px; font-size: 11px; font-weight: 700; background: rgba(8,16,26,.82); padding: 5px 10px; border-radius: 99px; }
+.hub-map-legend span { display: inline-flex; align-items: center; gap: 5px; }
+.hub-map-legend i { width: 8px; height: 8px; border-radius: 50%; background: currentColor; display: inline-block; }
+.hub-mapinfo { font-size: 12px; color: var(--hint); text-align: center; margin: 2px 0 10px; }
+.hub-mapinfo:empty { display: none; }
+.hub-pin { background: none; border: none; }
+.hub-pill { transform: translate(-50%, -50%); white-space: nowrap; font-size: 12px; font-weight: 800; padding: 5px 10px; border-radius: 99px; background: #c9304a; color: #fff; border: 2px solid #fff; box-shadow: 0 3px 10px rgba(0,0,0,.45); display: inline-flex; gap: 6px; align-items: center; }
+.hub-pill b { background: rgba(255,255,255,.28); border-radius: 99px; padding: 0 6px; }
+.hub-pill.fr-b-green { background: #12805a; } .hub-pill.fr-b-orange { background: #c06a12; } .hub-pill.fr-b-red { background: #b3303d; } .hub-pill.fr-b-grey { background: #5b6b80; }
+.hub-pill.mine { border-color: var(--gold-light); box-shadow: 0 0 0 2px rgba(233,196,106,.45), 0 3px 10px rgba(0,0,0,.45); }
+.hub-galwrap { position: relative; }
+.hub-gal-c { position: absolute; right: 12px; bottom: 22px; background: rgba(8,16,26,.82); border-radius: 99px; padding: 3px 10px; font-size: 12px; font-weight: 700; }
+.hub-gal img { cursor: zoom-in; }
+.hub-lb { position: fixed; inset: 0; z-index: 9999; background: rgba(0,0,0,.94); display: flex; align-items: center; justify-content: center; }
+.hub-lb-img { width: 100%; height: 100%; display: flex; align-items: center; justify-content: center; }
+.hub-lb img { max-width: 100%; max-height: 92vh; object-fit: contain; }
+.hub-lb-x { position: absolute; right: 14px; top: 14px; z-index: 2; width: 40px; height: 40px; border-radius: 50%; border: none; background: rgba(255,255,255,.16); color: #fff; font-size: 18px; }
+.hub-lb-n { position: absolute; top: 50%; transform: translateY(-50%); width: 42px; height: 56px; border: none; background: rgba(255,255,255,.12); color: #fff; font-size: 28px; border-radius: 12px; }
+.hub-lb-n.l { left: 8px; } .hub-lb-n.r { right: 8px; }
+.hub-lb-c { position: absolute; bottom: 18px; left: 0; right: 0; text-align: center; color: #fff; font-weight: 700; }
+.hub-pill.fr-b-green, .leaflet-container { font-family: var(--font-ui); }
+.leaflet-container { background: #0b1a2a; }
+
+/* Hub v2.1: კომპაქტური ჩიპები (ჰორიზონტალური სქროლი), უფრო დაბალი ფოტო */
+.hub-title h2 { font-size: 18px; white-space: nowrap; }
+.hub-title .sub { font-size: 12px; text-align: right; }
+#hubChips .hub-row { flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; margin-left: -2px; padding: 2px; }
+#hubChips .hub-row::-webkit-scrollbar { display: none; }
+.hub-chip { white-space: nowrap; flex: 0 0 auto; }
+.hub-ph { aspect-ratio: 16 / 11; }
+.hub-mapbox .leaflet-container { background: #0b1a2a; }
+.hub-map-top { left: auto; right: 10px; }
+.hub-map-top .hub-row { flex-wrap: nowrap; }
+.hub-mapbox .leaflet-tile-pane { filter: invert(1) hue-rotate(190deg) brightness(.8) contrast(.95) saturate(.5); }
+.modal .hub-row .btn, .hub-priv .hub-row .btn { flex: 1 1 30%; white-space: nowrap; padding: 11px 8px; font-size: 13px; }
+
+/* ---- Property Hub: შეხვედრები (ბინიდან დაგეგმვა, სია, ტოპები) ---- */
+.hub-seg button { position: relative; white-space: nowrap; font-size: 13px; padding: 9px 4px; }
+.hub-badge { display: inline-block; min-width: 18px; margin-left: 5px; padding: 0 5px; border-radius: 99px; background: #f26d6d; color: #fff; font-size: 11px; line-height: 18px; }
+.hub-badge[hidden] { display: none; }
+.hub-hot { position: absolute; left: 8px; bottom: 8px; background: linear-gradient(135deg, #ff8a3d, #f2542d); color: #fff; border-radius: 99px; padding: 3px 9px; font-size: 12px; font-weight: 800; box-shadow: 0 3px 10px rgba(242,84,45,.4); }
+.hub-form { display: flex; flex-direction: column; gap: 8px; }
+.hub-form input, .hub-form textarea, .hub-form select { width: 100%; padding: 10px 11px; border-radius: 10px; border: 1px solid var(--hairline); background: rgba(147,166,188,.08); color: var(--text); font-size: 14px; box-sizing: border-box; }
+.hub-lbl { display: flex; flex-direction: column; gap: 4px; font-size: 11.5px; color: var(--hint); }
+.hub-mini { display: flex; gap: 10px; align-items: center; background: rgba(147,166,188,.08); border-radius: 14px; padding: 8px; }
+.hub-mini img, .hub-mini .hub-noph { width: 64px; height: 64px; border-radius: 10px; object-fit: cover; flex: 0 0 64px; font-size: 24px; }
+.hub-mini b { color: var(--gold-light); font-size: 17px; }
+.hub-note { font-size: 12.5px; background: rgba(201,162,39,.1); border: 1px dashed rgba(201,162,39,.4); border-radius: 12px; padding: 8px 10px; color: var(--gold-soft); }
+.hub-err { margin-top: 8px; color: var(--red); font-size: 13px; }
+.hub-meetbox { margin-top: 2px; }
+.hub-day { margin: 14px 2px 6px; font-size: 12.5px; font-weight: 800; color: var(--gold-light); letter-spacing: .3px; text-transform: uppercase; }
+.hub-mt { background: linear-gradient(180deg, var(--navy-3), var(--navy-4)); border: 1px solid var(--border); border-left: 4px solid var(--gold); border-radius: 16px; padding: 12px; margin-bottom: 10px; box-shadow: var(--shadow-soft); animation: hubIn .35s ease both; }
+.hub-mt.st-pending { border-left-color: #f59e42; } .hub-mt.st-done { border-left-color: #34d399; } .hub-mt.st-cancelled, .hub-mt.st-rejected { border-left-color: #6b7a90; opacity: .78; } .hub-mt.st-no_show { border-left-color: #f26d6d; }
+.hub-mt-top { display: flex; gap: 10px; }
+.hub-mt-th { flex: 0 0 62px; } .hub-mt-th img, .hub-mt-th .hub-noph { width: 62px; height: 62px; border-radius: 12px; object-fit: cover; font-size: 22px; }
+.hub-mt-main { min-width: 0; flex: 1; }
+.hub-mt-when { font-size: 14px; } .hub-mt-when b { color: var(--gold-light); }
+.hub-mt-addr { font-size: 13px; margin: 2px 0; }
+.hub-pillst { display: inline-block; margin-left: 6px; padding: 2px 9px; border-radius: 99px; font-size: 11px; font-weight: 800; background: rgba(147,166,188,.18); }
+.hub-pillst.st-pending { background: rgba(245,158,66,.2); color: #f59e42; } .hub-pillst.st-planned { background: rgba(74,168,216,.2); color: #7cc4ea; } .hub-pillst.st-done { background: rgba(52,211,153,.2); color: #34d399; }
+.hub-pillst.st-no_show { background: rgba(242,109,109,.2); color: #f26d6d; }
+.hub-mt-people { margin: 9px 0 4px; font-size: 13px; display: flex; flex-direction: column; gap: 3px; }
+.hub-mt-people a { color: var(--gold-light); font-weight: 700; text-decoration: none; }
+.hub-mt-tags { display: flex; flex-wrap: wrap; gap: 5px; margin: 6px 0; }
+.hub-tag { background: rgba(147,166,188,.12); border-radius: 99px; padding: 3px 9px; font-size: 11.5px; }
+.hub-tag.gold { background: rgba(201,162,39,.18); color: var(--gold-light); font-weight: 700; } .hub-tag.ok { background: rgba(52,211,153,.18); color: #34d399; font-weight: 700; }
+.hub-mt-notes { font-size: 12px; color: var(--hint); background: rgba(147,166,188,.06); border-radius: 10px; padding: 7px 9px; margin: 6px 0; line-height: 1.5; }
+.hub-mt-acts { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.hub-mt-acts .btn { flex: 1 1 auto; padding: 9px 10px; font-size: 12.5px; white-space: nowrap; }
+.hub-toprow { display: flex; gap: 10px; overflow-x: auto; padding-bottom: 6px; scrollbar-width: none; }
+.hub-toprow::-webkit-scrollbar { display: none; }
+.hub-topcard { flex: 0 0 132px; background: linear-gradient(180deg, var(--navy-3), var(--navy-4)); border: 1px solid var(--border); border-radius: 14px; overflow: hidden; display: flex; flex-direction: column; cursor: pointer; }
+.hub-topcard img, .hub-topcard .hub-noph { width: 100%; height: 80px; object-fit: cover; font-size: 26px; border-radius: 0; }
+.hub-topcard b { padding: 6px 9px 0; color: #ff8a3d; font-size: 14px; } .hub-topcard span { padding: 0 9px; font-size: 11.5px; line-height: 1.3; } .hub-topcard small { padding: 2px 9px 8px; color: var(--gold-light); font-weight: 700; }
+.hub-rank { display: flex; align-items: center; gap: 9px; padding: 7px 2px; border-bottom: 1px solid var(--hairline); font-size: 13px; }
+.hub-rank .n { width: 22px; height: 22px; border-radius: 50%; background: rgba(201,162,39,.18); color: var(--gold-light); font-size: 12px; font-weight: 800; display: flex; align-items: center; justify-content: center; }
+.hub-rank:nth-child(2) .n { background: linear-gradient(135deg, var(--gold-soft), var(--gold)); color: var(--btn-text); }
+.hub-rank .nm { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; } .hub-rank .nm small { color: var(--hint); margin-left: 6px; }
+.hub-rank .v b { color: var(--gold-light); font-size: 15px; } .hub-rank .v small { color: var(--hint); }
+.hub-meetbox .hub-ins-top { overflow-x: auto; scrollbar-width: none; }
+.hub-meetbox .hub-ins-top::-webkit-scrollbar { display: none; }
+.hub-meetbox .hub-stat { flex: 1 0 auto; min-width: 62px; }

@@ -2675,6 +2675,9 @@ def internal_myhome_jobs_complete(job_id):
          "failure_stage": row.get("failure_stage"), "next_retry_at": row.get("next_retry_at")},
         "ok" if status == "COMPLETED" else "failed",
     )
+    # Property Hub: ექსთენშენის სნეპშოტი კატალოგში (დამატებითი; შეცდომა შედეგის დაფიქსირებას არ აფერხებს)
+    if isinstance(body.get("listing"), dict) and status in ("COMPLETED", "FAILED"):
+        listings_api.on_job_finished(row, body.get("listing"))
     agent = next(
         (a for a in sheets.get_agents() if str(a.get("agent_id")) == str(row.get("agent_id"))),
         None,
@@ -2871,6 +2874,77 @@ import finance_api  # noqa: E402
 finance_api.register(
     app, authed=_authed_agent, audit=_audit, rate_limited=rate_limited, get_agents=lambda: sheets.get_agents(),
     chat_id_fn=_requester_chat_id,
+    send_document=lambda chat_id, filename, content, caption="": _send_telegram_document(chat_id, filename, content, caption),
+)
+
+
+# Safe Home Property Hub: განცხადებების კატალოგი (/api/listings...) — ახალი, არსებულ ლოგიკას არ ეხება
+import listings_api  # noqa: E402
+
+import hubmeet_api  # noqa: E402
+import hubmeet_store  # noqa: E402
+import listings_store  # noqa: E402
+
+listings_api.register(
+    app, authed=_authed_agent, audit=_audit, rate_limited=rate_limited,
+    get_jobs=lambda: sheets.get_myhome_jobs(status="COMPLETED"),
+    interest=lambda: hubmeet_store.interest_counts(30),
+)
+
+
+def _hub_find_listing(listing_id):
+    return next((r for r in listings_store.all_rows(fresh=True) if str(r.get("listing_id")) == str(listing_id or "")), None)
+
+
+def _hub_create_base_meeting(fields: dict) -> str:
+    """Property Hub-იდან დაგეგმილი შეხვედრა = ჩვეულებრივი ჩანაწერი `Meetings` ცხრილში (იგივე, რასაც ბოტის /meeting ქმნის) —
+    KPI, ისტორია, ხელშეკრულებები და CRM ამ ჩანაწერზე უცვლელად მუშაობს."""
+    meeting_id = sheets.create_meeting(fields)
+    try:
+        import crm2_sync
+        crm2_sync.meeting_created(meeting_id, fields)
+    except Exception:  # noqa: BLE001
+        log.exception("crm2 sync შეხვედრაზე ვერ მოხერხდა")
+    return meeting_id
+
+
+def _hub_crm_hook(h: dict, meeting_id: str) -> None:
+    """CRM კლიენტის გამდიდრება: სახელი/ბიუჯეტი/გარიგების ტიპი (არსებულ არაცარიელს ცარიელით არ ვშლით; მინიჭებას/სტატუსს არ ვეხებით)."""
+    import crm2_store
+    fields = {"name": h.get("client_name") or "", "source": "hub"}
+    if h.get("budget_usd"):
+        fields["budget"] = str(h.get("budget_usd"))
+    if h.get("deal_type"):
+        fields["deal_type"] = str(h.get("deal_type"))
+    crm2_store.upsert_client(h.get("client_phone"), fields, by="hub")
+
+
+def _hub_contract_counts() -> dict:
+    out: dict = {}
+    try:
+        import contracts_store
+        for r in contracts_store.list_requests():
+            k = str(r.get("meeting_id") or "")
+            if k:
+                out[k] = out.get(k, 0) + 1
+    except Exception:  # noqa: BLE001
+        log.exception("ხელშეკრულებების რაოდენობა ვერ ჩაიტვირთა")
+    return out
+
+
+hubmeet_api.register(
+    app, authed=_authed_agent, audit=_audit, rate_limited=rate_limited, get_agents=lambda: sheets.get_agents(),
+    team_lead_for=_team_lead_for_team, notify=lambda chat_id, text: _send_telegram_message(chat_id, text),
+    admin_chat_ids=lambda: list(config.ADMIN_CHAT_IDS), find_listing=_hub_find_listing,
+    create_base_meeting=_hub_create_base_meeting, crm_hook=_hub_crm_hook, contract_counts=_hub_contract_counts,
+)
+
+
+# Property Hub: ფავორიტები (სერვერზე), სიახლის ზღვრების პანელი, CSV ექსპორტი (ადმინი -> Telegram)
+import hubprefs  # noqa: E402
+
+hubprefs.register(
+    app, authed=_authed_agent, audit=_audit, rate_limited=rate_limited, chat_id_fn=_requester_chat_id,
     send_document=lambda chat_id, filename, content, caption="": _send_telegram_document(chat_id, filename, content, caption),
 )
 
