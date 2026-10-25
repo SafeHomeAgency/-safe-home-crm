@@ -875,3 +875,4 @@ button.chip { cursor: pointer; font-family: inherit; }
 .hub-meetbox .hub-ins-top { overflow-x: auto; scrollbar-width: none; }
 .hub-meetbox .hub-ins-top::-webkit-scrollbar { display: none; }
 .hub-meetbox .hub-stat { flex: 1 0 auto; min-width: 62px; }
+#hubFilterBtn.hub-on { background: linear-gradient(135deg, var(--gold-soft), var(--gold)); color: var(--btn-text); }

@@ -47,8 +47,13 @@ def parse_filters(args=None) -> dict:
         "freshness": [t.strip() for t in g("freshness").split(",") if t.strip()][:4],
         "sort": g("sort") if g("sort") in ("new", "price_asc", "price_desc", "area_desc") else "new",
         "page": it("page", 1), "per_page": it("per_page", 24),
-    "include_inactive": g("inactive") in ("1", "true", "yes"),
-    "ids": [x.strip() for x in g("ids").split(",") if x.strip()][:100],
+        "include_inactive": g("inactive") in ("1", "true", "yes"),
+        "ids": [x.strip() for x in g("ids").split(",") if x.strip()][:100],
+        # საძინებლები (სია: 1,2,3+), სართული / სართულიანობა (დიაპაზონი), "პირველის/ბოლოს გარდა", მესაკუთრის პირობა ცხოველებზე (yes|no|ask)
+        "bedrooms": [t.strip() for t in g("bedrooms").split(",") if t.strip()][:8],
+        "floor_min": fl("floor_min"), "floor_max": fl("floor_max"), "floors_min": fl("floors_min"), "floors_max": fl("floors_max"),
+        "not_first": g("not_first") in ("1", "true", "yes"), "not_last": g("not_last") in ("1", "true", "yes"),
+        "pets": g("pets") if g("pets") in ("yes", "no", "ask") else "",
     }
 
 

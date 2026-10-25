@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import datetime
 import os
+import re
 
 LISTINGS_SHEET = "Listings"
 
@@ -24,14 +25,24 @@ LISTING_HEADERS = [
     "lat", "lng", "photos",
     "owner_number", "notes",                                                  # შიდა — სხვა აგენტს არ ეგზავნება
     "created_at", "last_verified_at", "last_updated_at", "active", "archived",
+    "pets",                                                                   # yes | no | ask (მესაკუთრის პირობა; MyHome ტაბის "ცხოველები: კი/არა/შეთანხმებით" შენიშვნიდან)
 ]
 ALL_TABS = [(LISTINGS_SHEET, LISTING_HEADERS, 2000)]
+
+_PETS_RE = re.compile(r"ცხოველები:\s*(არა|კი|შეთანხმებით)")
+_PETS_MAP = {"კი": "yes", "არა": "no", "შეთანხმებით": "ask"}
+
+
+def pets_from_notes(notes) -> str:
+    """მესაკუთრის პირობა ცხოველებზე job-ის შენიშვნიდან ('ცხოველები: კი/არა/შეთანხმებით'); მითითებული არ არის — ცარიელი (არ ვივარაუდებთ)."""
+    hits = _PETS_RE.findall(str(notes or ""))
+    return _PETS_MAP.get(hits[-1], "") if hits else ""
 
 # ეს ველები სხვა აგენტს ეგზავნება; დანარჩენი (owner_number, notes, job_id, src_id, src_site...) — მხოლოდ მფლობელს/გუნდის ლიდერს/ადმინს
 PUBLIC_FIELDS = [
     "listing_id", "agent_id", "agent_name", "team", "myhome_id", "ssge_id", "deal_type", "property_type", "title", "city", "district",
     "address", "price_usd", "area", "rooms", "bedrooms", "floor", "floors", "condition", "status_text", "lat", "lng",
-    "created_at", "last_verified_at", "last_updated_at", "active",
+    "created_at", "last_verified_at", "last_updated_at", "active", "pets",
 ]
 PRIVATE_FIELDS = ["owner_number", "notes", "job_id", "src_site", "src_id", "source"]
 

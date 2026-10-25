@@ -1,0 +1,1 @@
+﻿ამ საქაღალდის 5 ფაილი ატვირთე GitHub-ზე (ჩაანაცვლებს ძველებს) და Railway-ზე Redeploy გააკეთე: app.js, style.css, listings_model.py, listings_store.py, listings_api.py. (ახალი ფილტრები: საძინებლები/ფართი/სართული/სართულიანობა/ცხოველები)

@@ -107,6 +107,7 @@ def upsert_from_job(job: dict, snap: dict | None) -> dict | None:
             "job_id": job_id, "agent_id": _s(job.get("agent_id"), 40), "agent_name": _s(job.get("agent_name"), 80), "team": _s(job.get("team"), 40),
             "source": "upload", "src_site": _s(job.get("listing_source") or "myhome", 10), "src_id": _s(job.get("myhome_listing_id"), 20),
             "owner_number": _s(job.get("owner_number"), 30), "notes": _s(job.get("notes"), 500), "active": "yes", "archived": "",
+            "pets": m.pets_from_notes(job.get("notes")),
         }
         rec = dict(base, **s)
         rec["deal_type"] = rec["deal_type"] or _s(job.get("deal_type"), 40)
@@ -153,7 +154,7 @@ def backfill_from_jobs(jobs: list[dict]) -> dict:
                 "src_site": _s(j.get("listing_source") or "myhome", 10), "src_id": _s(j.get("myhome_listing_id"), 20),
                 "deal_type": _s(j.get("deal_type"), 40), "city": _s(j.get("city"), 60), "district": _s(j.get("district"), 80),
                 "address": _s(j.get("address"), 160), "price_usd": _s(j.get("final_price"), 20),
-                "owner_number": _s(j.get("owner_number"), 30), "notes": _s(j.get("notes"), 500),
+                "owner_number": _s(j.get("owner_number"), 30), "notes": _s(j.get("notes"), 500), "pets": m.pets_from_notes(j.get("notes")),
                 "created_at": done, "last_verified_at": "", "last_updated_at": now_str(), "active": "yes", "archived": "",
             }
             _backend.append(m.LISTINGS_SHEET, m.LISTING_HEADERS, rec)
@@ -222,22 +223,36 @@ def _match(row: dict, f: dict, viewer: dict, skip: str = "") -> bool:
         return False
     if f.get("area_max") is not None and (area is None or area > f["area_max"]):
         return False
-    rooms = f.get("rooms") or []
-    if rooms:
-        rn = _rooms_num(row.get("rooms"))
-        ok = False
-        for tok in rooms:
-            if tok.endswith("+"):
-                t = _rooms_num(tok)
-                ok = ok or (rn is not None and t is not None and rn >= t)
-            else:
-                ok = ok or (rn is not None and rn == _rooms_num(tok))
-        if not ok:
-            return False
+    def tokens_ok(value, toks) -> bool:                # "2,3,5+" ტიპის არჩევანი (ოთახები/საძინებლები)
+        n = _rooms_num(value)
+        for tok in toks:
+            t = _rooms_num(tok)
+            if n is not None and t is not None and ((n >= t) if str(tok).endswith("+") else (n == t)):
+                return True
+        return False
+
+    if (f.get("rooms") or []) and not tokens_ok(row.get("rooms"), f["rooms"]):
+        return False
+    if (f.get("bedrooms") or []) and not tokens_ok(row.get("bedrooms"), f["bedrooms"]):
+        return False
     if f.get("bedrooms_min") is not None:
         bn = _rooms_num(row.get("bedrooms"))
         if bn is None or bn < f["bedrooms_min"]:
             return False
+    # სართული (რომელ სართულზეა) და სართულიანობა (შენობის სართულები)
+    fl, fls = _rooms_num(row.get("floor")), _rooms_num(row.get("floors"))
+    for key, val, lo in (("floor", fl, True), ("floors", fls, True)):
+        mn, mx = f.get(key + "_min"), f.get(key + "_max")
+        if mn is not None and (val is None or val < mn):
+            return False
+        if mx is not None and (val is None or val > mx):
+            return False
+    if f.get("not_first") and (fl is None or fl <= 1):
+        return False
+    if f.get("not_last") and (fl is None or fls is None or fl >= fls):
+        return False
+    if f.get("pets") and _lc(row.get("pets")) != _lc(f["pets"]):
+        return False
     return True
 
 
