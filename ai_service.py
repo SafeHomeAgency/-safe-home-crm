@@ -240,10 +240,11 @@ def ask(viewer: dict, text: str, conv_id: str = "") -> dict:
         comp = provider.run(SYSTEM_PROMPT, messages, tools.tools_for(viewer, mode == "ranked"), ctx.call,
                             config.AI_MAX_OUTPUT_TOKENS, config.AI_TIMEOUT_SECONDS)
     except prov.ProviderError as e:
-        log.warning("AI provider შეცდომა: %s", e.kind)
+        log.warning("AI provider შეცდომა: %s | %s", e.kind, str(e)[:300])
         ans = FALLBACK.get(lang, FALLBACK["ka"])
         persist(ans, outcome="error", answer_type=m.A_UNVERIFIED, confidence="low", needs_manager=True, latency_ms=int((time.time() - t0) * 1000))
-        return reply(ans, m.A_UNVERIFIED, [], "low", True, "error", degraded=True, error_kind=e.kind)
+        diag = {"error_kind": e.kind, "error_detail": str(e)[:240]} if viewer.get("admin") else {}        # მიზეზს მხოლოდ ადმინი ხედავს
+        return reply(ans, m.A_UNVERIFIED, [], "low", True, "error", degraded=True, **diag)
     latency = int((time.time() - t0) * 1000)
 
     # 4) სერვერული გადამოწმება

@@ -91,20 +91,27 @@ class AnthropicProvider(Provider):
         return self._client
 
     @staticmethod
-    def _map(exc) -> ProviderError:
-        import anthropic
-        if isinstance(exc, anthropic.APITimeoutError):
-            return ProviderError("timeout")
-        if isinstance(exc, anthropic.RateLimitError):
-            return ProviderError("rate_limit")
-        if isinstance(exc, (anthropic.AuthenticationError, anthropic.PermissionDeniedError)):
-            return ProviderError("auth")
-        if isinstance(exc, anthropic.APIConnectionError):
-            return ProviderError("unavailable")
-        if isinstance(exc, anthropic.APIStatusError):
-            return ProviderError("unavailable" if getattr(exc, "status_code", 500) >= 500 else "bad_request", str(getattr(exc, "message", exc))[:200])
-        return ProviderError("unavailable", type(exc).__name__)
+    def _detail(exc) -> str:
+        """ადმინის დიაგნოსტიკისთვის: HTTP სტატუსი + პროვაიდერის შეტყობინება (გასაღებს არ შეიცავს)."""
+        status = getattr(exc, "status_code", None)
+        msg = str(getattr(exc, "message", "") or exc)[:240]
+        return (f"HTTP {status}: " if status else f"{type(exc).__name__}: ") + msg
 
+    @classmethod
+    def _map(cls, exc) -> ProviderError:
+        import anthropic
+        d = cls._detail(exc)
+        if isinstance(exc, anthropic.APITimeoutError):
+            return ProviderError("timeout", d)
+        if isinstance(exc, anthropic.RateLimitError):
+            return ProviderError("rate_limit", d)
+        if isinstance(exc, (anthropic.AuthenticationError, anthropic.PermissionDeniedError)):
+            return ProviderError("auth", d)
+        if isinstance(exc, anthropic.APIConnectionError):
+            return ProviderError("unavailable", d)
+        if isinstance(exc, anthropic.APIStatusError):
+            return ProviderError("unavailable" if getattr(exc, "status_code", 500) >= 500 else "bad_request", d)
+        return ProviderError("unavailable", d)
     def run(self, system, messages, tools, call_tool, max_tokens, timeout, max_steps=4) -> Completion:
         import anthropic
         client = self._cli().with_options(timeout=timeout, max_retries=1)

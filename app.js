@@ -5814,7 +5814,7 @@ function aiChat(body) {
     try {
       const r = await api("/api/ai/ask", { method: "POST", body: JSON.stringify({ text, conv_id: ai.conv }) });
       ai.conv = r.conv_id; ai.msgs.pop();
-      ai.msgs.push({ role: "assistant", text: r.answer, answer_type: r.answer_type, label: r.label, sources: r.sources, msg_id: r.msg_id, q: text, error: !!r.degraded });
+      ai.msgs.push({ role: "assistant", text: r.answer + (r.error_kind ? `\n\n🔧 ადმინისთვის: ${r.error_kind}${r.error_detail ? " — " + r.error_detail : ""}` : ""), answer_type: r.answer_type, label: r.label, sources: r.sources, msg_id: r.msg_id, q: text, error: !!r.degraded });
       if (state.aiAccess && r.usage) state.aiAccess.used_today = r.usage.used_today;
     } catch (e) {
       ai.msgs.pop();
