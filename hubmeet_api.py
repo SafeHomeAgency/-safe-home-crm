@@ -222,6 +222,25 @@ def register(app, *, authed, audit, rate_limited, get_agents, team_lead_for, not
         unseen = sum(1 for i in items if i["is_mine"] and not i["seen"])
         return jsonify(items=items, total=len(items), unseen_mine=unseen, can_manage=mgr, agents=agents_out)
 
+    @app.get("/api/hub/attention")
+    @rate_limited("hub_read")
+    @_guard
+    def hub_attention(agent, admin):
+        """დაგვიანებული Follow-up-ები (შედეგი არ ჩაწერილა / გადაწყვეტილება არ არის / კლიენტი მიუღებელია / შეხვედრა არ დაგეგმილა) — სკოუპი როლით."""
+        viewer = viewer_of(agent, admin)
+        agents_all = get_agents()
+        if admin:
+            scope_ids = None
+        elif viewer["role"] == "team_lead" and viewer["team"]:
+            scope_ids = {str(a.get("agent_id")) for a in agents_all if str(a.get("team", "")).strip() == viewer["team"]}
+        else:
+            scope_ids = {viewer["agent_id"]} if viewer["agent_id"] else set()
+        items = store.attention_items(viewer, get_tasks() if get_tasks else [], scope_ids)
+        counts: dict = {}
+        for it in items:
+            counts[it["kind"]] = counts.get(it["kind"], 0) + 1
+        return jsonify(items=items[:40], total=len(items), counts=counts)
+
     @app.get("/api/hub/stats")
     @rate_limited("hub_read")
     @_guard

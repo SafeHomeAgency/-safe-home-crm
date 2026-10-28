@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import collections
 import datetime
 import json
 import logging
@@ -53,6 +54,43 @@ _records_cache: dict[str, tuple[float, list[dict]]] = {}
 _records_cache_lock = threading.Lock()
 
 
+# Sheets API-ს გამოძახებების მრიცხველი (გაზომვა, ოპტიმიზაციამდე): ყოველი მცდელობა ითვლება (retry-ც). Google-ის ლიმიტი ~60 წაკითხვა/წთ/მომხმარებელზე.
+_READ_METHODS = {"get_all_records", "get_all_values", "row_values", "col_values", "find", "findall", "get", "cell", "acell", "get_values"}
+_api_calls: "collections.deque" = collections.deque(maxlen=20000)   # (monotonic, is_read)
+_api_err = {"429": 0, "5xx": 0, "other": 0}
+_api_lock = threading.Lock()
+
+
+def _count_api_call(method: str) -> None:
+    with _api_lock:
+        _api_calls.append((time.monotonic(), method in _READ_METHODS))
+
+
+def _count_api_error(status) -> None:
+    with _api_lock:
+        _api_err["429" if status == 429 else "5xx" if (status or 0) >= 500 else "other"] += 1
+
+
+def api_call_stats() -> dict:
+    """{reads_1m, writes_1m, reads_5m, writes_5m, peak_reads_1m (ბოლო 10 წთ), errors} — Sheets-ის რეალური დატვირთვა."""
+    now = time.monotonic()
+    with _api_lock:
+        calls = list(_api_calls)
+        errs = dict(_api_err)
+
+    def _n(window, read):
+        return sum(1 for t, r in calls if now - t <= window and r == read)
+
+    reads = [t for t, r in calls if r and now - t <= 600]
+    peak, lo = 0, 0
+    for hi, t in enumerate(reads):          # სრიალა ფანჯარა (60 წმ) — O(n)
+        while t - reads[lo] > 60:
+            lo += 1
+        peak = max(peak, hi - lo + 1)
+    return {"backend": "sheets", "reads_1m": _n(60, True), "writes_1m": _n(60, False), "reads_5m": _n(300, True),
+            "writes_5m": _n(300, False), "peak_reads_1m_last10m": peak, "errors": errs, "quota_reads_per_min": 60}
+
+
 class _RetryingWorksheet:
     """gspread Worksheet-ის თხელი გარსი — ნებისმიერ მეთოდის გამოძახებას
     (get_all_records, append_row, update_cell, find და ა.შ.) ავტომატურად
@@ -70,6 +108,7 @@ class _RetryingWorksheet:
             delay = 1.0
             last_exc = None
             for _attempt in range(5):
+                _count_api_call(name)
                 try:
                     return attr(*args, **kwargs)
                 except gspread.exceptions.APIError as e:
@@ -79,6 +118,7 @@ class _RetryingWorksheet:
                         status = e.response.status_code
                     except Exception:
                         status = None
+                    _count_api_error(status)
                     if status in (429, 500, 502, 503, 504) or status is None:
                         time.sleep(delay + random.uniform(0, 0.4))
                         delay = min(delay * 2, 15)
@@ -1150,7 +1190,8 @@ def get_meetings(agent_id: str | None = None, client_phone: str | None = None,
 # ---------- გრაფიკი (ყოფილი "პირბადული ცხრილი") + გამოცხადება ----------
 
 def _today_str() -> str:
-    return datetime.datetime.now().strftime("%Y-%m-%d")
+    # თბილისის დღე (არა სერვერის UTC) — KPI/დასწრების ფანჯრებთან თანმიმდევრულობისთვის
+    return crm_time.local_today().strftime(crm_time.DATE_FMT)
 
 
 def set_agent_schedule(agent_id: str, pattern: dict) -> None:
@@ -1181,7 +1222,7 @@ def get_today_mode(agent_id: str) -> str:
     sched = get_agent_schedule(agent_id)
     if not sched:
         return "off"
-    key = WEEKDAY_KEYS[datetime.datetime.now().weekday()]
+    key = WEEKDAY_KEYS[crm_time.local_today().weekday()]
     return str(sched.get(key) or "off")
 
 
@@ -1300,7 +1341,7 @@ def agent_available_now(agent_id: str) -> bool:
     sched = get_agent_schedule(agent_id)
     if not sched:
         return True
-    mode = str(sched.get(WEEKDAY_KEYS[datetime.datetime.now().weekday()]) or "off")
+    mode = str(sched.get(WEEKDAY_KEYS[crm_time.local_today().weekday()]) or "off")
     if mode == "off":
         return False
     return is_clocked_in_today(agent_id)
@@ -2020,7 +2061,7 @@ def get_daily_digest(team: str | None = None, days: int = 1) -> dict:
     ნიშნავს ისე, როგორც დღეს."""
     today = _today_str()
     days = max(1, int(days or 1))
-    cutoff = (datetime.datetime.now() - datetime.timedelta(days=days - 1)).strftime("%Y-%m-%d")
+    cutoff = (crm_time.local_today() - datetime.timedelta(days=days - 1)).strftime(crm_time.DATE_FMT)
     all_agents = get_agents()
     agents = [
         a for a in all_agents
@@ -2583,6 +2624,9 @@ def reset_stale_myhome_jobs(older_than_minutes: int, max_retries: int) -> list[d
 
 # ---------- Worker heartbeat (PHASE 1.5) ----------
 
+_hb_lock = threading.Lock()
+_hb_state: dict[str, tuple] = {}     # worker_id -> (monotonic, (status, job, stage), row)
+
 def record_worker_heartbeat(worker_id: str, status: str = "online",
                              current_job_id: str = "", stage: str = "") -> dict:
     """worker-ის სიცოცხლის ნიშანი: upsert worker_id-ზე, **ერთი** ჩაწერა
@@ -2590,7 +2634,18 @@ def record_worker_heartbeat(worker_id: str, status: str = "online",
     worker_id = str(worker_id or "").strip()
     row = [worker_id, str(status or "online"), crm_time.iso_utc_now(), str(current_job_id or ""),
            str(stage or ""), _now()]
-    with _lock:
+    sig = (row[1], row[3], row[4])
+    # კვოტის დაზოგვა: იგივე მდგომარეობის heartbeat-ს WORKER_HEARTBEAT_COALESCE_SECONDS-ზე ხშირად ცხრილში არ ვწერთ
+    # (stale-ზღვარი 300 წმ-ია; მდგომარეობის ცვლილება — status/job/stage — მაშინვე იწერება).
+    coalesce = float(getattr(config, "WORKER_HEARTBEAT_COALESCE_SECONDS", 0) or 0)
+    now_m = time.monotonic()
+    with _hb_lock:
+        prev = _hb_state.get(worker_id)
+        # კოალესცენცია მხოლოდ იმავე worksheet-ის ობიექტზე: ცხრილი ხელახლა შეიქმნა/გადატვირთა -> აუცილებლად ვწერთ
+        ws_key = id(_ws_cache.get(config.WORKER_HEARTBEAT_SHEET_NAME))
+        if coalesce > 0 and worker_id and prev and prev[1] == sig and prev[3] == ws_key and now_m - prev[0] < coalesce:
+            return dict(zip(WORKER_HEARTBEAT_HEADERS, prev[2]))
+        # ცალკე საკეტი (არა გლობალური `_lock`): heartbeat-ის ქსელური ჩაწერა სხვა Sheets-ოპერაციებს არ ბლოკავს
         ws = _worker_heartbeat_ws()
         cell = ws.find(worker_id, in_column=1) if worker_id else None
         if cell:
@@ -2600,6 +2655,7 @@ def record_worker_heartbeat(worker_id: str, status: str = "online",
         else:
             ws.append_row(row)
         _invalidate(config.WORKER_HEARTBEAT_SHEET_NAME)
+        _hb_state[worker_id] = (now_m, sig, row, id(_ws_cache.get(config.WORKER_HEARTBEAT_SHEET_NAME)))
     return dict(zip(WORKER_HEARTBEAT_HEADERS, row))
 
 

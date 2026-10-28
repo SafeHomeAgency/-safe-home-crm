@@ -889,3 +889,32 @@ button.chip { cursor: pointer; font-family: inherit; }
 .hub-ld-ls { display: flex; gap: 10px; align-items: center; background: rgba(147,166,188,.08); border-radius: 14px; padding: 8px; margin: 8px 0; cursor: pointer; }
 .hub-ld-ls img, .hub-ld-ls .hub-noph { width: 64px; height: 64px; flex: 0 0 64px; border-radius: 10px; object-fit: cover; font-size: 24px; }
 .hub-ld-ls b { color: var(--gold-light); font-size: 16px; }
+/* ===== ეტაპი 2-6: ტაბების დაჯგუფება („სხვა“), სისტემის ჯანმრთელობა, ყურადღება, კრიტერიუმები, ორეულები ===== */
+.more-sheet { position: fixed; inset: 0; z-index: 60; background: rgba(5, 10, 18, .6); display: flex; align-items: flex-end; justify-content: center; }
+.more-sheet[hidden] { display: none; }
+.more-box { width: 100%; max-width: 560px; background: var(--navy-3, #10263c); border: 1px solid var(--hairline); border-radius: 22px 22px 0 0; padding: 14px 12px calc(16px + env(safe-area-inset-bottom)); max-height: 78vh; overflow: auto; animation: hubIn .25s ease both; }
+.more-h { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; color: var(--text); }
+.more-h .close { background: transparent; border: none; color: var(--hint); font-size: 18px; }
+.more-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+.more-grid button { display: flex; flex-direction: column; align-items: center; gap: 4px; border: 1px solid var(--hairline); background: rgba(147, 166, 188, .07); color: var(--text); border-radius: 14px; padding: 10px 4px; font-size: 11.5px; font-weight: 650; }
+.more-grid button .ic { font-size: 22px; line-height: 1; }
+.more-grid button.active { color: var(--gold-light); background: rgba(201, 162, 39, .14); border-color: rgba(201, 162, 39, .45); }
+
+.sys-banner { display: flex; gap: 10px; align-items: center; padding: 12px; margin-bottom: 10px; border-radius: 16px; border: 1px solid var(--hairline); background: rgba(147, 166, 188, .08); }
+.sys-banner > div { flex: 1; } .sys-banner .btn { padding: 6px 10px; }
+.sys-banner.lv-ok { border-color: rgba(52, 211, 153, .5); } .sys-banner.lv-warn { border-color: rgba(245, 158, 66, .6); } .sys-banner.lv-bad { border-color: rgba(242, 109, 109, .7); }
+.sys-card { background: linear-gradient(180deg, var(--navy-3, #10263c), var(--navy-4, #0d1f31)); border: 1px solid var(--hairline); border-left: 4px solid var(--hint); border-radius: 14px; padding: 11px 12px; margin-bottom: 9px; }
+.sys-card.lv-ok { border-left-color: #34d399; } .sys-card.lv-warn { border-left-color: #f59e42; } .sys-card.lv-bad { border-left-color: #f26d6d; } .sys-card.lv-unknown { border-left-color: #93a6bc; }
+.sys-h { display: flex; align-items: center; gap: 8px; } .sys-d { font-size: 12.5px; color: var(--hint); margin: 4px 0 2px; }
+.sys-row { display: flex; justify-content: space-between; gap: 10px; font-size: 12px; padding: 4px 0; border-top: 1px dashed var(--hairline); color: var(--text); }
+.sys-row span:last-child, .sys-row b { text-align: right; } .sys-row b.warn { color: #f59e42; }
+
+.hub-att { display: flex; gap: 10px; justify-content: space-between; align-items: center; background: linear-gradient(180deg, var(--navy-3, #10263c), var(--navy-4, #0d1f31)); border: 1px solid var(--hairline); border-left: 4px solid #f59e42; border-radius: 14px; padding: 10px 12px; margin-bottom: 8px; }
+.hub-att.k-outcome_missing { border-left-color: #f26d6d; } .hub-att .btn { white-space: nowrap; padding: 6px 12px; }
+.hub-crit { background: linear-gradient(180deg, var(--navy-3, #10263c), var(--navy-4, #0d1f31)); border: 1px solid var(--hairline); border-left: 4px solid var(--gold); border-radius: 16px; padding: 12px; margin-bottom: 10px; }
+.hub-crit.off { opacity: .6; border-left-color: var(--hint); }
+.hub-match { border: 1px solid var(--hairline); border-radius: 14px; padding: 10px; margin-bottom: 10px; background: rgba(147, 166, 188, .05); }
+.hub-why { font-size: 12px; margin: 6px 0; line-height: 1.5; color: var(--text); }
+.hub-dup { background: rgba(245, 158, 66, .18); color: #f59e42; border-radius: 99px; padding: 1px 7px; font-size: 11px; font-weight: 700; }
+.hub-q { text-align: center; margin-top: 6px; color: #f59e42; }
+.hub-chk { display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; }

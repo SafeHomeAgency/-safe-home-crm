@@ -67,9 +67,19 @@ def on_job_finished(job_row: dict, snapshot) -> None:
     """webserver /complete-დან (წარმატებული დასრულებისას/ss.ge-ნაწილის ჩავარდნისას): კატალოგში ჩანაწერის შენახვა.
     ნებისმიერი შეცდომა ჩაიყლაპება — ატვირთვის შედეგის დაფიქსირებას ეს არასდროს აფერხებს."""
     try:
-        store.upsert_from_job(job_row or {}, snapshot)
+        rec = store.upsert_from_job(job_row or {}, snapshot)
     except Exception:  # noqa: BLE001
         log.exception("Property Hub: ჩანაწერის შენახვა ვერ მოხერხდა (job %s)", (job_row or {}).get("job_id"))
+        return
+    if rec and rec.get("_new"):
+        for hook in list(NEW_LISTING_HOOKS):          # მაგ. კლიენტის კრიტერიუმებთან შესატყვისობა; თითოეული ცალკე იცავს თავს
+            try:
+                hook(rec)
+            except Exception:  # noqa: BLE001
+                log.exception("Property Hub: ახალი განცხადების hook ჩავარდა (%s)", getattr(hook, "__name__", "hook"))
+
+
+NEW_LISTING_HOOKS: list = []
 
 
 def register(app, *, authed, audit, rate_limited, get_jobs, interest=None, my_districts=None) -> None:

@@ -25,6 +25,7 @@ import json
 import logging
 import os
 import re
+import urllib.error
 import urllib.parse
 import urllib.request
 
@@ -38,7 +39,10 @@ import crm_security
 import crm_time
 import crm2_sync
 import kpi
+import notification_service
+import system_health
 import task_notify
+import worker_health
 import sheets
 
 log = logging.getLogger("safehome-crm-webapp")
@@ -87,6 +91,16 @@ def rate_limited(bucket: str):
     return deco
 
 app = Flask(__name__)
+
+
+@app.after_request
+def _track_request(resp):
+    """ჯანმრთელობის დაფისთვის: ბოლო წარმატებული/5xx API მოთხოვნა (შეცდომამ მოთხოვნას არასდროს უნდა შეუშალოს ხელი)."""
+    try:
+        system_health.note_request(resp.status_code)
+    except Exception:  # noqa: BLE001
+        pass
+    return resp
 
 
 def _save_base64_photos(photos) -> list[str]:
@@ -146,6 +160,36 @@ def _send_telegram_message(chat_id, text: str, reply_markup: dict | None = None)
     except Exception:
         log.exception("Telegram შეტყობინების გაგზავნა Mini App-იდან ვერ მოხერხდა")
         return False
+
+
+def _telegram_outbox_sender(chat_id, text: str, reply_markup=None):
+    """notification_service-ის გამგზავნი: True = გაიგზავნა; False = დროებითი ჩავარდნა (განმეორდება); "drop" = მუდმივი (მაგ. ბოტი დაბლოკილია /
+    chat არ არსებობს: 400/403) — განმეორება უშედეგოა."""
+    try:
+        body = {"chat_id": chat_id, "text": text}
+        if reply_markup:
+            body["reply_markup"] = reply_markup
+        req = urllib.request.Request(
+            f"https://api.telegram.org/bot{config.TELEGRAM_BOT_TOKEN}/sendMessage",
+            data=json.dumps(body).encode(), headers={"Content-Type": "application/json"})
+        urllib.request.urlopen(req, timeout=10)
+        return True
+    except urllib.error.HTTPError as e:
+        log.warning("Telegram outbox: HTTP %s (chat %s)", e.code, chat_id)
+        return "drop" if e.code in (400, 403) else False
+    except Exception:  # noqa: BLE001
+        log.warning("Telegram outbox: გაგზავნა ვერ მოხერხდა (ქსელი/timeout)", exc_info=True)
+        return False
+
+
+def notify_async(chat_id, text: str, *, key: str | None = None, priority: str = "operational", reply_markup=None) -> str:
+    """ასინქრონული, დუბლირებისგან დაცული Telegram-შეტყობინება (მოთხოვნა Telegram-ს არ ელოდება; ჩავარდნისას მეორდება).
+    რიგი არ არის ჩართული (ტესტი/გამართვა) -> სინქრონული გაგზავნა (ძველი ქცევა)."""
+    n = notification_service.default()
+    if n is None:
+        ok = _send_telegram_message(chat_id, text) if reply_markup is None else _send_telegram_message(chat_id, text, reply_markup)
+        return "sent" if ok else "failed"
+    return n.notify(chat_id, text, key=key, priority=priority, reply_markup=reply_markup)
 
 
 def _send_telegram_document(chat_id, filename: str, content: bytes, caption: str = "") -> bool:
@@ -580,6 +624,11 @@ def api_myhome_jobs_create():
         return jsonify(
             error="თქვენი გუნდისთვის MyHome ანგარიში ჯერ არაა მიბმული — მიმართეთ ადმინს"
         ), 409
+
+    # არასავალდებულო დღიური ლიმიტი (MYHOME_DAILY_JOBS_PER_AGENT; 0 = გამორთულია). MyHome-ის ფასიანი განთავსება ბალანსიდან იხდის.
+    cap = config.MYHOME_DAILY_JOBS_PER_AGENT
+    if cap > 0 and crm_extras.count_myhome_submitted_today(agent["agent_id"]) >= cap:
+        return jsonify(error=f"დღიური ლიმიტი ამოიწურა ({cap} განცხადება დღეში) — მიმართეთ მენეჯერს", code="daily_limit"), 429
 
     # ბიზნეს-წესი (PHASE 1.5): უნიკალურია `agent_id + myhome_id + ბიზნეს-დღე
     # (Asia/Tbilisi)`. გლობალური დუბლიკატის აკრძალვა **არ არის**: იგივე ID
@@ -1942,17 +1991,13 @@ def api_clockout():
         # (worker.py-ს მიერ COMPLETED) განცხადებებიდან ითვლება.
         # დათვლა = რამდენი განცხადება გაგზავნა აგენტმა (სტატუსის მიუხედავად;
         # არარსებული ლისტინგის ID-ის გარდა) — არა მხოლოდ უკვე დადებულები.
-        myhome = crm_extras.count_myhome_submitted_today(agent_id)
-        if mode in ("office_morning", "office_evening"):
-            site, ssge = _as_int(body.get("site")), _as_int(body.get("ssge"))
-            # იხ. bot.py-ის იგივე ლოგიკის კომენტარი: ერთი და იგივე
-            # განცხადება ერთდროულად იტვირთება საიტზე და myhome-ზე,
-            # ამიტომ ჯამი = max(site, myhome), ss.ge ჯერჯერობით მხოლოდ
-            # საინფორმაციოდ ინახება.
-            total = max(site, myhome)
+        # ჯამის ფორმულა ერთია (crm_extras.daily_listing_total): ოფისზე max(site, myhome), ონლაინზე — ავტომატური დათვლა;
+        # ss.ge ჯერჯერობით მხოლოდ საინფორმაციოდ ინახება.
+        site, ssge = _as_int(body.get("site")), _as_int(body.get("ssge"))
+        total, myhome = crm_extras.daily_listing_total(agent_id, mode, site)
+        if mode in crm_extras.OFFICE_MODES:
             sheets.set_daily_count(agent_id, total, site=site, myhome=myhome, ssge=ssge)
         else:
-            total = myhome
             sheets.set_daily_count(agent_id, total)
 
         # დასრულების ლოკაციის ივენთი (თუ გამოგზავნა) — clock_out უკვე
@@ -1962,15 +2007,10 @@ def api_clockout():
         except Exception:
             log.exception("check-out ივენთი ვერ ჩაიწერა agent_id=%s", agent_id)
 
-        quota = sheets.quota_for_mode(mode)
-        if quota and total < quota:
-            today = datetime.datetime.now().strftime("%Y-%m-%d")
-            detail = f"{today}: {total}/{quota} (Mini App-იდან)"
-            warn_result = sheets.add_warning_once(agent_id, "quota_missed", detail)
-            # დამტკიცებული Day off დღეს -> გაფრთხილება არ იწერება
-            # (skipped) და არავის ეგზავნება შეტყობინება.
-            if not warn_result.get("skipped"):
-                _notify_quota_warning(agent, warn_result, detail)
+        _quota, short = crm_extras.quota_shortfall(agent_id, mode, total, "Mini App-იდან")
+        # დამტკიცებული Day off დღეს -> გაფრთხილება არ იწერება (skipped) და არავის ეგზავნება შეტყობინება.
+        if short and not short.get("skipped"):
+            _notify_quota_warning(agent, short, short["detail"])
 
         # "კლიენტი გყავდათ დღეს?" კითხვის პასუხი Mini App-იდან — თუ
         # agent-მა ტელეფონი/მოქმედებები შეავსო, ავტომატურად იქმნება
@@ -2662,11 +2702,26 @@ def api_districts_shuffle():
 # ცარიელი MYHOME_WORKER_API_KEY ნიშნავს, რომ ეს გამორთულია (404).
 
 def _authed_worker():
-    if not config.MYHOME_WORKER_API_KEY:
+    """საერთო გასაღები (MYHOME_WORKER_API_KEY) — ძველი ქცევა, ყველა ანგარიშზე. ახალი, არასავალდებულო: თითო ანგარიშზე ცალკე გასაღები
+    (MYHOME_WORKER_API_KEYS=label=key,...): ასეთი გასაღები მხოლოდ თავისი იარლიყის (manager_label / worker_id=ext-<label>) მოთხოვნებს
+    ემსახურება, ამიტომ ერთი კომპიუტერის გასაღები სხვა ანგარიშის job-ებს ვერ აიღებს და ცალკე ბათილდება."""
+    keys = getattr(config, "MYHOME_WORKER_API_KEYS", {}) or {}
+    if not config.MYHOME_WORKER_API_KEY and not keys:
         return jsonify(error="ეს endpoint გამორთულია"), 404
-    expected = f"Bearer {config.MYHOME_WORKER_API_KEY}"
-    if not hmac.compare_digest(request.headers.get("Authorization", ""), expected):
+    got = request.headers.get("Authorization", "")
+    if config.MYHOME_WORKER_API_KEY and hmac.compare_digest(got, f"Bearer {config.MYHOME_WORKER_API_KEY}"):
+        return None
+    bound = None
+    for label, key in keys.items():
+        if hmac.compare_digest(got, f"Bearer {key}"):
+            bound = label
+    if bound is None:
         return jsonify(error="ავტორიზაცია ვერ დადასტურდა"), 401
+    label = str(request.args.get("manager_label") or "").strip()
+    wid = str(request.args.get("worker_id") or (request.get_json(silent=True) or {}).get("worker_id") or "").strip()
+    ok = (label or wid) and (not label or label == bound) and (not wid or wid == f"ext-{bound}")
+    if not ok:
+        return jsonify(error="ეს გასაღები სხვა ანგარიშისთვისაა", code="key_scope"), 403
     return None
 
 
@@ -2685,6 +2740,7 @@ def internal_myhome_jobs_next():
     if not manager_label:
         return jsonify(error="manager_label საჭიროა"), 400
     worker_id = str(request.args.get("worker_id") or "").strip()[:80]
+    worker_health.note_poll(manager_label)      # ციკლი ცოცხალია და job-ს ითხოვს (heartbeat-ისგან დამოუკიდებელი სიგნალი)
     row = sheets.claim_next_myhome_job(manager_label, worker_id)
     if not row:
         return jsonify(row=None)
@@ -2695,9 +2751,10 @@ def internal_myhome_jobs_next():
         None,
     )
     if agent and agent.get("telegram_chat_id"):
-        _send_telegram_message(
+        notify_async(
             int(agent["telegram_chat_id"]),
             f"⏳ {_site_name(row.get('listing_source'))} ID {row.get('myhome_listing_id')} — მუშავდება...",
+            key=f"claimed:{row.get('job_id')}:{row.get('retry_count') or 0}", priority="info",
         )
     return jsonify(row=row)
 
@@ -2773,7 +2830,9 @@ def internal_myhome_jobs_complete(job_id):
             text = f"❌ {site} ID {listing} — ვერ აიტვირთა. მიზეზი: {error_message or 'უცნობი'}"
             if ss_new:
                 text += f"\nℹ️ ss.ge-ზე უკვე დაიდო: https://home.ss.ge/ka/udzravi-qoneba/{ss_new} (ხელახლა ნუ გაუშვებთ ორჯერ)"
-        _send_telegram_message(int(agent["telegram_chat_id"]), text)
+        # ასინქრონულად + დუბლირების გასაღებით (job + შედეგი + ცდის ნომერი): ხელახალი /complete ან Telegram-ის ჩავარდნა შეტყობინებას არ ამრავლებს/კარგავს
+        notify_async(int(agent["telegram_chat_id"]), text,
+                     key=f"finished:{job_id}:{status}:{row.get('retry_count') or 0}", priority="operational")
     return jsonify(ok=True, row=row, retry_scheduled=res["retry_scheduled"])
 
 
@@ -2813,7 +2872,7 @@ def internal_worker_heartbeat():
     if not worker_id:
         return jsonify(error="worker_id საჭიროა"), 400
     row = sheets.record_worker_heartbeat(
-        worker_id, str(body.get("status") or "online")[:20],
+        worker_id, str(body.get("status") or "online")[:100],   # `online-v11|st=paused|rs=..|ca=..` (იხ. worker_health.parse_status)
         str(body.get("current_job_id") or "")[:40], str(body.get("stage") or "")[:20],
     )
     return jsonify(ok=True, last_heartbeat=row["last_heartbeat"])
@@ -2825,7 +2884,14 @@ def worker_status_list() -> list[dict]:
     for hb in sheets.get_worker_heartbeats():
         age = crm_time.seconds_since_utc_iso(hb.get("last_heartbeat"))
         online = age is not None and age <= config.WORKER_HEARTBEAT_STALE_SECONDS
-        out.append({**hb, "online": online, "age_seconds": None if age is None else int(age)})
+        label = str(hb.get("worker_id") or "")
+        label = label[4:] if label.startswith("ext-") else label
+        view = worker_health.worker_view(hb, age, config.WORKER_HEARTBEAT_STALE_SECONDS, worker_health.last_poll_age(label),
+                                         config.WORKER_POLL_STALE_SECONDS, worker_health.process_uptime())
+        out.append({**hb, "online": online, "age_seconds": None if age is None else int(age),
+                    "label": label, "state": view["state"], "state_label": view["state_label"], "reason": view["reason"],
+                    "version": view["version"], "poll_age_seconds": view["poll_age_seconds"],
+                    "loop_alive": view["loop_alive"], "healthy": view["healthy"]})
     return out
 
 
@@ -2838,6 +2904,130 @@ def api_worker_status():
     if not admin:
         return jsonify(error="მხოლოდ ადმინისთვის"), 403
     return jsonify(workers=worker_status_list(), stale_after_seconds=config.WORKER_HEARTBEAT_STALE_SECONDS)
+
+
+def _sheets_call_stats() -> dict:
+    f = getattr(sheets, "api_call_stats", None)
+    if f:
+        return f()
+    if config.DATA_BACKEND != "postgres":
+        try:
+            import sheets_gspread
+            return sheets_gspread.api_call_stats()
+        except Exception:  # noqa: BLE001
+            pass
+    return {"backend": "unknown"}
+
+
+def build_health_report(now=None) -> dict:
+    """სისტემის ჯანმრთელობა: თითო კომპონენტი {level: ok|warn|bad|unknown, title, detail, data}. „ok“ მხოლოდ რეალური მუშაობით
+    (job გაეშვა, worker job-ს ითხოვს, რიგი არ დგას) — არა იმით, რომ სერვერი პასუხობს. რაც ვერ ვიცით, `unknown`-ია."""
+    now = now or datetime.datetime.now()
+    comps: dict = {}
+
+    api = system_health.api_snapshot()
+    recent_5xx = api["last_5xx_age_s"] is not None and api["last_5xx_age_s"] < 600
+    comps["backend"] = {"level": "warn" if recent_5xx else "ok", "title": "სერვერი (API)",
+                        "detail": f"მუშაობს {int(worker_health.process_uptime() // 60)} წთ; მოთხოვნა {api['requests']}, 5xx შეცდომა {api['errors_5xx']}"
+                                  + (" — ბოლო 10 წთ-ში იყო 5xx!" if recent_5xx else ""), "data": api}
+
+    jobs_state = system_health.jobs_snapshot()
+    young = worker_health.process_uptime() < 900
+    bad_jobs = [j for j in jobs_state if j["status"] in ("failing", "late")]
+    never = [j for j in jobs_state if j["status"] == "never"]
+    if not jobs_state:
+        lvl, det = "unknown", "ბოტის job-ების გაშვების ჩანაწერი ჯერ არ არის (ახლახან ჩაირთო?)"
+    elif bad_jobs:
+        lvl, det = "bad" if any(j["status"] == "failing" for j in bad_jobs) else "warn", "პრობლემა: " + ", ".join(f"{j['name']} ({j['status']})" for j in bad_jobs[:6])
+    elif never and not young:
+        lvl, det = "warn", "არ გაშვებულა: " + ", ".join(j["name"] for j in never[:6])
+    else:
+        lvl, det = "ok", f"{len(jobs_state)} ფონური job გაშვებულია დროულად"
+    comps["bot_jobs"] = {"level": lvl, "title": "Telegram ბოტი / ფონური job-ები", "detail": det, "data": jobs_state}
+
+    try:
+        workers = worker_status_list()
+    except Exception:  # noqa: BLE001
+        log.exception("health: workers")
+        workers = []
+    if not workers:
+        wl, wd = "unknown", "არც ერთი worker heartbeat არ ჩანს"
+    elif all(w["healthy"] for w in workers):
+        wl, wd = "ok", f"{len(workers)} worker ცოცხალია და job-ს ითხოვს"
+    else:
+        sick = [w for w in workers if not w["healthy"]]
+        wl, wd = "bad", "; ".join(f"{w.get('label')}: {w['state_label'] if w['online'] else 'ოფლაინი'}" for w in sick[:5])
+    comps["workers"] = {"level": wl, "title": "Chrome worker-ები (ექსთენშენი)", "detail": wd, "data": workers}
+
+    all_jobs = sheets.get_myhome_jobs()
+    q = system_health.queue_snapshot(all_jobs, now, crm_time.parse_server_dt)
+    views = {w["label"]: w for w in workers}
+    label_teams: dict = {}
+    for a in sheets.get_myhome_accounts():
+        lab = str(a.get("manager_label", "")).strip().lower()
+        if lab and str(a.get("team", "")).strip():
+            label_teams.setdefault(lab, set()).add(str(a.get("team")).strip())
+    agents_team = {str(a.get("agent_id")): str(a.get("team", "")).strip() for a in sheets.get_agents()}
+    stuck = worker_health.diagnose_queued(all_jobs, views, label_teams, agents_team, now, crm_time.parse_server_dt, config.QUEUE_WAIT_ALERT_MINUTES)
+    blocked = [s for s in stuck if s["cause"] not in ("busy", "queue_backlog")]
+    if blocked:
+        ql, qd = "bad", f"{len(blocked)} განცხადება დგას მიზეზით: " + ", ".join(sorted({s['cause'] for s in blocked}))
+    elif stuck:
+        ql, qd = "warn", f"{len(stuck)} განცხადება {int(config.QUEUE_WAIT_ALERT_MINUTES)}+ წთ ელოდება (worker ჯანმრთელია — რიგია)"
+    else:
+        ql, qd = "ok", f"რიგში {q['queued']}, მუშავდება {q['processing']}"
+    comps["queue"] = {"level": ql, "title": "ატვირთვის რიგი", "detail": qd, "data": {**q, "stuck": stuck[:20]}}
+
+    up = system_health.upload_stats(all_jobs, now, crm_time.parse_server_dt, 24)
+    if up["success_pct"] is None:
+        ul, ud = "unknown", "ბოლო 24 საათში დასრულებული job არ არის"
+    else:
+        ul = "bad" if up["success_pct"] < 70 else "warn" if (up["success_pct"] < 90 or up["repeating"]) else "ok"
+        ud = f"წარმატება {up['success_pct']}% ({up['completed']}/{up['completed'] + up['failed']}) ბოლო 24 სთ" + (
+            "; განმეორებადი შეცდომა: " + ", ".join(f"{r['portal']}/{r['class']}×{r['count']}" for r in up["repeating"][:3]) if up["repeating"] else "")
+    comps["uploads"] = {"level": ul, "title": "ატვირთვის წარმატება", "detail": ud, "data": up}
+
+    # `sheets` ფასადი (sheets.py) ლოკალურად არ არის — მრიცხველის ფუნქცია შეიძლება მასში ჯერ არ იყოს გატანილი; მაშინ „უცნობია“, არა ჩავარდნა
+    st = _sheets_call_stats()
+    if st.get("backend") == "unknown":
+        sl, sd = "unknown", "Sheets-ის გამოძახებების მრიცხველი ამ ფასადში ხელმისაწვდომი არ არის (sheets.py არ ასახავს api_call_stats-ს)"
+    elif st.get("backend") != "sheets":
+        sl, sd = "ok", "Postgres — Google-ის კვოტა არ მოქმედებს"
+    else:
+        err = sum(st["errors"].values())
+        sl = "bad" if st["errors"]["429"] > 0 and st["reads_1m"] >= 50 else "warn" if (st["peak_reads_1m_last10m"] >= 45 or st["errors"]["429"] > 0) else "ok"
+        sd = f"წაკითხვა {st['reads_1m']}/წთ (პიკი {st['peak_reads_1m_last10m']}, ლიმიტი ~{st['quota_reads_per_min']}), ჩაწერა {st['writes_1m']}/წთ, შეცდომა {err} (429: {st['errors']['429']})"
+    comps["sheets"] = {"level": sl, "title": "Google Sheets (კვოტა)", "detail": sd, "data": st}
+
+    n = notification_service.default()
+    if n is None:
+        comps["notifications"] = {"level": "unknown", "title": "შეტყობინებების რიგი", "detail": "ასინქრონული რიგი ამ პროცესში არ არის ჩართული", "data": {}}
+    else:
+        ns = n.stats()
+        nl = "bad" if ns["failed"] > 0 and (ns["oldest_pending_s"] or 0) > 600 else "warn" if (ns["failed"] > 0 or (ns["oldest_pending_s"] or 0) > 120) else "ok"
+        comps["notifications"] = {"level": nl, "title": "შეტყობინებების რიგი",
+                                  "detail": f"გაგზავნილი {ns['sent']}, ელოდება {ns['pending']}, განმეორება {ns['retried']}, დუბლი შეჩერდა {ns['deduped']}, ჩავარდა {ns['failed']}",
+                                  "data": ns}
+
+    comps["backup"] = {"level": "unknown", "title": "სარეზერვო ასლი / სინქრონიზაცია",
+                       "detail": "ავტომატური სარეზერვო ასლი სისტემაში არ არსებობს (Google Sheets-ის ვერსიების ისტორია — ხელით). დადასტურებული ბოლო ასლის დრო უცნობია.", "data": {}}
+    return {"overall": system_health.overall(comps), "components": comps, "generated_at": crm_time.iso_utc_now()}
+
+
+@app.get("/api/system/health")
+@rate_limited("hub_read")
+def api_system_health():
+    """სისტემის ჯანმრთელობის დაფა — მხოლოდ ადმინი."""
+    agent, admin, err = _authed_agent()
+    if err:
+        return err
+    if not admin:
+        return jsonify(error="მხოლოდ ადმინისთვის"), 403
+    try:
+        return jsonify(build_health_report())
+    except Exception:  # noqa: BLE001
+        log.exception("health report ვერ აიგო")
+        return jsonify(error="ჯანმრთელობის ანგარიში ვერ აიგო"), 500
 
 
 # ---------------------------------------------------------- static app
@@ -3015,12 +3205,35 @@ def _hub_contract_counts() -> dict:
 
 hubmeet_api.register(
     app, authed=_authed_agent, audit=_audit, rate_limited=rate_limited, get_agents=lambda: sheets.get_agents(),
-    team_lead_for=_team_lead_for_team, notify=lambda chat_id, text: _send_telegram_message(chat_id, text),
+    team_lead_for=_team_lead_for_team, notify=lambda chat_id, text: notify_async(chat_id, text) in ("queued", "sent"),
     admin_chat_ids=lambda: list(config.ADMIN_CHAT_IDS), find_listing=_hub_find_listing,
     create_base_meeting=_hub_create_base_meeting, crm_hook=_hub_crm_hook, contract_counts=_hub_contract_counts,
     get_tasks=lambda: sheets.get_tasks(), find_listing_ref=lambda ref: listings_store.find_by_ref(ref),
 )
 
+
+# Property Hub: კლიენტის კრიტერიუმები + ავტომატური შესატყვისობა (ახალი ბინა -> შესაბამის აგენტს შეტყობინება; დუბლირებისგან დაცული)
+import criteria_api  # noqa: E402
+import criteria_store  # noqa: E402
+
+criteria_api.register(app, authed=_authed_agent, audit=_audit, rate_limited=rate_limited)
+
+
+def _agent_chat_id(agent_id):
+    a = next((x for x in sheets.get_agents() if str(x.get("agent_id")) == str(agent_id)), None)
+    try:
+        return int(a["telegram_chat_id"]) if a and a.get("telegram_chat_id") else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _match_new_listing(listing: dict) -> None:
+    criteria_store.ensure_tabs()
+    criteria_api.notify_new_listing(
+        listing, notify=lambda chat, text, key: notify_async(chat, text, key=key, priority="operational"), agent_chat=_agent_chat_id)
+
+
+listings_api.NEW_LISTING_HOOKS.append(_match_new_listing)
 
 # Property Hub: ფავორიტები (სერვერზე), სიახლის ზღვრების პანელი, CSV ექსპორტი (ადმინი -> Telegram)
 import hubprefs  # noqa: E402

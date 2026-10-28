@@ -146,7 +146,7 @@ def _now() -> str:
 
 
 def _today_str() -> str:
-    return datetime.datetime.now().strftime("%Y-%m-%d")
+    return crm_time.local_today().strftime(crm_time.DATE_FMT)
 
 
 def _parse_dt(value: str):
@@ -813,7 +813,7 @@ def get_today_mode(agent_id: str) -> str:
     sched = get_agent_schedule(agent_id)
     if not sched:
         return "off"
-    key = WEEKDAY_KEYS[datetime.datetime.now().weekday()]
+    key = WEEKDAY_KEYS[crm_time.local_today().weekday()]
     return str(sched.get(key) or "off")
 
 
@@ -920,7 +920,7 @@ def agent_available_now(agent_id: str) -> bool:
     sched = get_agent_schedule(agent_id)
     if not sched:
         return True
-    mode = str(sched.get(WEEKDAY_KEYS[datetime.datetime.now().weekday()]) or "off")
+    mode = str(sched.get(WEEKDAY_KEYS[crm_time.local_today().weekday()]) or "off")
     if mode == "off":
         return False
     return is_clocked_in_today(agent_id)
@@ -1542,7 +1542,7 @@ def get_daily_digest(team: str | None = None, days: int = 1) -> dict:
     ნიშნავს ისე, როგორც დღეს."""
     today = _today_str()
     days = max(1, int(days or 1))
-    cutoff = (datetime.datetime.now() - datetime.timedelta(days=days - 1)).strftime("%Y-%m-%d")
+    cutoff = (crm_time.local_today() - datetime.timedelta(days=days - 1)).strftime(crm_time.DATE_FMT)
     all_agents = get_agents()
     agents = [
         a for a in all_agents
@@ -2040,6 +2040,12 @@ def record_worker_heartbeat(worker_id: str, status: str = "online",
 def get_worker_heartbeats() -> list[dict]:
     with _lock:
         return db.query_all("SELECT * FROM worker_heartbeat")
+
+
+def api_call_stats() -> dict:
+    """პარიტეტი sheets_gspread-თან: Postgres-ზე Google-ის კვოტა არ არსებობს, მრიცხველი არ მიმდინარეობს."""
+    return {"backend": "postgres", "reads_1m": 0, "writes_1m": 0, "reads_5m": 0, "writes_5m": 0,
+            "peak_reads_1m_last10m": 0, "errors": {"429": 0, "5xx": 0, "other": 0}, "quota_reads_per_min": None}
 
 
 # ---------- Audit log (PHASE 1.5) ----------

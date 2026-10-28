@@ -34,10 +34,13 @@ import config
 import crm_extras
 import crm_time
 import kpi
+import notification_service
 import shift_rules
+import system_health
 import task_notify
 import sheets
 import webserver
+import worker_health
 import crm2_sync
 import migrate_sheets_to_postgres
 
@@ -1506,16 +1509,8 @@ CO_OFFICE_FIELDS = [
 CO_ONLINE_FIELDS = []  # მთლიანად ავტომატურია (MyHome-დან) — არაფერს ვეკითხებით
 
 
-def _count_myhome_completed_today(agent_id: str) -> int:
-    """რეალურად, ავტომატურად დადებული (worker.py-ს მიერ "COMPLETED"-ად
-    დამოწმებული) MyHome განცხადებების რაოდენობა დღეისთვის — რეგლამენტის
-    ანგარიშისთვის, აგენტის ხელით შეყვანილი (და, შესაბამისად,
-    შესაძლო არაზუსტი) რიცხვის ნაცვლად."""
-    # თბილისის დღის საზღვრებით (სერვერი UTC-ზეა) — იხ. crm_extras.
-    # ახლა ითვლის **აგენტის მიერ გაგზავნილ** განცხადებებს (სტატუსის მიუხედავად;
-    # არარსებული ლისტინგის ID-ის გარდა), რომ რიგში/ჩვენი მხრიდან ჩავარდნილი
-    # განცხადება აგენტს არ დაუკლოს. ფუნქციის სახელი ისტორიულია.
-    return crm_extras.count_myhome_submitted_today(agent_id)
+# დღის დათვლის ერთადერთი წყარო: crm_extras.daily_listing_total / count_myhome_submitted_today
+# (ძველი `_count_myhome_completed_today` — სახელით „completed“, რეალურად „submitted“ — ამოღებულია, გამოძახება აღარ ჰქონდა).
 
 
 async def clockout_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1583,32 +1578,24 @@ async def clockout_count(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def _finish_clockout(update: Update, context: ContextTypes.DEFAULT_TYPE,
                             agent: dict, mode: str, data: dict):
     agent_id = agent["agent_id"]
-    myhome = _count_myhome_completed_today(agent_id)
+    site, ssge = data.get("site", 0), data.get("ssge", 0)
+    # ჯამის ფორმულა ერთია (crm_extras.daily_listing_total): ერთი განცხადება ერთდროულად იტვირთება საიტზე და myhome-ზე,
+    # ამიტომ ოფისზე ჯამი max(site, myhome)-ია, ss.ge კი მხოლოდ ინფორმაციულად ინახება; ონლაინზე — ავტომატური დათვლა.
+    total, myhome = crm_extras.daily_listing_total(agent_id, mode, site)
 
     sheets.clock_out(agent_id)
-    if mode in ("office_morning", "office_evening"):
-        site, ssge = data.get("site", 0), data.get("ssge", 0)
-        # ერთი და იგივე განცხადება ერთდროულად იტვირთება საიტზე და
-        # myhome-ზე (სარკისებურად) — ამიტომ ჯამი არ არის site+myhome+ssge
-        # (ეს დუბლირებას/ტრიპლირებას იძლევა), არამედ ორივედან უფრო დიდი
-        # რიცხვი (რეალურად ატვირთული უნიკალური განცხადებების რაოდენობა).
-        # ss.ge ამ ეტაპზე ჯამში არ ითვლება, მხოლოდ ინფორმაციულად ინახება.
-        # myhome — აღარ არის ხელით შეყვანილი, ავტომატურად, ნამდვილი
-        # "COMPLETED" job-ების რაოდენობითაა.
-        total = max(site, myhome)
+    if mode in crm_extras.OFFICE_MODES:
         sheets.set_daily_count(agent_id, total, site=site, myhome=myhome, ssge=ssge)
         count_display = f"საიტი {site} / myhome {myhome} (ავტომატური) / ss.ge {ssge} (ინფო) = ჩაითვალა {total}"
     else:
-        total = myhome
         sheets.set_daily_count(agent_id, total)
         count_display = f"{total} (ავტომატურად, MyHome-დან)"
 
     note = ""
-    quota = sheets.quota_for_mode(mode)
-    if quota and total < quota:
-        today = datetime.datetime.now().strftime("%Y-%m-%d")
-        detail = f"{today}: {total}/{quota} ({SCHEDULE_MODE_LABELS.get(mode, mode)})"
-        result = sheets.add_warning_once(agent_id, "quota_missed", detail)
+    quota, short = crm_extras.quota_shortfall(agent_id, mode, total, SCHEDULE_MODE_LABELS.get(mode, mode))
+    if short:
+        detail = short["detail"]
+        result = short
         if result.get("skipped") == "duplicate":
             note = f"\n\nℹ️ დღევანდელი გეგმა ({quota}) ვერ შესრულდა — გაფრთხილება დღეს უკვე ჩაწერილია, ხელახლა არ ჩაიწერა."
         elif result.get("skipped"):
@@ -2665,6 +2652,66 @@ async def check_worker_heartbeat(context: ContextTypes.DEFAULT_TYPE):
                     log.warning("worker-ის სტატუსის შეტყობინება ვერ გაიგზავნა admin_id=%s", admin_id, exc_info=True)
 
 
+QUEUE_ALERT_CAUSES = ("no_worker", "offline", "disabled", "paused", "login", "not_polling", "team_mismatch")
+_QUEUE_CAUSE_ADVICE = {
+    "no_worker": "ამ ანგარიშზე ექსთენშენი არასდროს გაშვებულა", "offline": "ექსთენშენი/Chrome გამორთულია ან ინტერნეტი არ არის",
+    "disabled": "runner-ში „▶ ჩართვა“ არ არის დაჭერილი", "paused": "runner პაუზაზეა (ბალანსი/Cloudflare/ზედიზედ ჩავარდნები)",
+    "login": "Chrome-პროფილი MyHome-ში შესული არ არის", "not_polling": "heartbeat მოდის, მაგრამ job-ს არ ითხოვს — შეამოწმეთ runner-ის ფანჯარა",
+    "team_mismatch": "აგენტის გუნდი ამ ანგარიშს არ ეკუთვნის (MyHomeAccounts)",
+}
+
+
+async def check_queue_health(context: ContextTypes.DEFAULT_TYPE):
+    """5 წუთში ერთხელ: QUEUED job, რომელიც QUEUE_WAIT_ALERT_MINUTES-ზე დიდხანს დგას -> ადმინს ეგზავნება **მიზეზით** (heartbeat-ის ასაკი
+    არ კმარა: მწვანე heartbeat-იანი გამორთული runner job-ს არ იღებს). ერთი ანგარიში+მიზეზი — საათში მაქს. ერთხელ (დუბლირების გასაღები)."""
+    try:
+        now = datetime.datetime.now()
+        label_teams: dict[str, set] = {}
+        for a in sheets.get_myhome_accounts():
+            lab = str(a.get("manager_label", "")).strip().lower()
+            if lab and str(a.get("team", "")).strip():
+                label_teams.setdefault(lab, set()).add(str(a.get("team")).strip())
+        agents_team = {str(a.get("agent_id")): str(a.get("team", "")).strip() for a in sheets.get_agents()}
+        views = {w["label"]: w for w in webserver.worker_status_list()}
+        findings = worker_health.diagnose_queued(
+            sheets.get_myhome_jobs(), views, label_teams, agents_team, now, crm_time.parse_server_dt, config.QUEUE_WAIT_ALERT_MINUTES)
+    except Exception:
+        log.exception("რიგის ჯანმრთელობის შემოწმება ვერ გაეშვა")
+        raise
+    n = notification_service.default()
+    if not n:
+        return
+    hour_bucket = crm_time.local_now().strftime("%Y%m%d%H")
+    groups: dict[tuple, list] = {}
+    for f in findings:
+        if f["cause"] in QUEUE_ALERT_CAUSES:
+            groups.setdefault((f["label"], f["cause"]), []).append(f)
+    for (label, cause), items in groups.items():
+        lines = [f"🛑 რიგში {len(items)} განცხადება {items[0]['age_min']}+ წთ-ია დგას — ანგარიში „{label}“",
+                 f"მიზეზი: {_QUEUE_CAUSE_ADVICE.get(cause, cause)}", items[0]["detail"], ""]
+        for it in items[:5]:
+            lines.append(f"• {it['agent_name'] or '—'} · ID {it['source_id']} · {it['age_min']} წთ")
+        if len(items) > 5:
+            lines.append(f"… და კიდევ {len(items) - 5}")
+        n.notify_many(config.ADMIN_CHAT_IDS, "\n".join(lines), key=f"qwait:{label}:{cause}:{hour_bucket}", priority="critical")
+
+
+def _tracked(fn, interval=None):
+    """ფონური job-ის გარსი: ბოლო გაშვება/შეცდომა ჯანმრთელობის დაფისთვის (system_health.jobs_snapshot). job-ის ქცევას არ ცვლის."""
+    import functools
+
+    @functools.wraps(fn)
+    async def _wrapper(context):
+        try:
+            res = await fn(context)
+            system_health.record_job(fn.__name__, True, interval=interval)
+            return res
+        except Exception as e:  # noqa: BLE001
+            system_health.record_job(fn.__name__, False, f"{type(e).__name__}: {e}", interval=interval)
+            raise
+    return _wrapper
+
+
 async def check_manager_notifications(context: ContextTypes.DEFAULT_TYPE):
     """5 წუთში ერთხელ — ადმინისგან დამოუკიდებლად, კონკრეტულ თიმლიდერს
     ატყობინებს, თუ მისი გუნდის წევრს ცვლის დაწყებიდან 30 წუთში ჯერ არ
@@ -2844,14 +2891,11 @@ async def check_daily_compliance(context: ContextTypes.DEFAULT_TYPE):
             # ყოველთვის "0"-ად დაინახავდა, მიუხედავად რეალურად რამდენი
             # განცხადებაც უკვე დადო დღეს. ამის მაგივრად პირდაპირ ვითვლით
             # რეალურ, ამ წუთამდე დასრულებულ MyHome job-ებს.
-            count_submitted = _count_myhome_completed_today(agent_id)
-            if count_submitted < config.ONLINE_DAILY_QUOTA:
-                detail = (
-                    f"{today}: {count_submitted}/{config.ONLINE_DAILY_QUOTA} "
-                    f"(ონლაინ, {config.REPORT_DEADLINE_HOUR}:00-ის მდგომარეობით)"
-                )
-                result = sheets.add_warning_once(agent_id, "quota_missed", detail)
-                await _notify_warning(context, a, "quota_missed", detail, result)
+            total, _submitted = crm_extras.daily_listing_total(agent_id, mode)
+            _quota, short = crm_extras.quota_shortfall(
+                agent_id, mode, total, f"ონლაინ, {config.REPORT_DEADLINE_HOUR}:00-ის მდგომარეობით")
+            if short:
+                await _notify_warning(context, a, "quota_missed", short["detail"], short)
 
 
 async def check_missing_checkouts(context: ContextTypes.DEFAULT_TYPE):
@@ -3168,6 +3212,8 @@ def main():
     app.add_handler(CallbackQueryHandler(swapshift_decide, pattern=r"^swshift_decide:"))
     app.add_handler(CallbackQueryHandler(taskseen_callback, pattern=r"^taskseen:"))
 
+    # ერთიანი შეტყობინებების რიგი (ასინქრონული, დედუპლიკაციით, განმეორებით) — მხოლოდ რეალურ გაშვებაზე; ტესტებში არ ირთვება
+    notification_service.configure(webserver._telegram_outbox_sender)
     threading.Thread(target=webserver.run, name="webapp", daemon=True).start()
 
     if app.job_queue:
@@ -3184,44 +3230,45 @@ def main():
                     log.exception("Menu button-ის დაყენება ვერ მოხერხდა")
             app.job_queue.run_once(_set_menu_button, when=1)
 
-        app.job_queue.run_repeating(check_new_tasks, interval=config.POLL_INTERVAL_SECONDS, first=10)
-        app.job_queue.run_repeating(check_late_arrivals, interval=900, first=120)
-        app.job_queue.run_repeating(check_task_followups, interval=300, first=200)
+        app.job_queue.run_repeating(_tracked(check_new_tasks, config.POLL_INTERVAL_SECONDS), interval=config.POLL_INTERVAL_SECONDS, first=10)
+        app.job_queue.run_repeating(_tracked(check_late_arrivals, 900), interval=900, first=120)
+        app.job_queue.run_repeating(_tracked(check_task_followups, 300), interval=300, first=200)
         app.job_queue.run_daily(
-            send_daily_report,
+            _tracked(send_daily_report, 86400),
             time=datetime.time(hour=config.DAILY_REPORT_HOUR, tzinfo=ZoneInfo(config.TIMEZONE)),
         )
         app.job_queue.run_daily(
-            check_daily_compliance,
+            _tracked(check_daily_compliance, 86400),
             time=datetime.time(hour=config.REPORT_DEADLINE_HOUR, minute=5, tzinfo=ZoneInfo(config.TIMEZONE)),
         )
         app.job_queue.run_daily(
-            send_team_digests,
+            _tracked(send_team_digests, 86400),
             time=datetime.time(hour=config.REPORT_DEADLINE_HOUR, minute=10, tzinfo=ZoneInfo(config.TIMEZONE)),
         )
-        app.job_queue.run_repeating(remind_before_shift_edge, interval=300, first=60)
-        app.job_queue.run_repeating(check_manager_notifications, interval=300, first=90)
-        app.job_queue.run_repeating(check_myhome_jobs_stale, interval=300, first=150)
-        app.job_queue.run_repeating(check_myhome_challenge_alert, interval=300, first=170)
-        app.job_queue.run_repeating(check_myhome_login_alert, interval=300, first=190)
-        app.job_queue.run_repeating(check_worker_heartbeat, interval=300, first=240)
-        app.job_queue.run_repeating(check_contract_deadlines, interval=900, first=260)
-        app.job_queue.run_repeating(check_hub_meetings, interval=600, first=280)
-        app.job_queue.run_repeating(check_district_shuffle, interval=1800, first=320)
+        app.job_queue.run_repeating(_tracked(remind_before_shift_edge, 300), interval=300, first=60)
+        app.job_queue.run_repeating(_tracked(check_manager_notifications, 300), interval=300, first=90)
+        app.job_queue.run_repeating(_tracked(check_myhome_jobs_stale, 300), interval=300, first=150)
+        app.job_queue.run_repeating(_tracked(check_myhome_challenge_alert, 300), interval=300, first=170)
+        app.job_queue.run_repeating(_tracked(check_myhome_login_alert, 300), interval=300, first=190)
+        app.job_queue.run_repeating(_tracked(check_worker_heartbeat, 300), interval=300, first=240)
+        app.job_queue.run_repeating(_tracked(check_queue_health, 300), interval=300, first=210)
+        app.job_queue.run_repeating(_tracked(check_contract_deadlines, 900), interval=900, first=260)
+        app.job_queue.run_repeating(_tracked(check_hub_meetings, 600), interval=600, first=280)
+        app.job_queue.run_repeating(_tracked(check_district_shuffle, 1800), interval=1800, first=320)
         app.job_queue.run_daily(
-            send_finance_reminders,
+            _tracked(send_finance_reminders, 86400),
             time=datetime.time(hour=config.FINANCE_REMINDER_HOUR, minute=0, tzinfo=ZoneInfo(config.TIMEZONE)),
         )
         app.job_queue.run_daily(
-            send_contracts_daily_summary,
+            _tracked(send_contracts_daily_summary, 86400),
             time=datetime.time(hour=config.CONTRACT_SUMMARY_HOUR, minute=5, tzinfo=ZoneInfo(config.TIMEZONE)),
         )
         app.job_queue.run_daily(
-            check_missing_checkouts,
+            _tracked(check_missing_checkouts, 86400),
             time=datetime.time(hour=config.MISSING_CHECKOUT_HOUR, minute=0, tzinfo=ZoneInfo(config.TIMEZONE)),
         )
         app.job_queue.run_daily(
-            remind_district_assignments,
+            _tracked(remind_district_assignments, 86400),
             time=datetime.time(hour=18, minute=0, tzinfo=ZoneInfo(config.TIMEZONE)),
         )
 

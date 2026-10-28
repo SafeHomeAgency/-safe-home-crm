@@ -204,6 +204,60 @@ def count_myhome_submitted_today(agent_id: str) -> int:
     return total
 
 
+def is_countable_submission(job: dict) -> bool:
+    """ერთადერთი წესი „გაგზავნილად ჩასათვლელი job-ისთვის“ (KPI, დღის დასასრული, ბოტის შემოწმებები)."""
+    return not _is_invalid_listing_job(job)
+
+
+def submitted_by_agent_day(jobs) -> dict:
+    """{(agent_id, თბილისის_დღე): გაგზავნილი} — KPI იყენებს ამ ფუნქციას; დღევანდელი დათვლაც იგივე წესს ემყარება."""
+    out: dict[tuple, int] = {}
+    for j in jobs:
+        day = crm_time.business_date_of_server_naive(j.get("created_at", ""))
+        if day and is_countable_submission(j):
+            k = (str(j.get("agent_id")), day)
+            out[k] = out.get(k, 0) + 1
+    return out
+
+
+def published_by_agent_day(jobs) -> dict:
+    """{(agent_id, თბილისის_დღე): გამოქვეყნებული} — მხოლოდ COMPLETED, დასრულების დღით (გაგზავნილისგან გამიჯნული)."""
+    out: dict[tuple, int] = {}
+    for j in jobs:
+        if str(j.get("status")) != "COMPLETED":
+            continue
+        day = crm_time.business_date_of_server_naive(j.get("completed_at", "") or j.get("created_at", ""))
+        if day:
+            k = (str(j.get("agent_id")), day)
+            out[k] = out.get(k, 0) + 1
+    return out
+
+
+OFFICE_MODES = ("office_morning", "office_evening")
+
+
+def daily_listing_total(agent_id: str, mode: str, site=0) -> tuple[int, int]:
+    """(ჩასათვლელი ჯამი, myhome-ის გაგზავნილი). ოფისზე max(საიტი, myhome) — ერთი განცხადება ორივე პორტალზე
+    იდება; ონლაინზე მხოლოდ ავტომატური დათვლა. clockout-ის სამივე გზა (ბოტი, Mini App, 22:00 შემოწმება) იყენებს ამას."""
+    submitted = count_myhome_submitted_today(agent_id)
+    try:
+        site_n = int(site or 0)
+    except (TypeError, ValueError):
+        site_n = 0
+    return (max(site_n, submitted) if mode in OFFICE_MODES else submitted), submitted
+
+
+def quota_shortfall(agent_id: str, mode: str, total: int, label: str = "") -> tuple[int | None, dict | None]:
+    """თუ გეგმა ვერ შესრულდა — წერს გაფრთხილებას (დღეში ერთხელ, თბილისის დღით) და აბრუნებს (გეგმა, add_warning_once-ის შედეგი).
+    შესრულებულია/გეგმა არ ეკუთვნის -> (quota|None, None)."""
+    quota = sheets.quota_for_mode(mode)
+    if not quota or total >= quota:
+        return quota, None
+    today = crm_time.local_today().strftime(crm_time.DATE_FMT)
+    detail = f"{today}: {total}/{quota} ({label})" if label else f"{today}: {total}/{quota}"
+    return quota, {"detail": detail, **sheets.add_warning_once(agent_id, "quota_missed", detail)}
+
+
 # ====================================================================
 # 3. რაიონები (კვირის განაწილებისთვის)
 # ====================================================================

@@ -168,6 +168,75 @@ def project(row: dict, now: datetime.datetime, privileged: bool, th: dict | None
     return out
 
 
+# ---------------------------------------------------------------------- შესაძლო დუბლიკატები (მხოლოდ გაფრთხილება)
+def _norm_addr(v) -> str:
+    return re.sub(r"[\W_]+", "", str(v or "").lower())
+
+
+def _meters(a: dict, b: dict) -> float | None:
+    la1, ln1, la2, ln2 = num(a.get("lat")), num(a.get("lng")), num(b.get("lat")), num(b.get("lng"))
+    if None in (la1, ln1, la2, ln2):
+        return None
+    return (((la1 - la2) * 111000.0) ** 2 + ((ln1 - ln2) * 82700.0) ** 2) ** 0.5     # თბილისის განედზე (~41.7°)
+
+
+def _lead_int(v):
+    m = re.match(r"\s*(\d+)", str(v or ""))
+    return m.group(1) if m else None
+
+
+def _prep(r: dict) -> tuple:
+    """ველების ერთჯერადი დამუშავება (დუბლიკატების ძებნა დიდ ცხრილზეც სწრაფი რომ იყოს): (გარიგება, ოთახები, ფართი, სართული, lat, lng, ნორმ. მისამართი)."""
+    return (str(r.get("deal_type") or "").strip().lower(), _lead_int(r.get("rooms")), num(r.get("area")), _lead_int(r.get("floor")),
+            num(r.get("lat")), num(r.get("lng")), _norm_addr(r.get("address")))
+
+
+def _same_prepped(a: tuple, b: tuple) -> bool:
+    if a[0] and b[0] and a[0] != b[0]:
+        return False
+    if a[1] and b[1] and a[1] != b[1]:
+        return False
+    if a[2] is None or b[2] is None or abs(a[2] - b[2]) > max(2.0, 0.03 * max(a[2], b[2])):
+        return False
+    if a[3] and b[3] and a[3] != b[3]:
+        return False
+    if None not in (a[4], a[5], b[4], b[5]):
+        return (((a[4] - b[4]) * 111000.0) ** 2 + ((a[5] - b[5]) * 82700.0) ** 2) ** 0.5 <= 70.0
+    return len(a[6]) >= 6 and a[6] == b[6]
+
+
+def same_property(a: dict, b: dict) -> bool:
+    """ორი განცხადება სავარაუდოდ ერთი ფიზიკური ბინაა: ერთი გარიგება, ერთი ოთახობა, ახლო ფართი, იგივე ადგილი (კოორდინატი ≤70 მ ან იგივე მისამართი),
+    იგივე სართული (თუ ორივე ცნობილია). არასაკმარისი მონაცემით (ფართი/ადგილი არ არის) — false (ცრუ ტრიალს თავს ვარიდებთ)."""
+    return _same_prepped(_prep(a), _prep(b))
+
+
+def duplicate_groups(rows: list[dict]) -> dict:
+    """{listing_id: [სხვა listing_id, ...]} — მხოლოდ ის ბინები, რომლებსაც სავარაუდო ორეული ჰყავთ. წაშლა/გაერთიანება არ ხდება.
+    ბაკეტები (გარიგება, ოთახობა) + ფართით დალაგება: დიდ ცხრილზეც სწრაფია."""
+    buckets: dict[tuple, list[dict]] = {}
+    for r in rows:
+        if str(r.get("archived") or "").strip().lower() in ("yes", "true", "1"):
+            continue
+        if str(r.get("active") or "").strip().lower() == "no":
+            continue
+        rm = re.match(r"\s*(\d+)", str(r.get("rooms") or ""))
+        buckets.setdefault((str(r.get("deal_type") or "").strip().lower(), rm.group(1) if rm else ""), []).append(r)
+    out: dict[str, list[str]] = {}
+    for items in buckets.values():
+        prepped = [(_prep(r), str(r.get("listing_id"))) for r in items]
+        prepped = [x for x in prepped if x[0][2] is not None]
+        prepped.sort(key=lambda x: x[0][2])
+        for i, (pa, ia) in enumerate(prepped):
+            for pb, ib in prepped[i + 1:]:
+                if pb[2] - pa[2] > max(2.0, 0.03 * pb[2]):
+                    break
+                if _same_prepped(pa, pb):
+                    out.setdefault(ia, []).append(ib)
+                    out.setdefault(ib, []).append(ia)
+    return out
+
+
 class ListingError(Exception):
     def __init__(self, msg: str, status: int = 400):
         super().__init__(msg)

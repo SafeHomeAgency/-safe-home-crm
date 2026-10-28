@@ -61,6 +61,26 @@ APP_SETTINGS_SHEET_NAME = "AppSettings"
 # Mini App-იდან. ცარიელი ნიშნავს, რომ ეს endpoint-ები გამორთულია
 # (401-ს დააბრუნებენ), სანამ ვინმე შეგნებულად არ დააყენებს.
 MYHOME_WORKER_API_KEY = os.environ.get("MYHOME_WORKER_API_KEY", "").strip()
+# არასავალდებულო: თითო ანგარიშზე ცალკე გასაღები — "mariam-account=<key>,lika-account=<key>". ასეთი გასაღები მხოლოდ თავის იარლიყს ემსახურება
+# და ცალკე ბათილდება/იცვლება; საერთო გასაღები (ზემოთ) ძველებურად მუშაობს ყველაზე. ცარიელი = მხოლოდ საერთო გასაღები.
+def _label_keys(raw: str) -> dict:
+    out = {}
+    for part in (raw or "").split(","):
+        label, sep, key = part.strip().partition("=")
+        if sep and label.strip() and key.strip():
+            out[label.strip()] = key.strip()
+    return out
+
+
+MYHOME_WORKER_API_KEYS = _label_keys(os.environ.get("MYHOME_WORKER_API_KEYS", ""))
+# QUEUED job-ი რამდენი წუთის შემდეგ ითვლება „დიდხანს ელოდება“ (ადმინის ალერტი მიზეზით) და worker-ის `/next` რამდენი წამით ითვლება „ცოცხალ ციკლად“
+QUEUE_WAIT_ALERT_MINUTES = float(os.environ.get("QUEUE_WAIT_ALERT_MINUTES", "10"))
+WORKER_POLL_STALE_SECONDS = float(os.environ.get("WORKER_POLL_STALE_SECONDS", "90"))
+# იგივე მდგომარეობის heartbeat-ს Sheets-ში ამ ინტერვალზე ხშირად არ ვწერთ (კვოტის დაზოგვა; stale-ზღვარი 300 წმ-ია)
+WORKER_HEARTBEAT_COALESCE_SECONDS = float(os.environ.get("WORKER_HEARTBEAT_COALESCE_SECONDS", "45"))
+# არასავალდებულო დღიური ლიმიტი: ერთი აგენტი დღეში (თბილისის დღე) მაქს. რამდენ ატვირთვის job-ს ქმნის (MyHome-ის ფასიანი განთავსება ბალანსიდან იხდის).
+# 0 = ლიმიტი გამორთულია (ძველი ქცევა). დირექტორის გადაწყვეტილებაა.
+MYHOME_DAILY_JOBS_PER_AGENT = int(os.environ.get("MYHOME_DAILY_JOBS_PER_AGENT", "0"))
 # რამდენი წუთის განმავლობაში "PROCESSING"-ში გაჭედილი job ითვლება
 # "worker ჩამოვარდნილად" და უბრუნდება "QUEUED"-ს ხელახლა (retry_count-ის
 # გაზრდით) — worker-ის restart-ის/crash-ის დაცვა.
@@ -169,6 +189,9 @@ for _pair in os.environ.get("KPI_WEIGHTS", "").split(","):
 KPI_MEETINGS_PER_WEEK = float(os.environ.get("KPI_MEETINGS_PER_WEEK", "3"))
 KPI_CLOSED_CASES_PER_MONTH = float(os.environ.get("KPI_CLOSED_CASES_PER_MONTH", "2"))
 KPI_WARNING_PENALTY = float(os.environ.get("KPI_WARNING_PENALTY", "0.10"))
+# Property Hub-იდან დაგეგმილი შეხვედრა KPI-ში ითვლება მხოლოდ სტატუსით „ჩატარდა“ (დაგეგმილი ≠ ჩატარებული; გაუქმებული/არ გამოცხადებული
+# არ ითვლება). ძველი (/meeting) ჩანაწერები უცვლელად ითვლება. "0" აბრუნებს ძველ ქცევას (ყველა Meetings-სტრიქონი).
+KPI_HUB_MEETINGS_HELD_ONLY = os.environ.get("KPI_HUB_MEETINGS_HELD_ONLY", "1").strip().lower() not in ("0", "false", "no")
 # ონლაინ დღეზე რომელ საათზე შევახსენოთ აგენტს დაწყება (/clockin), თუ
 # ჯერ არ დაუწყია — ონლაინ რეჟიმს ფიქსირებული საწყისი საათი არა აქვს,
 # ამიტომ ეს მხოლოდ ერთხელადი, დღის შუა საათის შეხსენებაა.

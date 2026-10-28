@@ -128,7 +128,7 @@ def upsert_from_job(job: dict, snap: dict | None) -> dict | None:
         rec["created_at"] = now
         rec["last_verified_at"] = now
         _backend.append(m.LISTINGS_SHEET, m.LISTING_HEADERS, rec)
-        return rec
+        return dict(rec, _new=True)           # ახალი ჩანაწერის ნიშანი (მხოლოდ დაბრუნებულ ასლზე; ცხრილში არ იწერება) — კლიენტის კრიტერიუმებთან შესადარებლად
 
 
 def backfill_from_jobs(jobs: list[dict]) -> dict:
@@ -297,6 +297,11 @@ def query(f: dict, viewer: dict, now: datetime.datetime | None = None) -> dict:
     page = max(1, int(f.get("page") or 1))
     chunk = ordered[(page - 1) * per: page * per]
     items = [m.project(r, now, is_privileged(r, viewer), th) for r in chunk]
+    dups = dup_map(rows)
+    for it in items:                    # შესაძლო ორეული (გაფრთხილება): id-ები საჯარო ველია, პირადი მონაცემი არ გადადის
+        others = dups.get(it["listing_id"]) or []
+        it["dup_count"] = len(others)
+        it["dup_ids"] = others[:4]
 
     # ფასეტები: რაიონების/ფერების რაოდენობა მიმდინარე ფილტრებით (თავად იმ ფილტრის გარეშე) — რუკისა და ჩიპებისთვის
     no_district = [r for r in rows if _match(r, f, viewer, skip="district")]
@@ -322,6 +327,23 @@ def query(f: dict, viewer: dict, now: datetime.datetime | None = None) -> dict:
                    "property_types": sorted({_s(r.get("property_type")) for r in visible_all if _s(r.get("property_type"))})},
         "meta": {"total_all": len(visible_all), "mine_total": mine_total, "thresholds": th, "fresh_labels": m.FRESH_LABELS},
     }
+
+
+_DUP_CACHE: tuple = (0.0, None, {})
+
+
+def dup_map(rows: list[dict] | None = None) -> dict:
+    """{listing_id: [ორეულების id-ები]} — 60 წმ-იანი კეში (ცხრილის ზომა+ბოლო ცვლილება გასაღებია). მხოლოდ გაფრთხილება, არაფერი იშლება/ერთიანდება."""
+    global _DUP_CACHE
+    import time as _t
+    rows = all_rows() if rows is None else rows
+    key = (len(rows), max((_s(r.get("last_updated_at")) for r in rows), default=""))
+    ts, k, val = _DUP_CACHE
+    if k == key and _t.monotonic() - ts < 60:
+        return val
+    val = m.duplicate_groups(rows)
+    _DUP_CACHE = (_t.monotonic(), key, val)
+    return val
 
 
 def _find(listing_id: str) -> dict | None:
@@ -392,9 +414,16 @@ def insights(viewer: dict, now: datetime.datetime | None = None) -> dict:
         else:
             rows = [r for r in rows if viewer.get("agent_id") and _s(r.get("agent_id")) == _s(viewer.get("agent_id"))]
     scope = "all" if viewer.get("admin") else ("team" if viewer.get("role") == "team_lead" else "mine")
-    tot = {"total": 0, "new_7d": 0, "no_photo": 0, "no_coords": 0, "fresh": {c: 0 for c in m.FRESH_LABELS}}
+    tot = {"total": 0, "new_7d": 0, "no_photo": 0, "no_coords": 0, "no_area": 0, "no_rooms": 0, "no_price": 0,
+           "backfill_only": 0, "dup_listings": 0, "fresh": {c: 0 for c in m.FRESH_LABELS}}
+    dups = dup_map()
     by: dict[str, dict] = {}
     for r in rows:
+        tot["no_area"] += 1 if m.num(r.get("area")) is None else 0
+        tot["no_rooms"] += 0 if _rooms_num(r.get("rooms")) is not None else 1
+        tot["no_price"] += 1 if m.num(r.get("price_usd")) is None else 0
+        tot["backfill_only"] += 1 if _s(r.get("source")) == "backfill" else 0
+        tot["dup_listings"] += 1 if dups.get(_s(r.get("listing_id"))) else 0
         fr = m.freshness(r, now, th)
         created = m.parse_dt(r.get("created_at"))
         is_new = bool(created and (now - created).total_seconds() <= 7 * 86400)

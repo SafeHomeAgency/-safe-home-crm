@@ -252,6 +252,66 @@ def list_for(viewer: dict, view: str = "upcoming", days: int = 30, listing_id: s
     return rows[:300]
 
 
+# ====================================================================== „ყურადღება“: დაგვიანებული Follow-up-ები
+ATTENTION_PRIORITY = {"outcome_missing": 0, "pending_undecided": 1, "lead_unseen": 2, "lead_no_meeting": 3}
+
+
+def attention_items(viewer: dict, tasks: list[dict], scope_ids, now: datetime.datetime | None = None,
+                    unseen_hours: float = 2.0, no_meeting_hours: float = 24.0, pending_hours: float = 12.0, outcome_hours: float = 3.0) -> list[dict]:
+    """რა მოითხოვს ახლა ყურადღებას (სპამის გარეშე — მხოლოდ რეალურად დაგვიანებული):
+      * შეხვედრის დრო გავიდა >outcome_hours და შედეგი არ ჩაწერილა (planned);
+      * თანამშრომლობის მოთხოვნა >pending_hours-ია მფლობელის გადაწყვეტილების გარეშე;
+      * მინიჭებული კლიენტი >unseen_hours-ია „მივიღე“-ს გარეშე;
+      * კლიენტი მიღებულია, მაგრამ >no_meeting_hours-ია შეხვედრა არ დაუგეგმავთ და დავალება არ დახურულა.
+    scope_ids — აგენტების id-ების სიმრავლე, რომელთა კლიენტებიც ჩანს (None = ყველა — ადმინი). აბრუნებს პრიორიტეტით დალაგებულ სიას."""
+    import crm_time
+    now = now or now_dt()
+    items: list[dict] = []
+    owner_hubs = visible(viewer)
+    for h in owner_hubs:
+        o, r = sides(h, viewer)
+        st = m.s(h.get("status"))
+        when = None
+        try:
+            when = datetime.datetime.strptime(f"{m.s(h.get('meeting_date'))} {m.s(h.get('meeting_time'))}", "%Y-%m-%d %H:%M")
+        except ValueError:
+            pass
+        if st == m.PLANNED and r and when and (now - when).total_seconds() > outcome_hours * 3600:
+            items.append({"kind": "outcome_missing", "hub_id": m.s(h.get("hub_id")), "age_hours": int((now - when).total_seconds() // 3600),
+                          "text": f"შეხვედრის შედეგი არ ჩაწერილა — {m.s(h.get('client_name'))} · {m.s(h.get('address'))}",
+                          "agent_name": m.s(h.get("requester_name"))})
+        if st == m.PENDING and o:
+            created = None
+            try:
+                created = datetime.datetime.strptime(m.s(h.get("created_at"))[:16], "%Y-%m-%d %H:%M")
+            except ValueError:
+                pass
+            if created and (now - created).total_seconds() > pending_hours * 3600:
+                items.append({"kind": "pending_undecided", "hub_id": m.s(h.get("hub_id")), "age_hours": int((now - created).total_seconds() // 3600),
+                              "text": f"თანამშრომლობის მოთხოვნას პასუხი არ გაეცა — {m.s(h.get('requester_name'))} · {m.s(h.get('address'))}",
+                              "agent_name": m.s(h.get("owner_agent_name"))})
+    linked = {m.s(h.get("task_id")) for h in all_rows() if m.s(h.get("task_id")) and m.s(h.get("status")) not in (m.CANCELLED, m.REJECTED)}
+    for t in tasks:
+        if str(t.get("status")) == "Done" or not t.get("assigned_to"):
+            continue
+        if scope_ids is not None and str(t.get("assigned_to")) not in scope_ids:
+            continue
+        created = crm_time.parse_server_dt(t.get("created_at"))
+        if not created:
+            continue
+        age_h = (now - crm_time.server_naive_to_local(created)).total_seconds() / 3600
+        seen = str(t.get("seen", "")).strip().lower() in ("1", "yes", "true", "y") or bool(str(t.get("seen_at", "")).strip())
+        label = f"{m.s(t.get('title'), 60)} · {m.s(t.get('client_phone'), 20)}".strip(" ·")
+        if not seen and age_h > unseen_hours:
+            items.append({"kind": "lead_unseen", "task_id": str(t.get("task_id")), "age_hours": int(age_h),
+                          "text": f"კლიენტს ჯერ არ დაუდასტურებია „მივიღე“ — {label}", "agent_name": m.s(t.get("assigned_to_name"))})
+        elif seen and age_h > no_meeting_hours and str(t.get("task_id")) not in linked:
+            items.append({"kind": "lead_no_meeting", "task_id": str(t.get("task_id")), "age_hours": int(age_h),
+                          "text": f"კლიენტს შეხვედრა არ დაუგეგმეს — {label}", "agent_name": m.s(t.get("assigned_to_name"))})
+    items.sort(key=lambda x: (ATTENTION_PRIORITY.get(x["kind"], 9), -x["age_hours"]))
+    return items
+
+
 # ====================================================================== ანალიტიკა
 def interest_counts(days: int = 30, now: datetime.datetime | None = None) -> dict:
     """ბინაზე შეხვედრების რაოდენობა ბოლო N დღეში (უარყოფილი/გაუქმებული არ ითვლება) — 'ცხელი ბინის' ნიშნისთვის."""

@@ -1,0 +1,54 @@
+ატვირთვა GitHub-ზე (Add file -> Upload files), შემდეგ Railway Redeploy.
+ფაილების რაოდენობა: 46  (იხ. MANIFEST.json — sha256).
+MANIFEST.json GitHub-ზე ასატვირთი არ არის (ინფორმაციულია).
+
+არ ატვირთოთ/არ შეცვალოთ რეპოში უკვე არსებული: db, migrate_sheets_to_postgres, sheets, index.html, Procfile.
+ახალი ცხრილები Google Sheets-ში თავისით შეიქმნება (ClientCriteria, ...). პაროლები/გასაღებები ამ ნაკრებში არ არის.
+
+ფაილები:
+  app.js
+  bot.py
+  config.py
+  contracts_api.py
+  contracts_jobs.py
+  contracts_model.py
+  contracts_store.py
+  criteria_api.py
+  criteria_model.py
+  criteria_store.py
+  crm2_api.py
+  crm2_backfill.py
+  crm2_model.py
+  crm2_store.py
+  crm2_sync.py
+  crm_extras.py
+  crm_security.py
+  crm_time.py
+  district_shuffle.py
+  finance_api.py
+  finance_model.py
+  finance_store.py
+  hubmeet_api.py
+  hubmeet_jobs.py
+  hubmeet_model.py
+  hubmeet_store.py
+  hubprefs.py
+  kpi.py
+  listings_api.py
+  listings_model.py
+  listings_store.py
+  matching.py
+  myhome_accounts_api.py
+  myhome_bulk_retry.py
+  myhome_export_api.py
+  notification_service.py
+  requirements.txt
+  schema.sql
+  sheets_gspread.py
+  sheets_postgres.py
+  shift_rules.py
+  style.css
+  system_health.py
+  task_notify.py
+  webserver.py
+  worker_health.py

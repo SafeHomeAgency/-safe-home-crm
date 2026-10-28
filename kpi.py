@@ -68,18 +68,23 @@ def _day_mode(att, sched, d: datetime.date) -> str:
 
 
 def _listings_by_day(jobs) -> dict:
-    out: dict[tuple, int] = {}
+    """გაგზავნილი განცხადებები დღეების მიხედვით — წესი ერთია და crm_extras-შია (დღევანდელი დათვლაც იმას იყენებს)."""
+    import crm_extras
+    return crm_extras.submitted_by_agent_day(jobs)
+
+
+def _meetings_not_held() -> set:
+    """Hub-ის ის შეხვედრები (meeting_id ძველ `Meetings`-ში), რომლებიც ჯერ არ ჩატარებულა/გაუქმდა/არ გამოცხადდა — KPI-ში არ ითვლება.
+    Hub-ის წაკითხვა ვერ მოხერხდა -> ცარიელი სია (ძველი ქცევა, KPI არ ჩერდება)."""
+    if not config.KPI_HUB_MEETINGS_HELD_ONLY:
+        return set()
     try:
-        import crm_extras
-        invalid = crm_extras._is_invalid_listing_job
+        import hubmeet_model as hm
+        import hubmeet_store
+        return {str(h.get("meeting_id")) for h in hubmeet_store.all_rows()
+                if h.get("meeting_id") and str(h.get("status")) != hm.DONE}
     except Exception:  # noqa: BLE001
-        invalid = lambda j: False  # noqa: E731
-    for j in jobs:
-        day = crm_time.business_date_of_server_naive(j.get("created_at", ""))
-        if day and not invalid(j):
-            k = (str(j.get("agent_id")), day)
-            out[k] = out.get(k, 0) + 1
-    return out
+        return set()
 
 
 def compute(days: int = 30, agent_ids=None, now_local: datetime.datetime | None = None) -> dict:
@@ -97,14 +102,18 @@ def compute(days: int = 30, agent_ids=None, now_local: datetime.datetime | None 
 
     att_rows = sheets.get_attendance_records(date_from=_s(dates[0]), date_to=_s(dates[-1]) )
     att = {(str(r.get("agent_id")), str(r.get("date"))): r for r in att_rows}
-    jobs_by_day = _listings_by_day(sheets.get_myhome_jobs())
+    import crm_extras
+    all_jobs = sheets.get_myhome_jobs()
+    jobs_by_day = _listings_by_day(all_jobs)
+    published_by_day = crm_extras.published_by_agent_day(all_jobs)
     dayoffs = set()
     for r in sheets.get_dayoff_requests(status="approved"):
         d = crm_time.parse_user_date(r.get("date", ""))
         if d:
             dayoffs.add((str(r.get("agent_id")), _s(d)))
     warns = [w for w in sheets.get_warnings() if str(w.get("status") or "active") != "dismissed"]
-    meetings = sheets.get_meetings()
+    not_held = _meetings_not_held()
+    meetings = [m for m in sheets.get_meetings() if str(m.get("meeting_id")) not in not_held]
     tasks = sheets.get_tasks()
     try:
         reports = sheets.get_reports()
@@ -172,6 +181,8 @@ def compute(days: int = 30, agent_ids=None, now_local: datetime.datetime | None 
         comps["listings"] = _comp(
             (actual / plan) if plan else None, actual, plan,
             f"{actual}/{plan}" if plan else "გეგმა არ ეკუთვნოდა")
+        # გამოქვეყნებული (COMPLETED) — გაგზავნილისგან გამიჯნულად; ქულაზე გავლენა არ აქვს (გეგმა გაგზავნილზეა)
+        comps["listings"]["published"] = sum(published_by_day.get((aid, _s(d)), 0) for d in dates)
         nwarn = sum(1 for w in warns if str(w.get("agent_id")) == aid
                     and crm_time.business_date_of_server_naive(w.get("created_at", "")) in dset)
         if day_scores or nwarn:
