@@ -301,6 +301,7 @@ async function api(path, opts) {
       : (body.error || "დაფიქსირდა შეცდომა");
     const err = new Error(msg);
     err.code = body.code || (res.status === 401 ? "auth_failed" : "");
+    err.data = body;   // დამატებითი ველები (მაგ. AI: მსგავსი ჩანაწერების სია); არსებული ქცევა უცვლელია
     throw err;
   }
   return body;
@@ -5701,6 +5702,11 @@ function tabsFor(role) {
     tabs = tabs.slice();
     tabs.push(SYS_TAB);
   }
+  // 🤖 AI ასისტენტი: სერვერი ამბობს, ჩართულია თუ არა და ვის რა უფლება აქვს (/api/ai/status); მენეჯერს ტაბი ჩართვამდეც ჩანს (ცოდნის ბაზის მოსამზადებლად)
+  if (state.aiAccess && (state.aiAccess.enabled || state.aiAccess.can_manage)) {
+    tabs = tabs.slice();
+    tabs.push(AI_TAB);
+  }
   // 💰 ფინანსები: მხოლოდ სერვერის მიერ დადასტურებულ ID-ს (ან ადმინს ინსტრუქციისთვის, სანამ ჯერ არავინ არის მითითებული)
   const fa = state.finAccess;
   if (fa && (fa.allowed || (fa.setup && role === "admin"))) {
@@ -5734,6 +5740,288 @@ function renderTabbar() {
   if (more) more.onclick = () => openMoreSheet(rest);
 }
 
+/* ================================================ Safe Home AI (შიდა ასისტენტი) ==========================
+   ახალი ტაბი „🤖 AI“ (ჩანს „☰ სხვა“-ში): ჩატი — ყველას; ცოდნის ბაზა / განსახილველი / დაშბორდი — მენეჯერებს (თიმლიდერი/ადმინი).
+   ყველა უფლება სერვერზეა (/api/ai/*); აქ მხოლოდ ჩვენებაა. არსებულ ტაბებს არ ეხება. */
+const AI_TAB = { id: "ai", label: "AI", icon: "🤖" };
+const AI_CATS = { policy: "პოლიტიკა/წესები", commission: "საკომისიო/თანამშრომლობა", legal: "იურიდიული", finance: "ფინანსური", procedure: "პროცედურა", crm_guide: "CRM გიდი", faq: "ხშირი კითხვა" };
+const AI_STATUS = { draft: ["დრაფტი", "amber"], approved: ["დამტკიცებული", "green"], retired: ["გაუქმებული", "gray"] };
+const AI_REASONS = [["wrong", "არასწორია"], ["incomplete", "არასრულია"], ["outdated", "მოძველებულია"], ["unclear", "გაუგებარია"]];
+const AI_TYPE_CLS = { policy: "green", system_data: "green", general: "amber", unverified: "red" };
+const AI_REVIEW_TYPE = { candidate: "🧑‍🏫 მენეჯერის პასუხი", unanswered: "❓ AI-მ ვერ უპასუხა", feedback: "👎 უკუკავშირი", conflict: "⚔️ წინააღმდეგობა" };
+if (!state.ai) state.ai = { sub: "chat", conv: "", msgs: [], busy: false, kbFilter: "draft", days: 30 };
+
+async function aiLoadAccess() {
+  try {
+    const a = await api("/api/ai/status");
+    const changed = JSON.stringify(a) !== JSON.stringify(state.aiAccess || null);
+    state.aiAccess = a;
+    if (changed) renderTabbar();
+  } catch (e) { /* ქსელი/წვდომა — ტაბი უბრალოდ არ გამოჩნდება */ }
+}
+
+function aiFmt(t) { return esc(t).replace(/\n/g, "<br>"); }
+function aiScroll() { const el = document.getElementById("aiMsgs"); if (el) el.scrollTop = el.scrollHeight; }
+
+async function renderAi(content) {
+  const a = state.aiAccess || {}, ai = state.ai;
+  const subs = [["chat", "💬 ჩატი"]].concat(a.can_manage ? [["kb", "📚 ცოდნა"], ["review", "🔎 განსახილველი"], ["dash", "📊 დაშბორდი"]] : []);
+  if (!subs.some((s) => s[0] === ai.sub)) ai.sub = "chat";
+  content.innerHTML = `<div class="chip-row ai-subs">${subs.map(([id, l]) => `<button class="chip ${ai.sub === id ? "sel" : ""}" data-aisub="${id}">${l}</button>`).join("")}</div><div id="aiBody"></div>`;
+  content.querySelectorAll("[data-aisub]").forEach((b) => { b.onclick = () => { ai.sub = b.dataset.aisub; renderAi(content); }; });
+  const body = document.getElementById("aiBody");
+  if (ai.sub === "chat") return aiChat(body);
+  if (ai.sub === "kb") return aiKb(body);
+  if (ai.sub === "review") return aiReview(body);
+  return aiDash(body);
+}
+
+/* ---------------------------------------------------------------- ჩატი */
+function aiBubble(m, i) {
+  if (m.role === "user") return `<div class="ai-msg user">${aiFmt(m.text)}</div>`;
+  const cls = AI_TYPE_CLS[m.answer_type] || "gray";
+  const src = (m.sources || []).map((s) => `<span class="ai-src">📎 ${esc(s.title || s.kb_id)}${s.version ? " · v" + esc(s.version) : ""}${s.effective_from ? " · " + esc(s.effective_from) : ""}</span>`).join("");
+  const fb = m.fb ? `<span class="muted">${m.fb === "up" ? "👍 მადლობა" : "✅ უკუკავშირი მივიღეთ"}</span>`
+    : `<button class="ai-act" data-aifb="${i}:up">👍</button><button class="ai-act" data-aifb="${i}:down">👎</button><button class="ai-act" data-aifb="${i}:report">⚠️ შეცდომაა</button>`;
+  const esc2 = m.escalated ? `<span class="muted">✅ მენეჯერს გადაეგზავნა</span>` : (m.msg_id ? `<button class="ai-act strong" data-aiesc="${i}">👤 მენეჯერს გადაუგზავნე</button>` : "");
+  const reasons = m.askReason ? `<div class="chip-row">${AI_REASONS.map(([k, l]) => `<button class="chip" data-aireason="${i}:${k}">${l}</button>`).join("")}</div>` : "";
+  return `<div class="ai-msg bot ${m.error ? "err" : ""}">${m.label ? `<div class="badge ${cls} ai-label">${esc(m.label)}</div>` : ""}<div>${aiFmt(m.text)}</div>
+    ${src ? `<div class="ai-srcs">${src}</div>` : ""}${m.msg_id ? `<div class="ai-acts">${fb}${esc2}</div>` : ""}${reasons}</div>`;
+}
+
+function aiChat(body) {
+  const a = state.aiAccess || {}, ai = state.ai;
+  if (!a.enabled) {
+    body.innerHTML = `<div class="card"><div class="empty">🤖 AI ასისტენტი ჯერ ჩართული არ არის.${a.can_manage ? "<br>ცოდნის ბაზის მომზადება უკვე შეგიძლიათ „📚 ცოდნა“ განყოფილებაში." : ""}</div></div>`;
+    return;
+  }
+  const draft = (document.getElementById("aiText") || {}).value || "";
+  const msgs = ai.msgs.map(aiBubble).join("") || `<div class="ai-hello">გამარჯობა! 👋 დამისვით კითხვა კომპანიის წესების, პროცედურების, CRM-ის ან თქვენი KPI/შეხვედრების/დავალებების შესახებ. ვპასუხობ ქართულად, რუსულად ან ინგლისურად. რასაც დამტკიცებული წყაროთი ვერ დავადასტურებ, პირდაპირ გეტყვით.</div>`;
+  body.innerHTML = `<div class="card ai-chat">
+    <div class="ai-top"><b>🤖 Safe Home AI</b><span class="muted">${esc(a.used_today || 0)}/${a.daily_limit ? esc(a.daily_limit) : "∞"} დღეს</span><button class="chip" id="aiNew" title="ახალი საუბარი">🆕</button><button class="chip" id="aiHist" title="ჩემი საუბრები">🕘</button></div>
+    <div id="aiHistBox"></div><div class="ai-msgs" id="aiMsgs">${msgs}</div>
+    <div class="ai-input"><textarea id="aiText" rows="2" maxlength="${esc(a.max_question_chars || 1500)}" placeholder="დაწერეთ კითხვა…"></textarea><button class="btn" id="aiSend" ${ai.busy ? "disabled" : ""}>➤</button></div>
+    <div class="muted ai-note">პასუხი კომპანიის წესად ითვლება მხოლოდ 📘 ნიშნით და წყაროთი. კლიენტის/მესაკუთრის ტელეფონს ნუ ჩაწერთ.</div></div>`;
+  document.getElementById("aiText").value = draft;
+  aiScroll();
+
+  const send = async () => {
+    const ta = document.getElementById("aiText"); const text = (ta.value || "").trim();
+    if (!text || ai.busy) return;
+    ai.msgs.push({ role: "user", text });
+    ai.msgs.push({ role: "assistant", text: "⏳ ვფიქრობ…" });
+    ai.busy = true; ta.value = ""; aiChat(body);
+    try {
+      const r = await api("/api/ai/ask", { method: "POST", body: JSON.stringify({ text, conv_id: ai.conv }) });
+      ai.conv = r.conv_id; ai.msgs.pop();
+      ai.msgs.push({ role: "assistant", text: r.answer, answer_type: r.answer_type, label: r.label, sources: r.sources, msg_id: r.msg_id, q: text, error: !!r.degraded });
+      if (state.aiAccess && r.usage) state.aiAccess.used_today = r.usage.used_today;
+    } catch (e) {
+      ai.msgs.pop();
+      ai.msgs.push({ role: "assistant", text: "⚠️ " + e.message, error: true });
+    }
+    ai.busy = false; aiChat(body);
+  };
+  document.getElementById("aiSend").onclick = send;
+  document.getElementById("aiText").onkeydown = (e) => { if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) send(); };
+  document.getElementById("aiNew").onclick = () => { ai.conv = ""; ai.msgs = []; aiChat(body); };
+  document.getElementById("aiHist").onclick = async () => {
+    const box = document.getElementById("aiHistBox");
+    if (box.innerHTML) { box.innerHTML = ""; return; }
+    try {
+      const r = await api("/api/ai/conversations");
+      box.innerHTML = r.items.length ? `<div class="ai-hist">${r.items.map((c) => `<button class="ai-hist-i" data-aiconv="${esc(c.conv_id)}">${esc(c.title || "საუბარი")}<span class="muted"> · ${esc((c.last_at || "").slice(0, 16))}</span></button>`).join("")}</div>` : `<div class="muted">ისტორია ცარიელია</div>`;
+      box.querySelectorAll("[data-aiconv]").forEach((b) => {
+        b.onclick = async () => {
+          const c = await api("/api/ai/conversations/" + encodeURIComponent(b.dataset.aiconv));
+          ai.conv = c.conv_id; let lastQ = "";
+          ai.msgs = c.messages.map((m) => {
+            if (m.role === "user") { lastQ = m.text; return { role: "user", text: m.text }; }
+            return { role: "assistant", text: m.text, answer_type: m.answer_type, label: m.label, sources: m.sources, msg_id: m.msg_id, q: lastQ, escalated: m.escalated };
+          });
+          aiChat(body);
+        };
+      });
+    } catch (e) { toast(e.message); }
+  };
+  body.querySelectorAll("[data-aifb]").forEach((b) => {
+    b.onclick = async () => {
+      const [i, rating] = b.dataset.aifb.split(":"); const m = ai.msgs[+i];
+      if (rating === "up") {
+        try { await api("/api/ai/feedback", { method: "POST", body: JSON.stringify({ msg_id: m.msg_id, rating }) }); m.fb = "up"; aiChat(body); } catch (e) { toast(e.message); }
+      } else { m.askReason = rating; aiChat(body); }
+    };
+  });
+  body.querySelectorAll("[data-aireason]").forEach((b) => {
+    b.onclick = async () => {
+      const [i, reason] = b.dataset.aireason.split(":"); const m = ai.msgs[+i];
+      try { await api("/api/ai/feedback", { method: "POST", body: JSON.stringify({ msg_id: m.msg_id, rating: m.askReason, reason }) }); m.fb = m.askReason; m.askReason = ""; aiChat(body); toast("მადლობა — მენეჯერები ნახავენ"); } catch (e) { toast(e.message); }
+    };
+  });
+  body.querySelectorAll("[data-aiesc]").forEach((b) => {
+    b.onclick = async () => {
+      const m = ai.msgs[+b.dataset.aiesc];
+      if (!confirm("კითხვა გადაეგზავნება მენეჯერს („კითხვები“ ტაბში მისი პასუხი გამოჩნდება). გავაგზავნო?")) return;
+      try { await api("/api/ai/escalate", { method: "POST", body: JSON.stringify({ msg_id: m.msg_id, text: m.q || "" }) }); m.escalated = true; aiChat(body); toast("გადაეგზავნა მენეჯერს ✅"); delete lazyCache.questions; } catch (e) { toast(e.message); }
+    };
+  });
+}
+
+/* ---------------------------------------------------------------- ცოდნის ბაზა (მენეჯერები) */
+function aiKbCard(x) {
+  const [st, cls] = AI_STATUS[x.status] || [x.status, "gray"];
+  const dates = (x.effective_from || x.effective_to) ? `მოქმედებს: ${esc(x.effective_from || "—")} → ${esc(x.effective_to || "ვადის გარეშე")}` : "";
+  const canPub = x.can_publish && (x.status === "draft" || x.pending_revision);
+  return `<div class="card ai-kb"><div class="ai-kb-h"><b>${esc(x.title)}</b></div>
+    <div class="chip-row"><span class="badge ${cls}">${st}</span><span class="badge gray">${esc(AI_CATS[x.category] || x.category)}</span><span class="badge gray">v${esc(x.version)}</span>${x.pending_revision ? `<span class="badge amber">✏️ ახალი ვერსია ელოდება</span>` : ""}${x.scope_team ? `<span class="badge gray">გუნდი: ${esc(x.scope_team)}</span>` : ""}${x.source === "legacy_regulations" ? `<span class="badge amber">ძველი ტექსტი — გადასამოწმებელი</span>` : ""}</div>
+    <div class="muted ai-kb-b">${esc(String(x.body || "").slice(0, 220))}${String(x.body || "").length > 220 ? "…" : ""}</div>
+    ${dates ? `<div class="muted">${dates}</div>` : ""}${x.approved_by ? `<div class="muted">დაამტკიცა: ${esc(x.approved_by)} · ${esc(String(x.approved_at || "").slice(0, 16))}</div>` : ""}
+    ${(x.status === "draft" || x.pending_revision) && !x.can_publish ? `<div class="muted">⚠️ გამოსაქვეყნებლად საჭიროა ადმინი (შეზღუდული კატეგორია ან სხვა გუნდი)</div>` : ""}
+    <div class="ai-btns"><button class="btn secondary" data-aikb="edit:${esc(x.kb_id)}">✏️</button>${canPub ? `<button class="btn" data-aikb="publish:${esc(x.kb_id)}">✅ გამოქვეყნება</button>` : ""}${(x.status === "draft" || x.pending_revision) ? `<button class="btn danger" data-aikb="reject:${esc(x.kb_id)}">↩️ უარყოფა</button>` : ""}${x.can_publish && x.status === "approved" ? `<button class="btn danger" data-aikb="retire:${esc(x.kb_id)}">🚫 გაუქმება</button>` : ""}<button class="btn secondary" data-aikb="versions:${esc(x.kb_id)}">📜</button></div></div>`;
+}
+
+async function aiKb(body) {
+  const ai = state.ai, a = state.aiAccess || {};
+  body.innerHTML = `<div class="card"><div class="empty">იტვირთება…</div></div>`;
+  let r;
+  try { r = await api("/api/ai/kb"); } catch (e) { body.innerHTML = `<div class="card"><div class="empty">⚠️ ${esc(e.message)}</div></div>`; return; }
+  const flt = ai.kbFilter, cnt = (f) => r.items.filter((x) => f === "all" || (f === "pending" ? x.pending_revision : x.status === f)).length;
+  const rows = r.items.filter((x) => flt === "all" || (flt === "pending" ? x.pending_revision : x.status === flt));
+  const F = [["draft", "დრაფტი"], ["pending", "ახალი ვერსია"], ["approved", "დამტკიცებული"], ["retired", "გაუქმებული"], ["all", "ყველა"]];
+  body.innerHTML = `<div class="card"><h2>📚 ცოდნის ბაზა <span class="cnt">${r.total}</span></h2>
+    <div class="muted">AI იყენებს მხოლოდ ✅ დამტკიცებულ, მოქმედ ჩანაწერებს. დრაფტი, გაუქმებული და ვადაგასული მას არ ჩანს. შეზღუდული კატეგორიების (${(r.restricted || []).map((k) => esc(AI_CATS[k] || k)).join(", ")}) გამოქვეყნება მხოლოდ ადმინს შეუძლია.</div>
+    <div class="chip-row">${F.map(([k, l]) => `<button class="chip ${flt === k ? "sel" : ""}" data-aiflt="${k}">${l} ${cnt(k)}</button>`).join("")}</div>
+    <div class="ai-btns"><button class="btn" id="aiKbNew">➕ ახალი ჩანაწერი</button>${a.is_admin ? `<button class="btn secondary" id="aiKbImp">📥 ძველი „ინსტრუქცია“ → დრაფტები</button>` : ""}</div></div>
+    ${rows.map(aiKbCard).join("") || `<div class="card"><div class="empty">ამ ფილტრით ჩანაწერი არ არის</div></div>`}`;
+  const reload = () => aiKb(body);
+  body.querySelectorAll("[data-aiflt]").forEach((b) => { b.onclick = () => { ai.kbFilter = b.dataset.aiflt; aiKb(body); }; });
+  document.getElementById("aiKbNew").onclick = () => aiKbEditor(null, r, reload);
+  const imp = document.getElementById("aiKbImp");
+  if (imp) imp.onclick = async () => {
+    if (!confirm("Mini App-ის ძველი „ინსტრუქცია/წესები“ ტექსტი ცოდნის ბაზაში შევა როგორც დრაფტები (დაუმტკიცებელი). გავაგრძელო?")) return;
+    try { const x = await api("/api/ai/kb/import-legacy", { method: "POST", body: "{}" }); toast(`შემოვიდა ${x.created}, გამოტოვდა ${x.skipped}`); reload(); } catch (e) { toast(e.message); }
+  };
+  body.querySelectorAll("[data-aikb]").forEach((b) => {
+    b.onclick = () => {
+      const [act, id] = b.dataset.aikb.split(":"); const x = r.items.find((y) => y.kb_id === id);
+      if (act === "edit") aiKbEditor(x, r, reload);
+      else if (act === "versions") aiKbVersions(id);
+      else aiKbAct(act, id, reload);
+    };
+  });
+}
+
+async function aiKbAct(act, id, reload) {
+  const msgs = { publish: "გამოვაქვეყნო? ამის შემდეგ AI ამ ტექსტს კომპანიის წესად გამოიყენებს.", reject: "უარვყო დრაფტი/ახალი ვერსია?", retire: "გავაუქმო? AI ამ წესს აღარ გამოიყენებს (ისტორია დარჩება)." };
+  if (!confirm(msgs[act])) return;
+  try {
+    let reason = "";
+    if (act === "retire" || act === "reject") reason = (window.prompt ? window.prompt("მიზეზი (არასავალდებულო):", "") : "") || "";
+    try {
+      await api(`/api/ai/kb/${encodeURIComponent(id)}/${act}`, { method: "POST", body: JSON.stringify({ reason }) });
+    } catch (e) {
+      if (act === "publish" && e.code === "similar") {
+        const s = ((e.data || {}).similar || []).map((x) => `• ${x.title}${x.numbers_differ ? " (რიცხვები განსხვავდება!)" : ""}`).join("\n");
+        if (!confirm("მსგავსი დამტკიცებული ჩანაწერი უკვე არსებობს:\n" + s + "\n\nმაინც გამოვაქვეყნო? (ორივე მოქმედი დარჩება — საჭიროების შემთხვევაში ძველი გააუქმეთ)")) return;
+        await api(`/api/ai/kb/${encodeURIComponent(id)}/publish`, { method: "POST", body: JSON.stringify({ confirm_similar: true }) });
+      } else throw e;
+    }
+    toast("შესრულდა ✅"); reload();
+  } catch (e) { toast(e.message); }
+}
+
+async function aiKbVersions(id) {
+  try {
+    const d = await api("/api/ai/kb/" + encodeURIComponent(id));
+    const rows = d.versions.slice().reverse().map((v) => `<div class="field"><div class="k">v${esc(v.version)} · ${esc(v.status)} · ${esc(String(v.at || "").slice(0, 16))} · შეცვალა: ${esc(v.changed_by || "—")}${v.approved_by ? " · დაამტკიცა: " + esc(v.approved_by) : ""}${v.reason ? " · " + esc(v.reason) : ""}</div><div class="v">${aiFmt(v.body)}</div></div>`).join("");
+    openDetail("📜 ვერსიები — " + d.entry.title, [], rows);
+  } catch (e) { toast(e.message); }
+}
+
+function aiKbEditor(x, ctx, reload, prefill) {
+  const v = x || prefill || {}, backdrop = document.getElementById("modalBackdrop"), box = document.getElementById("modalBox");
+  const cats = Object.keys(ctx && ctx.categories ? ctx.categories : AI_CATS);
+  box.innerHTML = `<h3>${x ? "✏️ რედაქტირება" : "➕ ახალი ჩანაწერი"}<button class="close" id="modalClose">✕</button></h3>
+    ${x && x.status === "approved" ? `<div class="muted">მოქმედი ვერსია გამოქვეყნებამდე უცვლელი დარჩება — ცვლილება ახალ ვერსიად შეინახება.</div>` : ""}
+    <div class="ai-form"><label>სათაური<input id="aiKbTitle" maxlength="160" value="${esc(v.title || "")}"></label>
+    <label>კატეგორია<select id="aiKbCat">${cats.map((k) => `<option value="${k}" ${(v.category || "policy") === k ? "selected" : ""}>${esc(AI_CATS[k] || k)}</option>`).join("")}</select></label>
+    <label>ტექსტი (რას უნდა ეყრდნობოდეს AI)<textarea id="aiKbBody" rows="7" maxlength="6000">${esc(v.body || "")}</textarea></label>
+    <div class="ai-form-row"><label>მოქმედებს (დან)<input type="date" id="aiKbFrom" value="${esc(v.effective_from || "")}"></label><label>(მდე)<input type="date" id="aiKbTo" value="${esc(v.effective_to || "")}"></label></div>
+    <label>ენა<select id="aiKbLang">${[["any", "ნებისმიერი"], ["ka", "ქართული"], ["ru", "რუსული"], ["en", "ინგლისური"]].map(([k, l]) => `<option value="${k}" ${(v.language || "any") === k ? "selected" : ""}>${l}</option>`).join("")}</select></label>
+    <label>გუნდი (ცარიელი = ყველა)<input id="aiKbScope" value="${esc(v.scope_team || "")}"></label>
+    <label>პასუხისმგებელი<input id="aiKbOwner" value="${esc(v.owner || "")}" maxlength="80"></label>
+    <button class="btn" id="aiKbSave">💾 შენახვა (დრაფტად)</button></div>`;
+  backdrop.hidden = false;
+  document.getElementById("modalClose").onclick = closeDetail;
+  backdrop.onclick = (e) => { if (e.target === backdrop) closeDetail(); };
+  document.getElementById("aiKbSave").onclick = async () => {
+    const data = { title: document.getElementById("aiKbTitle").value, category: document.getElementById("aiKbCat").value, body: document.getElementById("aiKbBody").value,
+      effective_from: document.getElementById("aiKbFrom").value, effective_to: document.getElementById("aiKbTo").value, language: document.getElementById("aiKbLang").value,
+      scope_team: document.getElementById("aiKbScope").value, owner: document.getElementById("aiKbOwner").value };
+    try {
+      if (prefill && prefill.item_id) await api(`/api/ai/review/${encodeURIComponent(prefill.item_id)}/draft`, { method: "POST", body: JSON.stringify(data) });
+      else await api(x ? "/api/ai/kb/" + encodeURIComponent(x.kb_id) : "/api/ai/kb", { method: "POST", body: JSON.stringify(data) });
+      closeDetail(); toast("შეინახა დრაფტად ✅ — გამოსაქვეყნებლად დააჭირეთ „გამოქვეყნება“"); reload();
+    } catch (e) { toast(e.message); }
+  };
+}
+
+/* ---------------------------------------------------------------- განსახილველი რიგი */
+async function aiReview(body) {
+  body.innerHTML = `<div class="card"><div class="empty">იტვირთება…</div></div>`;
+  let r;
+  try { r = await api("/api/ai/review"); } catch (e) { body.innerHTML = `<div class="card"><div class="empty">⚠️ ${esc(e.message)}</div></div>`; return; }
+  const card = (i) => `<div class="card ai-rv"><div class="chip-row"><span class="badge gray">${AI_REVIEW_TYPE[i.type] || esc(i.type)}</span>${+i.similar_count > 1 ? `<span class="badge amber">×${esc(i.similar_count)} მსგავსი</span>` : ""}${i.team ? `<span class="badge gray">${esc(i.team)}</span>` : ""}</div>
+    <div class="ai-rv-q"><b>${aiFmt(i.question_text)}</b></div>
+    ${i.draft_body ? `<div class="muted ai-rv-a">${i.type === "candidate" ? "მენეჯერის პასუხი" : "AI-ს პასუხი"}: ${aiFmt(String(i.draft_body).slice(0, 500))}</div>` : ""}${i.note ? `<div class="muted">${esc(i.note)}</div>` : ""}
+    <div class="ai-btns"><button class="btn" data-aidraft="${esc(i.item_id)}">📝 დრაფტად გადაქცევა</button><button class="btn secondary" data-aidismiss="${esc(i.item_id)}">🗑 დახურვა</button></div></div>`;
+  body.innerHTML = `<div class="card"><h2>🔎 განსახილველი <span class="cnt">${r.total}</span></h2>
+    <div class="muted">აქ ხვდება: მენეჯერის პასუხები (კანდიდატები), კითხვები, რომლებზეც AI-მ ვერ უპასუხა, და 👎 უკუკავშირი. <b>არაფერი ავტომატურად არ ქვეყნდება</b> — დრაფტად გადაქცევა და გამოქვეყნება თქვენი გადაწყვეტილებაა. ტელეფონები ამოღებულია.</div>
+    <div class="chip-row">${Object.keys(AI_REVIEW_TYPE).filter((k) => (r.counts || {})[k]).map((k) => `<span class="badge gray">${AI_REVIEW_TYPE[k]}: ${r.counts[k]}</span>`).join("")}</div></div>
+    ${r.items.map(card).join("") || `<div class="card"><div class="empty">განსახილველი არაფერია 🎉</div></div>`}`;
+  body.querySelectorAll("[data-aidraft]").forEach((b) => {
+    b.onclick = () => {
+      const i = r.items.find((y) => y.item_id === b.dataset.aidraft);
+      aiKbEditor(null, null, () => aiReview(body), { item_id: i.item_id, title: i.draft_title || i.question_text, body: i.type === "candidate" ? i.draft_body : "", category: i.category || "faq" });
+    };
+  });
+  body.querySelectorAll("[data-aidismiss]").forEach((b) => {
+    b.onclick = async () => {
+      if (!confirm("დავხურო? (დახურული ჩანაწერი აღარ გამოჩნდება)")) return;
+      try { await api(`/api/ai/review/${encodeURIComponent(b.dataset.aidismiss)}/dismiss`, { method: "POST", body: "{}" }); aiReview(body); } catch (e) { toast(e.message); }
+    };
+  });
+}
+
+/* ---------------------------------------------------------------- დაშბორდი */
+async function aiDash(body) {
+  const ai = state.ai;
+  body.innerHTML = `<div class="card"><div class="empty">იტვირთება…</div></div>`;
+  let d;
+  try { d = await api("/api/ai/dashboard?days=" + ai.days); } catch (e) { body.innerHTML = `<div class="card"><div class="empty">⚠️ ${esc(e.message)}</div></div>`; return; }
+  const T = d.totals, Q = d.quality, K = d.knowledge, fb = d.feedback.counts;
+  const list = (rows, empty) => rows && rows.length ? rows.map((x) => `<div class="ai-li"><span>${esc(x.question)}</span><b>×${esc(x.count)}</b></div>`).join("") : `<div class="muted">${empty}</div>`;
+  body.innerHTML = `<div class="chip-row ai-subs">${[7, 30, 90].map((n) => `<button class="chip ${ai.days === n ? "sel" : ""}" data-aidays="${n}">${n} დღე</button>`).join("")}</div>
+    <div class="card"><h2>📊 გამოყენება</h2><div class="ai-kpis"><div><b>${T.questions}</b><span>კითხვა</span></div><div><b>${T.answered}</b><span>პასუხი</span></div><div><b>${T.no_answer}</b><span>ვერ უპასუხა</span></div><div><b>${T.escalated}</b><span>მენეჯერთან</span></div><div><b>${T.errors}</b><span>შეცდომა</span></div></div>
+      <div class="muted">ტიპები: ${Object.entries(T.by_type || {}).map(([k, n]) => `${esc(k)} ${n}`).join(" · ") || "—"}</div>
+      <div class="muted">სიჩქარე: საშუალო ${Q.avg_latency_ms} მწ · p95 ${Q.p95_latency_ms} მწ${Q.helpful_pct != null ? ` · სასარგებლო ${Q.helpful_pct}%` : ""}</div></div>
+    ${d.cost ? `<div class="card"><h2>💲 ხარჯი (შეფასება)</h2><div class="muted">პერიოდი: $${esc(d.cost.total_usd)} · ამ თვეში: $${esc(d.cost.month_usd)}${d.cost.monthly_budget_usd ? ` / ბიუჯეტი $${esc(d.cost.monthly_budget_usd)}` : ""} · ტოკენები: ${esc(d.cost.tokens_in)} / ${esc(d.cost.tokens_out)}</div>
+      ${d.cost.by_user.map((u) => `<div class="ai-li"><span>${esc(u.user)}</span><b>$${esc(u.cost_usd)} · ${esc(u.requests)}</b></div>`).join("")}<div class="muted">რეალური ხარჯი — პროვაიდერის ანგარიშში.</div></div>` : ""}
+    <div class="card"><h2>🔥 ხშირი კითხვები</h2>${list(d.top_questions, "მონაცემი ჯერ არ არის")}</div>
+    <div class="card"><h2>❓ AI-მ ვერ უპასუხა</h2>${list(d.unanswered, "არცერთი 🎉")}</div>
+    <div class="card"><h2>💡 FAQ-ის შეთავაზება</h2><div class="muted">ხშირი კითხვა, რომელსაც ბაზა არ ფარავს. პასუხს თქვენ წერთ და ამტკიცებთ.</div>${d.faq_suggestions.length ? d.faq_suggestions.map((x, i) => `<div class="ai-li"><span>${esc(x.question)}</span><b>×${esc(x.count)}</b><button class="chip" data-aifaq="${i}">📝</button></div>`).join("") : `<div class="muted">ახალი შეთავაზება არ არის</div>`}</div>
+    <div class="card"><h2>👍👎 უკუკავშირი</h2><div class="muted">👍 ${fb.up} · 👎 ${fb.down} · ⚠️ ${fb.report} ${Object.entries(d.feedback.reasons || {}).map(([k, n]) => `· ${esc((AI_REASONS.find((r) => r[0] === k) || [k, k])[1])} ${n}`).join(" ")}</div>
+      ${d.feedback.recent.map((x) => `<div class="ai-li col"><span><b>${esc(x.question)}</b></span><span class="muted">${esc(x.answer)}${x.comment ? " — " + esc(x.comment) : ""}</span></div>`).join("")}</div>
+    <div class="card"><h2>📚 ცოდნის ბაზის ჯანმრთელობა</h2><div class="muted">დამტკიცებული ${K.approved} · დრაფტი ${K.drafts} · გაუქმებული ${K.retired} · განსახილველი: ${Object.entries(d.review_open || {}).map(([k, n]) => `${esc(AI_REVIEW_TYPE[k] || k)} ${n}`).join(" · ")}</div>
+      ${K.conflicts.length ? `<div class="ai-warn">⚔️ შესაძლო წინააღმდეგობა:<br>${K.conflicts.map((c) => `• ${esc(c.a.title)} ↔ ${esc(c.b.title)}`).join("<br>")}</div>` : `<div class="muted">წინააღმდეგობა არ ჩანს</div>`}
+      ${K.expiring.length ? `<div class="ai-warn">⏳ მალე იწურება:<br>${K.expiring.map((c) => `• ${esc(c.title)} (${esc(c.effective_to)})`).join("<br>")}</div>` : ""}
+      ${K.expired.length ? `<div class="ai-warn">⌛ ვადაგასული (AI მათ აღარ იყენებს):<br>${K.expired.map((c) => `• ${esc(c.title)} (${esc(c.effective_to)})`).join("<br>")}</div>` : ""}</div>`;
+  body.querySelectorAll("[data-aidays]").forEach((b) => { b.onclick = () => { ai.days = +b.dataset.aidays; aiDash(body); }; });
+  body.querySelectorAll("[data-aifaq]").forEach((b) => {
+    b.onclick = () => aiKbEditor(null, null, () => { state.ai.sub = "kb"; state.ai.kbFilter = "draft"; renderAi(document.getElementById("content")); }, { title: d.faq_suggestions[+b.dataset.aifaq].question, body: "", category: "faq" });
+  });
+}
+
 async function renderContent() {
   const content = document.getElementById("content");
   const d = state.data;
@@ -5745,6 +6033,7 @@ async function renderContent() {
     if (tab === "finance") { await renderFinance(content); return; }
     if (tab === "hub") { await renderHub(content); return; }
     if (tab === "system") { await renderSystem(content); return; }
+    if (tab === "ai") { await renderAi(content); return; }
     if (LAZY_ENDPOINTS[tab]) {
       if (!lazyCache[tab]) {
         content.innerHTML = `<div class="card"><div class="empty">იტვირთება…</div></div>`;
@@ -5875,6 +6164,7 @@ async function load() {
     renderRoleSwitch(hasAgent, hasAdmin);
     renderContent();
     finLoadAccess();
+    aiLoadAccess();
   } catch (e) {
     document.getElementById("content").innerHTML =
       `<div class="card"><div class="empty">⚠️ ${esc(e.message)}</div></div>`;

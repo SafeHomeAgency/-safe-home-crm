@@ -146,6 +146,9 @@ RATE_LIMITS = {
     "listings_write": (30, 60),    # Property Hub: backfill/ადმინის ფლაგები
     "hub_read": (240, 60),         # Property Hub: შეხვედრების სია/სტატისტიკა
     "hub_write": (40, 60),         # Property Hub: შეხვედრის შექმნა/დადასტურება/სტატუსი
+    "ai_ask": (8, 60),             # Safe Home AI: კითხვა (მომხმარებელზე; ყოველი კითხვა ფასიანია)
+    "ai_read": (120, 60),          # Safe Home AI: ისტორია/ცოდნის ბაზა/დაშბორდი (წაკითხვა)
+    "ai_write": (40, 60),          # Safe Home AI: უკუკავშირი, ცოდნის ბაზის რედაქტირება/დამტკიცება
 }
 RATE_LIMIT_ENABLED = os.environ.get("RATE_LIMIT_ENABLED", "1").strip().lower() not in ("0", "false", "no")
 
@@ -285,3 +288,33 @@ def validate():
             "აკლია environment variable-ები: " + ", ".join(missing) +
             "\nიხილეთ README.md, ნაბიჯი 5 (Deploy)."
         )
+
+
+# --- Safe Home AI (შიდა ასისტენტი) -------------------------------------------
+# AI_ENABLED=0 (ნაგულისხმევი) — ჩატი გამორთულია; ცოდნის ბაზის მართვა (დრაფტი/დამტკიცება) მენეჯერებს მაინც შეუძლიათ.
+# გასაღები მხოლოდ Railway-ის env-ში (ANTHROPIC_API_KEY); ფრონტში/ფაილში არასდროს.
+def _flag(name: str, default: str = "0") -> bool:
+    return os.environ.get(name, default).strip().lower() in ("1", "true", "yes", "on")
+
+
+AI_ENABLED = _flag("AI_ENABLED", "0")
+AI_PROVIDER = os.environ.get("AI_PROVIDER", "anthropic").strip().lower()
+ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "").strip()
+AI_MODEL = os.environ.get("AI_MODEL", "claude-sonnet-5-5").strip()
+AI_EFFORT = os.environ.get("AI_EFFORT", "medium").strip().lower()          # low|medium|high — პასუხის სიღრმე/ხარჯი
+AI_MAX_OUTPUT_TOKENS = int(os.environ.get("AI_MAX_OUTPUT_TOKENS", "1800"))
+AI_TIMEOUT_SECONDS = float(os.environ.get("AI_TIMEOUT_SECONDS", "45"))
+AI_MAX_QUESTION_CHARS = int(os.environ.get("AI_MAX_QUESTION_CHARS", "1500"))
+AI_HISTORY_TURNS = int(os.environ.get("AI_HISTORY_TURNS", "6"))             # წინა შეტყობინებები, რაც მოდელს გადაეცემა
+AI_DAILY_LIMIT_PER_AGENT = int(os.environ.get("AI_DAILY_LIMIT_PER_AGENT", "40"))   # 0 = შეუზღუდავი
+AI_MONTHLY_BUDGET_USD = float(os.environ.get("AI_MONTHLY_BUDGET_USD", "50"))        # 0 = შეუზღუდავი; ბიუჯეტის ამოწურვისას AI ითიშება
+AI_RETENTION_DAYS = int(os.environ.get("AI_RETENTION_DAYS", "90"))          # საუბრების შენახვის ვადა
+# ფასი $ / 1 მლნ ტოკენზე (შეფასებისთვის; ცარიელი = ცნობილი მოდელის ცხრილიდან). გადაამოწმეთ ოფიციალურ ფასებთან.
+AI_PRICE_IN_PER_MTOK = os.environ.get("AI_PRICE_IN_PER_MTOK", "").strip()
+AI_PRICE_OUT_PER_MTOK = os.environ.get("AI_PRICE_OUT_PER_MTOK", "").strip()
+# ცოდნის ბაზა: ამ კატეგორიების გამოქვეყნება მხოლოდ ადმინს შეუძლია (თიმლიდერს — დანარჩენის)
+AI_KB_RESTRICTED_CATEGORIES = {
+    x.strip().lower() for x in os.environ.get("AI_KB_RESTRICTED_CATEGORIES", "commission,legal,finance").split(",") if x.strip()
+}
+AI_KB_TEAMLEAD_CAN_PUBLISH = _flag("AI_KB_TEAMLEAD_CAN_PUBLISH", "1")
+AI_CANDIDATE_LOOKBACK_DAYS = int(os.environ.get("AI_CANDIDATE_LOOKBACK_DAYS", "60"))   # მენეჯერის პასუხები კანდიდატად ამ პერიოდიდან

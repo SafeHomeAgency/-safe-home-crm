@@ -3219,6 +3219,34 @@ import criteria_store  # noqa: E402
 criteria_api.register(app, authed=_authed_agent, audit=_audit, rate_limited=rate_limited)
 
 
+# Safe Home AI (შიდა ასისტენტი): ახალი endpoint-ები `/api/ai/...`; არსებულ `/api/questions*`-ს არ ცვლის. AI_ENABLED=0 (ნაგულისხმევი) — ჩატი გამორთულია.
+import ai_api  # noqa: E402
+
+
+def _create_manager_question(agent: dict, text: str):
+    """AI-დან „მენეჯერს გადაუგზავნე“: იგივე ჩანაწერი და შეტყობინება, რასაც `/api/questions` POST აკეთებს (იმ endpoint-ის კოდი უცვლელია)."""
+    question_id = sheets.create_question(agent["agent_id"], text)
+    notify_text = f"❓ ახალი კითხვა — {agent.get('name')}:\n{text}"
+    notified: set = set()
+    for admin_id in config.ADMIN_CHAT_IDS:
+        _send_telegram_message(admin_id, notify_text)
+        notified.add(admin_id)
+    team = str(agent.get("team", "")).strip()
+    if team:
+        for a in sheets.get_agents():
+            if str(a.get("role", "")).strip() == "team_lead" and str(a.get("team", "")).strip() == team:
+                chat_id = a.get("telegram_chat_id")
+                if chat_id and int(chat_id) not in notified:
+                    _send_telegram_message(int(chat_id), notify_text)
+                    notified.add(int(chat_id))
+    return question_id
+
+
+ai_api.register(
+    app, authed=_authed_agent, audit=_audit, rate_limited=rate_limited, get_agents=lambda: sheets.get_agents(),
+    get_questions=lambda: sheets.get_questions(), create_question=_create_manager_question, chat_id=_requester_chat_id)
+
+
 def _agent_chat_id(agent_id):
     a = next((x for x in sheets.get_agents() if str(x.get("agent_id")) == str(agent_id)), None)
     try:

@@ -918,3 +918,47 @@ button.chip { cursor: pointer; font-family: inherit; }
 .hub-dup { background: rgba(245, 158, 66, .18); color: #f59e42; border-radius: 99px; padding: 1px 7px; font-size: 11px; font-weight: 700; }
 .hub-q { text-align: center; margin-top: 6px; color: #f59e42; }
 .hub-chk { display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; }
+
+/* ================================================ Safe Home AI (ახალი; არსებულ სტილებს არ ცვლის) ================================================ */
+.ai-subs { margin: 0 0 10px; }
+.ai-chat .ai-top { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+.ai-chat .ai-top .muted { margin-left: auto; font-size: 12px; }
+.ai-msgs { max-height: 52vh; min-height: 140px; overflow-y: auto; display: flex; flex-direction: column; gap: 9px; padding: 4px 2px 8px; }
+.ai-hello { color: var(--hint); font-size: 13.5px; line-height: 1.5; padding: 6px 2px; }
+.ai-msg { max-width: 94%; padding: 10px 12px; border-radius: 14px; font-size: 14px; line-height: 1.5; word-break: break-word; }
+.ai-msg.user { align-self: flex-end; background: rgba(201, 162, 39, .16); border: 1px solid rgba(201, 162, 39, .32); }
+.ai-msg.bot { align-self: flex-start; background: rgba(147, 166, 188, .09); border: 1px solid var(--hairline); }
+.ai-msg.err { border-color: rgba(242, 109, 109, .4); }
+.ai-label { margin-bottom: 6px; font-size: 11.5px; }
+.ai-srcs { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.ai-src { font-size: 11.5px; padding: 3px 8px; border-radius: 999px; background: rgba(52, 211, 153, .1); color: var(--green); border: 1px solid rgba(52, 211, 153, .25); }
+.ai-acts { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 8px; }
+.ai-act { background: transparent; border: 1px solid var(--hairline); color: var(--text); border-radius: 999px; padding: 5px 10px; font-size: 12.5px; cursor: pointer; }
+.ai-act.strong { border-color: rgba(201, 162, 39, .5); color: var(--gold-light); }
+.ai-input { display: flex; gap: 8px; align-items: flex-end; margin-top: 8px; }
+.ai-input textarea, .ai-form input, .ai-form select, .ai-form textarea {
+  width: 100%; background: rgba(10, 20, 32, .6); color: var(--text); border: 1px solid var(--hairline); border-radius: 12px; padding: 10px 12px; font: inherit; font-size: 14px;
+}
+.ai-input textarea { resize: none; flex: 1; }
+.ai-input .btn { flex: none; width: 52px; padding: 12px 0; margin: 0; }
+.ai-note { margin-top: 8px; font-size: 11.5px; }
+.ai-hist { display: flex; flex-direction: column; gap: 4px; margin-bottom: 8px; }
+.ai-hist-i { text-align: left; background: rgba(147, 166, 188, .08); border: 1px solid var(--hairline); border-radius: 10px; color: var(--text); padding: 8px 10px; font-size: 13px; cursor: pointer; }
+.ai-kb .ai-kb-h { font-size: 15px; margin-bottom: 6px; }
+.ai-kb-b { margin: 8px 0 4px; font-size: 13px; }
+.ai-btns { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+.ai-btns .btn { padding: 9px 12px; font-size: 13px; margin: 0; flex: 1 1 auto; }
+.ai-form { display: flex; flex-direction: column; gap: 10px; margin-top: 10px; }
+.ai-form label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--hint); font-weight: 600; }
+.ai-form-row { display: flex; gap: 8px; }
+.ai-form-row label { flex: 1; }
+.ai-rv-q { margin: 8px 0 4px; font-size: 14px; }
+.ai-rv-a { font-size: 12.5px; margin: 4px 0; }
+.ai-kpis { display: grid; grid-template-columns: repeat(5, 1fr); gap: 6px; margin: 8px 0; text-align: center; }
+.ai-kpis b { display: block; font-size: 20px; color: var(--gold-light); }
+.ai-kpis span { font-size: 10.5px; color: var(--hint); }
+.ai-li { display: flex; align-items: center; gap: 8px; justify-content: space-between; padding: 7px 0; border-bottom: 1px solid var(--hairline); font-size: 13px; }
+.ai-li:last-child { border-bottom: none; }
+.ai-li.col { flex-direction: column; align-items: flex-start; gap: 2px; }
+.ai-warn { margin-top: 8px; padding: 9px 11px; border-radius: 12px; background: rgba(245, 185, 66, .1); border: 1px solid rgba(245, 185, 66, .3); font-size: 12.5px; line-height: 1.5; }
+@media (max-width: 380px) { .ai-kpis { grid-template-columns: repeat(3, 1fr); } .ai-msg { max-width: 100%; } }
