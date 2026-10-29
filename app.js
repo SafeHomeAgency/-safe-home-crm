@@ -2501,6 +2501,7 @@ function renderMyHomeJobs(rows, role) {
         <input id="mhPrice" type="text" inputmode="decimal" placeholder="საბოლოო ფასი (არასავალდებულო)">
         <textarea id="mhNotes" placeholder="შეზღუდვები / შენიშვნა — გადავა ბაზაში (არასავალდებულო). ss.ge-ზე დადებისას: თუ განცხადების მისამართს სახლის ნომერი არ აქვს, ჩაიწერება „2“ (სხვა ნომრისთვის დაწერეთ აქ „სახლი: 12“)"></textarea>
         <label style="display:flex;align-items:center;gap:8px"><input id="mhNoPets" type="checkbox" style="width:auto"> 🐾 მესაკუთრე ცხოველებს არ უშვებს</label>
+        <label style="display:flex;align-items:center;gap:8px"><input id="mhTurkeys" type="checkbox" style="width:auto"> 🦃 ინდაურები დაიშვება</label>
         <button class="btn" id="mhSubmit">დამატება</button>
       </div>
     </div>`;
@@ -2580,7 +2581,9 @@ function bindMyHomeJobsActions() {
       // ცხოველების თიქი შენიშვნის ბოლოს ცალკე სტრიქონად იწერება — worker (tg_export.py)
       // აქედან ავსებს ბაზის "pets" სვეტს; სერვერის/ბაზის ცვლილება არ სჭირდება.
       const petsLine = "ცხოველები: " + (document.getElementById("mhNoPets").checked ? "არა" : "კი");
-      const notes = [(document.getElementById("mhNotes").value || "").trim(), petsLine].filter(Boolean).join("\n");
+      // ინდაურების თიქი: მონიშნულია -> "ინდაურები: კი"; არ არის მონიშნული -> არაფერი იწერება
+      const turkeysLine = document.getElementById("mhTurkeys").checked ? "ინდაურები: კი" : "";
+      const notes = [(document.getElementById("mhNotes").value || "").trim(), petsLine, turkeysLine].filter(Boolean).join("\n");
       const listingSource = (document.getElementById("mhSource") || {}).value || "myhome";
       const publishTarget = (document.getElementById("mhTarget") || {}).value || "myhome";
       if (listingSource === "ssge") {
@@ -4674,7 +4677,7 @@ const HUB_CITIES = { თბილისი: [41.7151, 44.8271, 12], ბათუ
 const HUB_FR_RANK = { green: 0, orange: 1, red: 2, grey: 3 };
 state.hub = state.hub || {
   q: "", deal: "", ptype: "", rooms: [], pmin: "", pmax: "", district: "", fresh: [], mine: false, favOnly: false, agent: "", sort: "new",
-  bedrooms: [], amin: "", amax: "", fmin: "", fmax: "", tmin: "", tmax: "", notFirst: false, notLast: false, pets: "", myDist: false, myDistNames: null, lead: null,
+  bedrooms: [], amin: "", amax: "", fmin: "", fmax: "", tmin: "", tmax: "", notFirst: false, notLast: false, pets: "", turkeys: false, myDist: false, myDistNames: null, lead: null,
   view: "list", page: 1, items: [], total: 0, facets: null, meta: null, seq: 0, panel: false, loading: false, err: "", ins: null, insOpen: false,
   map: null, mapSeq: 0,
 };
@@ -4707,12 +4710,13 @@ function hubSmart(text, districts) {
   let s = " " + String(text || "").toLowerCase() + " ";
   const out = { rooms: [], pmax: "", pmin: "", deal: "", district: "", chips: [], q: "" };
   s = s.replace(/(\d{1,2})\s*-?\s*(ოთახ\S*|rooms?|rm)(?=\s)/g, (m0, n) => { out.rooms.push(n); out.chips.push("🛏 " + n + " ოთახი"); return " "; });
-  out.bedrooms = []; out.amin = ""; out.amax = ""; out.pets = "";
+  out.bedrooms = []; out.amin = ""; out.amax = ""; out.pets = ""; out.turkeys = false;
   s = s.replace(/(\d{1,2})\s*-?\s*(საძინებელ\S*|bedrooms?|bd)(?=\s)/g, (m0, n) => { out.bedrooms.push(n); out.chips.push("🛌 " + n + " საძინებელი"); return " "; });
   s = s.replace(/(\d{2,4})\s*-?\s*(კვ\S*|მ²|მ2|sqm|m2)\s*-?\s*(მდე|დან)?(?=\s)/g, (m0, n, u, tail) => {
     if (tail === "მდე") { out.amax = n; out.chips.push("📐 ≤ " + n + " მ²"); } else { out.amin = n; out.chips.push("📐 ≥ " + n + " მ²"); }
     return " ";
   });
+  if (/ინდაურ/.test(s)) { out.turkeys = true; out.chips.push("🦃 ინდაურებით"); s = s.replace(/ინდაურ\S*/g, " "); }
   if (/ცხოველ/.test(s)) { out.pets = "yes"; out.chips.push("🐾 ცხოველებით"); s = s.replace(/ცხოველ\S*/g, " "); }
   const price = (m0, n, tail) => {
     const v = hubNum(n); if (!v) return m0;
@@ -4738,11 +4742,11 @@ function hubEff() {                        // ეფექტური ფილ
   const h = state.hub, sm = hubSmart(h.q, (h.facets && h.facets.districts) || []);
   return { sm, q: sm.q, deal: sm.deal || h.deal, district: sm.district || h.district, rooms: sm.rooms.length ? sm.rooms : h.rooms,
            pmax: sm.pmax || h.pmax, pmin: sm.pmin || h.pmin, bedrooms: sm.bedrooms.length ? sm.bedrooms : h.bedrooms,
-           amin: sm.amin || h.amin, amax: sm.amax || h.amax, pets: sm.pets || h.pets };
+           amin: sm.amin || h.amin, amax: sm.amax || h.amax, pets: sm.pets || h.pets, turkeys: sm.turkeys || h.turkeys };
 }
 function hubActiveCount() {                // ფილტრების რაოდენობა ⚙️ ღილაკის ბეჯისთვის
   const h = state.hub;
-  return [h.ptype, h.district, h.pmin, h.pmax, h.amin, h.amax, h.fmin, h.fmax, h.tmin, h.tmax, h.pets].filter(Boolean).length
+  return [h.ptype, h.district, h.pmin, h.pmax, h.amin, h.amax, h.fmin, h.fmax, h.tmin, h.tmax, h.pets, h.turkeys].filter(Boolean).length
     + (h.rooms.length ? 1 : 0) + (h.bedrooms.length ? 1 : 0) + (h.notFirst ? 1 : 0) + (h.notLast ? 1 : 0) + (h.myDist ? 1 : 0);
 }
 function hubQS(page, forMap) {
@@ -4752,6 +4756,7 @@ function hubQS(page, forMap) {
   add("rooms", e.rooms); add("price_min", e.pmin); add("price_max", e.pmax); add("freshness", h.fresh); add("agent_id", h.agent);
   add("bedrooms", e.bedrooms); add("area_min", e.amin); add("area_max", e.amax); add("floor_min", h.fmin); add("floor_max", h.fmax);
   add("floors_min", h.tmin); add("floors_max", h.tmax); add("pets", e.pets);
+  if (e.turkeys) p.push("turkeys=yes");
   if (h.notFirst) p.push("not_first=1");
   if (h.notLast) p.push("not_last=1");
   if (h.mine) p.push("mine=1");
@@ -4793,7 +4798,7 @@ function hubCard(it, i) {
       <div class="hub-facts">${hubFacts(it)}</div>
       <div class="hub-loc">📍 ${esc(loc || it.city || "მისამართი მითითებული არ არის")}</div>
       <div class="hub-foot"><span class="hub-agent">${it.private ? "⭐ " : "👤 "}${esc(it.agent_name || "")}</span>
-        <span class="hub-deal">${it.dup_count ? `<span class="hub-dup" title="იგივე ბინის სხვა განცხადება (გაფრთხილება — არაფერი იშლება)">⚠️ ორეული</span> ` : ""}${it.pets === "yes" ? "🐾 " : ""}${esc(it.deal_type || "")}</span></div>
+        <span class="hub-deal">${it.dup_count ? `<span class="hub-dup" title="იგივე ბინის სხვა განცხადება (გაფრთხილება — არაფერი იშლება)">⚠️ ორეული</span> ` : ""}${it.pets === "yes" ? "🐾 " : ""}${it.turkeys === "yes" ? "🦃 " : ""}${esc(it.deal_type || "")}</span></div>
     </div></div>`;
 }
 const hubSkeleton = () => Array.from({ length: 6 }, () => `<div class="hub-card hub-skel"><div class="hub-ph"></div><div class="hub-body"><div class="sk w60"></div><div class="sk w90"></div><div class="sk w40"></div></div></div>`).join("");
@@ -4852,7 +4857,8 @@ function hubDrawPanel() {
       <label>სართულიანობა (მდე)<input id="hubTmax" inputmode="numeric" value="${esc(h.tmax)}" placeholder="∞"></label>
     </div>
     <div class="hub-row"><button class="hub-chip ${h.notFirst ? "on" : ""}" data-hub-tog="notFirst">პირველის გარდა</button><button class="hub-chip ${h.notLast ? "on" : ""}" data-hub-tog="notLast">ბოლოს გარდა</button>
-      <button class="hub-chip ${h.pets === "yes" ? "on" : ""}" data-hub-pets="yes">🐾 ცხოველები დაიშვება</button><button class="hub-chip ${h.pets === "ask" ? "on" : ""}" data-hub-pets="ask">🐾 შეთანხმებით</button></div>
+      <button class="hub-chip ${h.pets === "yes" ? "on" : ""}" data-hub-pets="yes">🐾 ცხოველები დაიშვება</button><button class="hub-chip ${h.pets === "ask" ? "on" : ""}" data-hub-pets="ask">🐾 შეთანხმებით</button>
+      <button class="hub-chip ${h.turkeys ? "on" : ""}" data-hub-tog="turkeys">🦃 ინდაურები დაიშვება</button></div>
     <div class="hub-k">დალაგება</div>
     <div class="hub-row">${[["new", "უახლესი"], ["price_asc", "იაფი"], ["price_desc", "ძვირი"], ["area_desc", "დიდი ფართი"]].map(([v, l]) => `<button class="hub-chip ${h.sort === v ? "on" : ""}" data-hub-sort="${v}">${l}</button>`).join("")}</div>
     <div class="hub-row" style="margin-top:10px"><button class="btn" id="hubApply">გამოყენება</button><button class="btn secondary" id="hubReset">გასუფთავება</button></div>`;
@@ -4866,7 +4872,7 @@ function hubDrawPanel() {
   document.getElementById("hubApply").onclick = () => { keepInputs(); h.panel = false; hubReload(); };
   document.getElementById("hubReset").onclick = () => {
     Object.assign(h, { q: "", deal: "", ptype: "", rooms: [], pmin: "", pmax: "", district: "", fresh: [], mine: false, favOnly: false, agent: "", sort: "new", panel: false,
-      bedrooms: [], amin: "", amax: "", fmin: "", fmax: "", tmin: "", tmax: "", notFirst: false, notLast: false, pets: "", myDist: false, myDistNames: null });
+      bedrooms: [], amin: "", amax: "", fmin: "", fmax: "", tmin: "", tmax: "", notFirst: false, notLast: false, pets: "", turkeys: false, myDist: false, myDistNames: null });
     const s = document.getElementById("hubQ"); if (s) s.value = "";
     hubReload();
   };
@@ -4998,7 +5004,7 @@ async function hubOpenDetail(idOrItem) {
     <div class="hub-loc">📍 ${esc([it.city, it.district, it.address].filter(Boolean).join(" · ") || "—")}</div>
     <div class="hub-detail-fr">${hubFrHtml(fr)}<span class="muted">დამატებულია: ${esc(String(it.created_at || "—").slice(0, 10))}${it.last_verified_at ? " · გადამოწმდა: " + esc(String(it.last_verified_at).slice(0, 10)) : ""}</span></div>
     <div class="hub-kvs">
-      ${row("მდგომარეობა", it.condition)}${row("სტატუსი", it.status_text)}${row("საძინებლები", it.bedrooms)}${it.pets ? row("🐾 ცხოველები", { yes: "დაიშვება", no: "არ დაიშვება", ask: "შეთანხმებით" }[it.pets]) : ""}
+      ${row("მდგომარეობა", it.condition)}${row("სტატუსი", it.status_text)}${row("საძინებლები", it.bedrooms)}${it.pets ? row("🐾 ცხოველები", { yes: "დაიშვება", no: "არ დაიშვება", ask: "შეთანხმებით" }[it.pets]) : ""}${it.turkeys === "yes" ? row("🦃 ინდაურები", "დაიშვება") : ""}
       ${it.interest ? `<div class="hub-kv"><span>🔥 დაინტერესება (30 დღე)</span><b>${it.interest} შეხვედრა</b></div>` : ""}${it.dup_count ? `<div class="hub-kv"><span>⚠️ შესაძლო ორეული</span><b>${it.dup_count} სხვა განცხადება (${esc((it.dup_ids || []).join(", "))})</b></div>` : ""}${row("ID", it.myhome_id || it.ssge_id || it.listing_id)}${row("აგენტი", [it.agent_name, it.team].filter(Boolean).join(" · "))}
     </div>
     ${it.private ? `<div class="hub-priv"><div class="k">🔒 შიდა ინფორმაცია (ხედავთ მხოლოდ თქვენ/გუნდის ლიდერი/ადმინი)</div>

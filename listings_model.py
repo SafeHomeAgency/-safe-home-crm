@@ -26,6 +26,7 @@ LISTING_HEADERS = [
     "owner_number", "notes",                                                  # შიდა — სხვა აგენტს არ ეგზავნება
     "created_at", "last_verified_at", "last_updated_at", "active", "archived",
     "pets",                                                                   # yes | no | ask (მესაკუთრის პირობა; MyHome ტაბის "ცხოველები: კი/არა/შეთანხმებით" შენიშვნიდან)
+    "turkeys",                                                                # yes | "" (მესაკუთრე ინდაურებს უშვებს; MyHome ტაბის "ინდაურები: კი" შენიშვნიდან; მონიშვნის გარეშე — ცარიელი)
 ]
 ALL_TABS = [(LISTINGS_SHEET, LISTING_HEADERS, 2000)]
 
@@ -38,11 +39,19 @@ def pets_from_notes(notes) -> str:
     hits = _PETS_RE.findall(str(notes or ""))
     return _PETS_MAP.get(hits[-1], "") if hits else ""
 
+_TURKEYS_RE = re.compile(r"ინდაურები:\s*კი")
+
+
+def turkeys_from_notes(notes) -> str:
+    """'yes' მხოლოდ მაშინ, როცა აგენტმა ფორმაში თიქი მონიშნა ('ინდაურები: კი'); სხვა შემთხვევაში ცარიელი (არაფერი არ ვივარაუდებთ)."""
+    return "yes" if _TURKEYS_RE.search(str(notes or "")) else ""
+
+
 # ეს ველები სხვა აგენტს ეგზავნება; დანარჩენი (owner_number, notes, job_id, src_id, src_site...) — მხოლოდ მფლობელს/გუნდის ლიდერს/ადმინს
 PUBLIC_FIELDS = [
     "listing_id", "agent_id", "agent_name", "team", "myhome_id", "ssge_id", "deal_type", "property_type", "title", "city", "district",
     "address", "price_usd", "area", "rooms", "bedrooms", "floor", "floors", "condition", "status_text", "lat", "lng",
-    "created_at", "last_verified_at", "last_updated_at", "active", "pets",
+    "created_at", "last_verified_at", "last_updated_at", "active", "pets", "turkeys",
 ]
 PRIVATE_FIELDS = ["owner_number", "notes", "job_id", "src_site", "src_id", "source"]
 

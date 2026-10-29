@@ -107,7 +107,7 @@ def upsert_from_job(job: dict, snap: dict | None) -> dict | None:
             "job_id": job_id, "agent_id": _s(job.get("agent_id"), 40), "agent_name": _s(job.get("agent_name"), 80), "team": _s(job.get("team"), 40),
             "source": "upload", "src_site": _s(job.get("listing_source") or "myhome", 10), "src_id": _s(job.get("myhome_listing_id"), 20),
             "owner_number": _s(job.get("owner_number"), 30), "notes": _s(job.get("notes"), 500), "active": "yes", "archived": "",
-            "pets": m.pets_from_notes(job.get("notes")),
+            "pets": m.pets_from_notes(job.get("notes")), "turkeys": m.turkeys_from_notes(job.get("notes")),
         }
         rec = dict(base, **s)
         rec["deal_type"] = rec["deal_type"] or _s(job.get("deal_type"), 40)
@@ -155,6 +155,7 @@ def backfill_from_jobs(jobs: list[dict]) -> dict:
                 "deal_type": _s(j.get("deal_type"), 40), "city": _s(j.get("city"), 60), "district": _s(j.get("district"), 80),
                 "address": _s(j.get("address"), 160), "price_usd": _s(j.get("final_price"), 20),
                 "owner_number": _s(j.get("owner_number"), 30), "notes": _s(j.get("notes"), 500), "pets": m.pets_from_notes(j.get("notes")),
+                "turkeys": m.turkeys_from_notes(j.get("notes")),
                 "created_at": done, "last_verified_at": "", "last_updated_at": now_str(), "active": "yes", "archived": "",
             }
             _backend.append(m.LISTINGS_SHEET, m.LISTING_HEADERS, rec)
@@ -250,6 +251,8 @@ def _match(row: dict, f: dict, viewer: dict, skip: str = "") -> bool:
     if f.get("not_first") and (fl is None or fl <= 1):
         return False
     if f.get("not_last") and (fl is None or fls is None or fl >= fls):
+        return False
+    if f.get("turkeys") and _lc(row.get("turkeys")) != "yes":
         return False
     if f.get("pets") and _lc(row.get("pets")) != _lc(f["pets"]):
         return False

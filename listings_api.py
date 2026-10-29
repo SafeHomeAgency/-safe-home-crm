@@ -54,6 +54,7 @@ def parse_filters(args=None) -> dict:
         "floor_min": fl("floor_min"), "floor_max": fl("floor_max"), "floors_min": fl("floors_min"), "floors_max": fl("floors_max"),
         "not_first": g("not_first") in ("1", "true", "yes"), "not_last": g("not_last") in ("1", "true", "yes"),
         "pets": g("pets") if g("pets") in ("yes", "no", "ask") else "",
+        "turkeys": "yes" if g("turkeys") in ("yes", "1", "true") else "",
     }
 
 
