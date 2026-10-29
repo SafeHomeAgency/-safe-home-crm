@@ -57,6 +57,13 @@ def price_for(model: str) -> tuple[float, float]:
     return PRICES.get(model, DEFAULT_PRICE)
 
 
+def estimate_call_ceiling(model: str, prompt_chars: int, max_out: int, steps: int = 4) -> float:
+    """გამოძახებამდე: ამ ერთი კითხვის **უარესი შემთხვევის** ხარჯი (ბიუჯეტის დამცავისთვის). კონსერვატიულია: 1 სიმბოლო = 1 ტოკენი (ქართული ტოკენებში ძვირია),
+    ყოველი ინსტრუმენტული ნაბიჯი ხელახლა კითხულობს მთელ შეყვანას და წერს მაქსიმალურ გამოსავალს. ეს შეფასებაა, არა პროვაიდერის ანგარიში."""
+    pin, pout = price_for(model)
+    return round((steps + 1) * (prompt_chars * pin + max_out * pout) / 1_000_000, 6)
+
+
 def estimate_cost(model: str, tokens_in: int, tokens_out: int, cache_read: int = 0, cache_write: int = 0) -> float:
     """შეფასება: cache-ის წაკითხვა ≈ 0.1×, ჩაწერა ≈ 1.25× input-ფასზე. რეალური ხარჯი — პროვაიდერის ანგარიშში."""
     pin, pout = price_for(model)
@@ -68,7 +75,7 @@ class Provider:
     model = ""
 
     def run(self, system: str, messages: list, tools: list | None, call_tool, max_tokens: int, timeout: float,
-            max_steps: int = 4) -> Completion:
+            max_steps: int = 4, model: str | None = None) -> Completion:
         raise NotImplementedError
 
 
@@ -112,13 +119,14 @@ class AnthropicProvider(Provider):
         if isinstance(exc, anthropic.APIStatusError):
             return ProviderError("unavailable" if getattr(exc, "status_code", 500) >= 500 else "bad_request", d)
         return ProviderError("unavailable", d)
-    def run(self, system, messages, tools, call_tool, max_tokens, timeout, max_steps=4) -> Completion:
+    def run(self, system, messages, tools, call_tool, max_tokens, timeout, max_steps=4, model=None) -> Completion:
         import anthropic
         client = self._cli().with_options(timeout=timeout, max_retries=1)
         msgs = list(messages)
-        total = Completion(text="", model=self.model)
+        use_model = model or self.model
+        total = Completion(text="", model=use_model)
         for step in range(max_steps + 1):
-            kw = dict(model=self.model, max_tokens=max_tokens, system=system, messages=msgs,
+            kw = dict(model=use_model, max_tokens=max_tokens, system=system, messages=msgs,
                       output_config={"effort": self.effort}, cache_control={"type": "ephemeral"})
             if tools and step < max_steps:
                 kw["tools"] = tools
@@ -164,13 +172,13 @@ class FakeProvider(Provider):
         self.model = model
         self.calls: list[dict] = []
 
-    def run(self, system, messages, tools, call_tool, max_tokens, timeout, max_steps=4) -> Completion:
-        self.calls.append({"system": system, "messages": messages, "tools": tools, "max_tokens": max_tokens, "timeout": timeout})
+    def run(self, system, messages, tools, call_tool, max_tokens, timeout, max_steps=4, model=None) -> Completion:
+        self.calls.append({"system": system, "messages": messages, "tools": tools, "max_tokens": max_tokens, "timeout": timeout, "model": model})
         r = self.fn(system, messages, tools, call_tool)
         if isinstance(r, str):
             r = {"text": r}
         return Completion(text=r.get("text", ""), tokens_in=r.get("tokens_in", 1200), tokens_out=r.get("tokens_out", 200),
-                          model=self.model, stop_reason="end_turn", tools_used=list(r.get("tools", [])))
+                          model=model or self.model, stop_reason="end_turn", tools_used=list(r.get("tools", [])))
 
 
 _provider: Provider | None = None

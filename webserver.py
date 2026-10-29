@@ -3244,7 +3244,14 @@ def _create_manager_question(agent: dict, text: str):
 
 ai_api.register(
     app, authed=_authed_agent, audit=_audit, rate_limited=rate_limited, get_agents=lambda: sheets.get_agents(),
-    get_questions=lambda: sheets.get_questions(), create_question=_create_manager_question, chat_id=_requester_chat_id)
+    get_questions=lambda: sheets.get_questions(), create_question=_create_manager_question, chat_id=_requester_chat_id,
+    send_message=lambda chat, text, key: notify_async(chat, text, key=key, priority="operational"))
+
+
+# SAIRO Lead Protection Engine: რისკების ანგარიში (/api/leadguard/...; წაკითხვა-მხოლოდ). ფონური შეხსენებები — ბოტში, LEAD_GUARD_ENABLED=0 ნაგულისხმევად.
+import leadguard_api  # noqa: E402
+
+leadguard_api.register(app, authed=_authed_agent, audit=_audit, rate_limited=rate_limited, chat_id=_requester_chat_id)
 
 
 def _agent_chat_id(agent_id):

@@ -121,8 +121,17 @@ def dashboard(viewer: dict, days: int = 30, names: dict | None = None) -> dict:
             a["cost_usd"] += _num(r.get("cost_usd"))
             a["tokens"] += int(_num(r.get("tokens_in")) + _num(r.get("tokens_out")))
         top_users = sorted(by_agent.items(), key=lambda kv: -kv[1]["cost_usd"])[:10]
+        import ai_service
+        cap = ai_service.budget_cap()
+        by_day: dict[str, float] = {}
+        for r in answered:
+            d = m.s(r.get("created_at"))[:10]
+            by_day[d] = by_day.get(d, 0.0) + _num(r.get("cost_usd"))
         out["cost"] = {"total_usd": round(sum(_num(r.get("cost_usd")) for r in answered), 4), "month_usd": round(store.month_cost(), 4),
                        "monthly_budget_usd": config.AI_MONTHLY_BUDGET_USD, "estimate": True,
+                       "hard_cap_usd": round(cap, 2), "buffer_pct": config.AI_BUDGET_BUFFER_PCT, "remaining_usd": round(max(0.0, cap - store.month_cost()), 4) if cap else None,
+                       "blocked": bool(cap and store.month_cost() >= cap), "by_day": [{"date": k, "usd": round(v, 4)} for k, v in sorted(by_day.items())][-14:],
+                       "method": "ხარჯი = ტოკენები × ფასი (config/ცხრილი), ჩვენივე აღრიცხვით, გამოძახებისთანავე; პროვაიდერის ანგარიში შეიძლება განსხვავდებოდეს, ამიტომ ხისტი ზღვარი ბუფერითაა და გამოძახებამდე მოწმდება უარესი შემთხვევა",
                        "tokens_in": int(sum(_num(r.get("tokens_in")) for r in answered)), "tokens_out": int(sum(_num(r.get("tokens_out")) for r in answered)),
                        "by_user": [{"user": (names or {}).get(k, k), "requests": v["requests"], "cost_usd": round(v["cost_usd"], 4), "tokens": v["tokens"]} for k, v in top_users]}
     else:

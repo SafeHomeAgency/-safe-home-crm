@@ -14,6 +14,7 @@ import logging
 
 from flask import jsonify, request
 
+import ai_actions
 import ai_insights as insights
 import config
 import ai_model as m
@@ -24,7 +25,7 @@ from ai_model import AiError
 log = logging.getLogger("safehome-ai-api")
 
 
-def register(app, *, authed, audit, rate_limited, get_agents, get_questions, create_question, chat_id) -> None:
+def register(app, *, authed, audit, rate_limited, get_agents, get_questions, create_question, chat_id, send_message=None) -> None:
     def _guard(fn):
         @functools.wraps(fn)
         def wrapper(*a, **kw):
@@ -33,6 +34,7 @@ def register(app, *, authed, audit, rate_limited, get_agents, get_questions, cre
                 return err
             try:
                 store.ensure_tabs()
+                ai_actions.ensure_tabs()
                 v = svc.viewer_of(agent, admin, uid=f"tg{chat_id()}")
                 return fn(agent, admin, v, *a, **kw)
             except AiError as e:
@@ -99,6 +101,42 @@ def register(app, *, authed, audit, rate_limited, get_agents, get_questions, cre
         res = svc.escalate(v, agent, m.s(b.get("msg_id"), 60), b.get("text") or "", create_question)
         audit(agent, admin, "ai_escalate", "question", str(res["question_id"]))
         return jsonify(res)
+
+    # ------------------------------------------------------------ მოქმედებები ადამიანის დადასტურებით (SAIRO ამზადებს, მომხმარებელი ადასტურებს)
+    def _deps():
+        if send_message is None:
+            raise AiError("შეტყობინების არხი მორგებული არ არის", 503, "no_sender")
+        return {"send": send_message}
+
+    @app.get("/api/ai/actions")
+    @rate_limited("ai_read")
+    @_guard
+    def actions_list(agent, admin, v):
+        return jsonify(items=ai_actions.list_mine(v, get_agents()))
+
+    @app.post("/api/ai/actions/<action_id>/confirm")
+    @rate_limited("ai_write")
+    @_guard
+    def actions_confirm(agent, admin, v, action_id):
+        res = ai_actions.confirm(v, action_id, m.s(_body().get("hash"), 40), get_agents(), _deps())
+        audit(agent, admin, "ai_action_confirm", "ai_action", action_id, metadata={"via": "ai", "status": res.get("status"), "already": bool(res.get("already"))})
+        return jsonify(res)
+
+    @app.post("/api/ai/actions/<action_id>/cancel")
+    @rate_limited("ai_write")
+    @_guard
+    def actions_cancel(agent, admin, v, action_id):
+        res = ai_actions.cancel(v, action_id)
+        audit(agent, admin, "ai_action_cancel", "ai_action", action_id, metadata={"via": "ai"})
+        return jsonify(res)
+
+    @app.post("/api/ai/actions/<action_id>/revise")
+    @rate_limited("ai_write")
+    @_guard
+    def actions_revise(agent, admin, v, action_id):
+        new = ai_actions.revise(v, action_id, _body(), get_agents())
+        audit(agent, admin, "ai_action_revise", "ai_action", action_id, metadata={"via": "ai", "new_action": new["action_id"]})
+        return jsonify(ok=True, action=new)
 
     # ------------------------------------------------------------ ცოდნის ბაზა (მენეჯერები)
     def _need_manager(v):

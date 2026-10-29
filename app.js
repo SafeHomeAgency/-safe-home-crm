@@ -5703,7 +5703,7 @@ function tabsFor(role) {
     tabs.push(SYS_TAB);
   }
   // 🤖 AI ასისტენტი: სერვერი ამბობს, ჩართულია თუ არა და ვის რა უფლება აქვს (/api/ai/status); მენეჯერს ტაბი ჩართვამდეც ჩანს (ცოდნის ბაზის მოსამზადებლად)
-  if (state.aiAccess && (state.aiAccess.enabled || state.aiAccess.can_manage)) {
+  if (state.aiAccess && (state.aiAccess.enabled || state.aiAccess.can_manage || state.aiAccess.leadguard)) {
     tabs = tabs.slice();
     tabs.push(AI_TAB);
   }
@@ -5740,10 +5740,10 @@ function renderTabbar() {
   if (more) more.onclick = () => openMoreSheet(rest);
 }
 
-/* ================================================ Safe Home AI (შიდა ასისტენტი) ==========================
+/* ================================================ SAIRO — Safe Home AI (შიდა ასისტენტი) ==========================
    ახალი ტაბი „🤖 AI“ (ჩანს „☰ სხვა“-ში): ჩატი — ყველას; ცოდნის ბაზა / განსახილველი / დაშბორდი — მენეჯერებს (თიმლიდერი/ადმინი).
    ყველა უფლება სერვერზეა (/api/ai/*); აქ მხოლოდ ჩვენებაა. არსებულ ტაბებს არ ეხება. */
-const AI_TAB = { id: "ai", label: "AI", icon: "🤖" };
+const AI_TAB = { id: "ai", label: "SAIRO", icon: "🦸" };
 const AI_CATS = { policy: "პოლიტიკა/წესები", commission: "საკომისიო/თანამშრომლობა", legal: "იურიდიული", finance: "ფინანსური", procedure: "პროცედურა", crm_guide: "CRM გიდი", faq: "ხშირი კითხვა" };
 const AI_STATUS = { draft: ["დრაფტი", "amber"], approved: ["დამტკიცებული", "green"], retired: ["გაუქმებული", "gray"] };
 const AI_REASONS = [["wrong", "არასწორია"], ["incomplete", "არასრულია"], ["outdated", "მოძველებულია"], ["unclear", "გაუგებარია"]];
@@ -5751,13 +5751,17 @@ const AI_TYPE_CLS = { policy: "green", system_data: "green", general: "amber", u
 const AI_REVIEW_TYPE = { candidate: "🧑‍🏫 მენეჯერის პასუხი", unanswered: "❓ AI-მ ვერ უპასუხა", feedback: "👎 უკუკავშირი", conflict: "⚔️ წინააღმდეგობა" };
 if (!state.ai) state.ai = { sub: "chat", conv: "", msgs: [], busy: false, kbFilter: "draft", days: 30 };
 
-async function aiLoadAccess() {
+async function aiLoadAccess(attempt) {
+  attempt = attempt || 0;
   try {
     const a = await api("/api/ai/status");
     const changed = JSON.stringify(a) !== JSON.stringify(state.aiAccess || null);
     state.aiAccess = a;
     if (changed) renderTabbar();
-  } catch (e) { /* ქსელი/წვდომა — ტაბი უბრალოდ არ გამოჩნდება */ }
+  } catch (e) {
+    /* დროებითი შეცდომა (მაგ. სერვერის გადატვირთვა/Sheets-ის კვოტა) ტაბს არ უნდა ჰკარგავდეს: 3-ჯერ ვცდით ხელახლა (4/12/30 წმ); წვდომის ნამდვილი უარი — ტაბი არ ჩანს */
+    if (attempt < 3 && e.code !== "auth_failed") setTimeout(() => aiLoadAccess(attempt + 1), [4000, 12000, 30000][attempt]);
+  }
 }
 
 function aiFmt(t) { return esc(t).replace(/\n/g, "<br>"); }
@@ -5765,12 +5769,13 @@ function aiScroll() { const el = document.getElementById("aiMsgs"); if (el) el.s
 
 async function renderAi(content) {
   const a = state.aiAccess || {}, ai = state.ai;
-  const subs = [["chat", "💬 ჩატი"]].concat(a.can_manage ? [["kb", "📚 ცოდნა"], ["review", "🔎 განსახილველი"], ["dash", "📊 დაშბორდი"]] : []);
+  const subs = [["chat", "💬 ჩატი"], ["lead", "🛡️ კლიენტები"]].concat(a.can_manage ? [["kb", "📚 ცოდნა"], ["review", "🔎 განსახილველი"], ["dash", "📊 დაშბორდი"]] : []);
   if (!subs.some((s) => s[0] === ai.sub)) ai.sub = "chat";
   content.innerHTML = `<div class="chip-row ai-subs">${subs.map(([id, l]) => `<button class="chip ${ai.sub === id ? "sel" : ""}" data-aisub="${id}">${l}</button>`).join("")}</div><div id="aiBody"></div>`;
   content.querySelectorAll("[data-aisub]").forEach((b) => { b.onclick = () => { ai.sub = b.dataset.aisub; renderAi(content); }; });
   const body = document.getElementById("aiBody");
   if (ai.sub === "chat") return aiChat(body);
+  if (ai.sub === "lead") return aiLead(body);
   if (ai.sub === "kb") return aiKb(body);
   if (ai.sub === "review") return aiReview(body);
   return aiDash(body);
@@ -5786,24 +5791,27 @@ function aiBubble(m, i) {
   const esc2 = m.escalated ? `<span class="muted">✅ მენეჯერს გადაეგზავნა</span>` : (m.msg_id ? `<button class="ai-act strong" data-aiesc="${i}">👤 მენეჯერს გადაუგზავნე</button>` : "");
   const reasons = m.askReason ? `<div class="chip-row">${AI_REASONS.map(([k, l]) => `<button class="chip" data-aireason="${i}:${k}">${l}</button>`).join("")}</div>` : "";
   return `<div class="ai-msg bot ${m.error ? "err" : ""}">${m.label ? `<div class="badge ${cls} ai-label">${esc(m.label)}</div>` : ""}<div>${aiFmt(m.text)}</div>
-    ${src ? `<div class="ai-srcs">${src}</div>` : ""}${m.msg_id ? `<div class="ai-acts">${fb}${esc2}</div>` : ""}${reasons}</div>`;
+    ${src ? `<div class="ai-srcs">${src}</div>` : ""}${(m.actions || []).map((a, j) => aiActionCard(a, i, j)).join("")}${m.msg_id ? `<div class="ai-acts">${fb}${esc2}</div>` : ""}${reasons}</div>`;
 }
 
 function aiChat(body) {
   const a = state.aiAccess || {}, ai = state.ai;
   if (!a.enabled) {
-    body.innerHTML = `<div class="card"><div class="empty">🤖 AI ასისტენტი ჯერ ჩართული არ არის.${a.can_manage ? "<br>ცოდნის ბაზის მომზადება უკვე შეგიძლიათ „📚 ცოდნა“ განყოფილებაში." : ""}</div></div>`;
+    body.innerHTML = `<div class="card"><div class="empty">🦸 SAIRO-ს ჩატი ჯერ ჩართული არ არის.<br>🛡️ „კლიენტები“ განყოფილება უკვე მუშაობს.${a.can_manage ? "<br>ცოდნის ბაზის მომზადება უკვე შეგიძლიათ „📚 ცოდნა“ განყოფილებაში." : ""}</div></div>`;
     return;
   }
   const draft = (document.getElementById("aiText") || {}).value || "";
-  const msgs = ai.msgs.map(aiBubble).join("") || `<div class="ai-hello">გამარჯობა! 👋 დამისვით კითხვა კომპანიის წესების, პროცედურების, CRM-ის ან თქვენი KPI/შეხვედრების/დავალებების შესახებ. ვპასუხობ ქართულად, რუსულად ან ინგლისურად. რასაც დამტკიცებული წყაროთი ვერ დავადასტურებ, პირდაპირ გეტყვით.</div>`;
+  const msgs = ai.msgs.map(aiBubble).join("") || `<div class="ai-hello">გამარჯობა, მე SAIRO ვარ 🦸 დამისვით კითხვა კომპანიის წესების, პროცედურების, CRM-ის, თქვენი KPI/შეხვედრების/დავალებების ან კლიენტების რისკების შესახებ; შემიძლია follow-up-ის ან გუნდისთვის შეტყობინების მომზადება — შესრულებამდე თქვენი დადასტურება დაგჭირდებათ. ვპასუხობ ქართულად, რუსულად ან ინგლისურად. რასაც დამტკიცებული წყაროთი ვერ დავადასტურებ, პირდაპირ გეტყვით.</div>`;
   body.innerHTML = `<div class="card ai-chat">
-    <div class="ai-top"><b>🤖 Safe Home AI</b><span class="muted">${esc(a.used_today || 0)}/${a.daily_limit ? esc(a.daily_limit) : "∞"} დღეს</span><button class="chip" id="aiNew" title="ახალი საუბარი">🆕</button><button class="chip" id="aiHist" title="ჩემი საუბრები">🕘</button></div>
+    <div class="ai-top"><b>🦸 SAIRO</b><span class="muted">${esc(a.used_today || 0)}/${a.daily_limit ? esc(a.daily_limit) : "∞"} დღეს</span><button class="chip" id="aiNew" title="ახალი საუბარი">🆕</button><button class="chip" id="aiHist" title="ჩემი საუბრები">🕘</button></div>
     <div id="aiHistBox"></div><div class="ai-msgs" id="aiMsgs">${msgs}</div>
     <div class="ai-input"><textarea id="aiText" rows="2" maxlength="${esc(a.max_question_chars || 1500)}" placeholder="დაწერეთ კითხვა…"></textarea><button class="btn" id="aiSend" ${ai.busy ? "disabled" : ""}>➤</button></div>
     <div class="muted ai-note">პასუხი კომპანიის წესად ითვლება მხოლოდ 📘 ნიშნით და წყაროთი. კლიენტის/მესაკუთრის ტელეფონს ნუ ჩაწერთ.</div></div>`;
-  document.getElementById("aiText").value = draft;
+  document.getElementById("aiText").value = draft || ai.prefill || "";
+  ai.prefill = "";
   aiScroll();
+  aiBindActions(body);
+  aiLoadPending(body);
 
   const send = async () => {
     const ta = document.getElementById("aiText"); const text = (ta.value || "").trim();
@@ -5814,7 +5822,7 @@ function aiChat(body) {
     try {
       const r = await api("/api/ai/ask", { method: "POST", body: JSON.stringify({ text, conv_id: ai.conv }) });
       ai.conv = r.conv_id; ai.msgs.pop();
-      ai.msgs.push({ role: "assistant", text: r.answer + (r.error_kind ? `\n\n🔧 ადმინისთვის: ${r.error_kind}${r.error_detail ? " — " + r.error_detail : ""}` : ""), answer_type: r.answer_type, label: r.label, sources: r.sources, msg_id: r.msg_id, q: text, error: !!r.degraded });
+      ai.msgs.push({ role: "assistant", text: r.answer + (r.error_kind ? `\n\n🔧 ადმინისთვის: ${r.error_kind}${r.error_detail ? " — " + r.error_detail : ""}` : ""), answer_type: r.answer_type, label: r.label, sources: r.sources, msg_id: r.msg_id, q: text, error: !!r.degraded, actions: r.actions || [] });
       if (state.aiAccess && r.usage) state.aiAccess.used_today = r.usage.used_today;
     } catch (e) {
       ai.msgs.pop();
@@ -5865,6 +5873,124 @@ function aiChat(body) {
       try { await api("/api/ai/escalate", { method: "POST", body: JSON.stringify({ msg_id: m.msg_id, text: m.q || "" }) }); m.escalated = true; aiChat(body); toast("გადაეგზავნა მენეჯერს ✅"); delete lazyCache.questions; } catch (e) { toast(e.message); }
     };
   });
+}
+
+/* ---------------------------------------------------------------- მოქმედებები დადასტურებით (SAIRO ამზადებს, მომხმარებელი ადასტურებს) */
+function aiActionCard(a, i, j) {
+  const k = `${i}:${j}`;
+  if (a.type === "open_form") {
+    return `<div class="ai-act-card"><div class="ai-act-h"><b>${esc(a.title)}</b><span class="badge gray">ფორმა — თქვენ აგზავნით</span></div>
+      <div class="ai-act-r"><span class="muted">${a.form === "meeting" ? "ბინა" : "კლიენტი"}:</span> ${esc(a.who)}</div><div class="ai-act-r">${aiFmt(a.what)}</div><div class="ai-act-r"><span class="muted">შედეგი:</span> ${esc(a.effect)}</div>
+      <div class="ai-btns"><button class="btn" data-aiact="open:${k}">📝 გახსენი ფორმა</button></div></div>`;
+  }
+  if (a.state === "done") return `<div class="ai-act-card done"><b>${esc(a.title)}</b><div>✅ ${aiFmt(a.stateText || "შესრულდა")}</div></div>`;
+  if (a.state === "failed") return `<div class="ai-act-card done err"><b>${esc(a.title)}</b><div>⚠️ ვერ შესრულდა: ${aiFmt(a.stateText || "სცადეთ ხელახლა — სთხოვეთ SAIRO-ს ახალი ბარათი")}</div></div>`;
+  if (a.state === "cancelled") return `<div class="ai-act-card done"><b>${esc(a.title)}</b><div class="muted">✖ გაუქმდა</div></div>`;
+  if (a.state === "expired") return `<div class="ai-act-card done"><b>${esc(a.title)}</b><div class="muted">⌛ დადასტურების ვადა გავიდა — სთხოვეთ SAIRO-ს ხელახლა</div></div>`;
+  const ed = a.editable || {};
+  const fields = a.type === "followup_create"
+    ? `<label>ვადა<input type="date" data-aiact-f="due_at" value="${esc(ed.due_at || "")}"></label><label>რა უნდა გაკეთდეს<input data-aiact-f="next_action" maxlength="500" value="${esc(ed.next_action || "")}"></label>`
+    : `<label>ტექსტი<textarea rows="4" data-aiact-f="text" maxlength="800">${esc(ed.text || "")}</textarea></label>`;
+  return `<div class="ai-act-card" data-aicard="${k}"><div class="ai-act-h"><b>${esc(a.title)}</b>${a.external ? `<span class="badge amber">📤 გარე შეტყობინება</span>` : `<span class="badge gray">ჩანაწერი CRM-ში</span>`}</div>
+    <div class="ai-act-r"><span class="muted">ვის ეხება:</span> ${esc(a.who)}</div>
+    <div class="ai-act-r"><span class="muted">რას გააკეთებს:</span><br>${aiFmt(a.what)}</div>
+    <div class="ai-act-r"><span class="muted">რა მონაცემს იყენებს:</span> ${(a.uses || []).map(esc).join(" · ")}</div>
+    <div class="ai-act-r"><span class="muted">რა შედეგს ელოდება:</span> ${esc(a.effect)}</div>
+    <details class="ai-act-edit"><summary>✏️ შეცვლა</summary><div class="ai-form">${fields}<button class="btn secondary" data-aiact="revise:${k}">განახლება (ახალი ბარათი)</button></div></details>
+    <div class="ai-btns"><button class="btn" data-aiact="confirm:${k}">✅ დადასტურება</button><button class="btn danger" data-aiact="cancel:${k}">✖ გაუქმება</button></div>
+    <div class="muted ai-note">შესრულდება მხოლოდ თქვენი დადასტურების შემდეგ (ვადა ${esc(String(a.expires_at || "").slice(11, 16))}-მდე).</div></div>`;
+}
+
+function aiBindActions(body) {
+  const ai = state.ai;
+  body.querySelectorAll("[data-aiact]").forEach((b) => {
+    b.onclick = async () => {
+      const [act, i, j] = b.dataset.aiact.split(":"); const msg = ai.msgs[+i]; const a = msg && msg.actions && msg.actions[+j];
+      if (!a) return;
+      if (act === "open") {                                   // არსებული ფორმის გახსნა წინასწარ შევსებული ველებით; ტელეფონს მომხმარებელი თავად წერს და თავად აგზავნის
+        const pre = a.prefill || {};
+        try {
+          if (a.form === "meeting") {
+            const r = await api("/api/listings/" + encodeURIComponent(a.listing_id));
+            hubBookForm(r.listing, { client_name: pre.client_name || "" });
+            const set = (id, v) => { const e = document.getElementById(id); if (e && v) e.value = v; };
+            set("bkDate", pre.meeting_date); set("bkTime", pre.meeting_time); set("bkNotes", pre.notes);
+          } else hubCritForm({ client_name: pre.client_name, deal_type: pre.deal_type, budget_max: pre.budget_max, districts: pre.districts, rooms_min: pre.rooms_min, property_type: pre.property_type, notes: pre.notes });
+        } catch (e) { toast(e.message || "შეცდომა"); }
+        return;
+      }
+      const base = "/api/ai/actions/" + encodeURIComponent(a.action_id);
+      try {
+        if (act === "confirm") {
+          if (a.external && !confirm("გავაგზავნო შეტყობინება? მიმღებები: " + a.who)) return;
+          const r = await api(base + "/confirm", { method: "POST", body: JSON.stringify({ hash: a.hash }) });
+          a.state = r.status === "executed" ? "done" : "failed"; a.stateText = (r.result && r.result.text) || "";
+          if (a.type === "followup_create") delete lazyCache.crm2;
+        } else if (act === "cancel") {
+          await api(base + "/cancel", { method: "POST", body: "{}" }); a.state = "cancelled";
+        } else {
+          const card = b.closest("[data-aicard]"); const payload = {};
+          card.querySelectorAll("[data-aiact-f]").forEach((f) => { payload[f.dataset.aiactF] = f.value; });
+          const r = await api(base + "/revise", { method: "POST", body: JSON.stringify(payload) });
+          msg.actions[+j] = r.action; toast("ბარათი განახლდა — დაადასტურეთ ხელახლა");
+        }
+      } catch (e) {
+        if (e.code === "expired") a.state = "expired";
+        toast(e.message);
+      }
+      aiChat(document.getElementById("aiBody"));
+    };
+  });
+}
+
+async function aiLoadPending(body) {
+  const ai = state.ai;
+  if (ai.pendingLoaded) return;
+  ai.pendingLoaded = true;
+  try {
+    const r = await api("/api/ai/actions");
+    if (r && r.items && r.items.length) {
+      ai.msgs.unshift({ role: "assistant", text: "ადრე მომზადებული მოქმედებები, რომლებიც ჯერ დაუდასტურებელია:", actions: r.items });
+      if (state.tab[state.role] === "ai" && ai.sub === "chat") aiChat(body);
+    }
+  } catch (e) { /* მხოლოდ დამატებითი ინფორმაციაა */ }
+}
+
+/* ---------------------------------------------------------------- 🛡️ კლიენტების დაცვა (Lead Protection) */
+const AI_LEVEL = { high: ["🔴", "მაღალი", "red"], medium: ["🟠", "საშუალო", "amber"], low: ["🟡", "დაბალი", "gray"] };
+
+async function aiLead(body) {
+  body.innerHTML = `<div class="card"><div class="empty">იტვირთება…</div></div>`;
+  let r;
+  try { r = await api("/api/leadguard/report"); } catch (e) { body.innerHTML = `<div class="card"><div class="empty">⚠️ ${esc(e.message)}</div></div>`; return; }
+  const c = r.counts, eng = r.engine || {}, mgr = r.scope !== "own";
+  const lv = (k) => AI_LEVEL[k] || ["•", k, "gray"];
+  const item = (i) => `<div class="card ai-lg lv-${esc(i.level)}"><div class="chip-row"><span class="badge ${lv(i.level)[2]}">${lv(i.level)[0]} ${esc(lv(i.level)[1])}</span><span class="badge gray">${esc(i.kind_label)}</span>${i.reminders_sent ? `<span class="badge gray">🔔 შეხსენება ×${esc(i.reminders_sent)}</span>` : ""}${i.escalated ? `<span class="badge amber">⬆️ მენეჯერს ეცნობა</span>` : ""}</div>
+    <div class="ai-lg-t"><b>${esc(i.client_label)}</b>${mgr && i.agent_name ? ` · ${esc(i.agent_name)}` : ""}</div><div>${esc(i.reason)}</div>
+    <ul class="ai-lg-f">${(i.facts || []).map((f) => `<li>${esc(f)}</li>`).join("")}</ul><div class="ai-lg-n">👉 ${esc(i.next_step)}</div></div>`;
+  body.innerHTML = `<div class="card"><h2>🛡️ კლიენტების დაცვა <span class="cnt">${c.total}</span></h2>
+      <div class="ai-kpis ai-kpis3"><div><b>🔴 ${c.high}</b><span>მაღალი</span></div><div><b>🟠 ${c.medium}</b><span>საშუალო</span></div><div><b>🟡 ${c.low}</b><span>დაბალი</span></div></div>
+      <div class="muted">${r.scope === "all" ? "ყველა გუნდი" : r.scope === "team" ? "თქვენი გუნდი" : "თქვენი კლიენტები"} · განახლდა ${esc(r.generated_at)}</div>
+      <div class="muted">შეხსენებები: <b>${eng.enabled ? "ჩართულია" : "გამორთულია"}</b> · ინტერვალი ${esc(eng.remind_cooldown_h)} სთ · მაქს. ${esc(eng.max_reminders)} შეხსენება · ესკალაცია ${esc(eng.escalate_after_h)} სთ-ის მერე · ღამით (${esc(eng.quiet_hours)}) არ იგზავნება</div>
+      ${(r.data_errors || []).length ? `<div class="ai-warn">⚠️ ვერ ვიკითხე წყარო: ${r.data_errors.map(esc).join(", ")} — ამ ნაწილზე რისკი ვერ შეფასდა (ეს არ ნიშნავს, რომ რისკი არ არსებობს)</div>` : ""}
+      <div class="ai-btns"><button class="btn" id="aiLgAsk">🦸 რას გავაკეთო დღეს?</button><button class="btn secondary" id="aiLgRefresh">🔄</button>${mgr ? `<button class="btn secondary" id="aiLgPreview">👁 რას გააგზავნიდა</button>` : ""}</div></div>
+    ${(r.priorities || []).length ? `<div class="card"><h2>🎯 დღის პრიორიტეტები</h2>${r.priorities.map((p, n) => `<div class="ai-li col"><span><b>${n + 1}) ${lv(p.level)[0]} ${esc(p.client_label)}${mgr && p.agent_name ? " · " + esc(p.agent_name) : ""}</b> — ${esc(p.reason)}</span><span class="muted">👉 ${esc(p.next_step)}</span></div>`).join("")}</div>` : ""}
+    ${mgr && (r.by_agent || []).length ? `<div class="card"><h2>👥 აგენტების მიხედვით</h2>${r.by_agent.map((a) => `<div class="ai-li"><span>${esc(a.agent_name)}${a.team ? " · " + esc(a.team) : ""}</span><b>${a.high ? "🔴 " + a.high + " · " : ""}${a.total}</b></div>`).join("")}</div>` : ""}
+    ${mgr && (r.data_gaps || []).length ? `<div class="card"><h2>ℹ️ მონაცემთა ხარვეზი <span class="cnt">${r.data_gaps.length}</span></h2><div class="muted">ამ ჩანაწერებზე რისკი ვერ შეფასდა — ჯერ მონაცემი უნდა შეივსოს.</div>${r.data_gaps.slice(0, 10).map((g) => `<div class="ai-li"><span>${esc(g.text)}</span></div>`).join("")}</div>` : ""}
+    ${r.items.map(item).join("") || `<div class="card"><div class="empty">რისკი არ ჩანს 🎉<br><span class="muted">ეს ნიშნავს მხოლოდ იმას, რომ დაფიქსირებული მონაცემებით ვადაგადაცილება არ არსებობს.</span></div></div>`}
+    <div class="muted ai-note">${esc(r.disclaimer)}</div>`;
+  document.getElementById("aiLgRefresh").onclick = () => aiLead(body);
+  document.getElementById("aiLgAsk").onclick = () => {
+    state.ai.sub = "chat"; state.ai.prefill = "რომელ კლიენტებს ვკარგავ და რა უნდა გავაკეთო დღეს პირველ რიგში?"; renderAi(document.getElementById("content"));
+  };
+  const pv = document.getElementById("aiLgPreview");
+  if (pv) pv.onclick = async () => {
+    try {
+      const p = await api("/api/leadguard/preview");
+      const rows = p.planned.map((x) => `<div class="field"><div class="k">${x.type === "remind" ? "🔔 შეხსენება აგენტს" : "⬆️ ესკალაცია მენეჯერს"} · ${esc(x.count)} საქმე</div><div class="v">${aiFmt(x.text)}</div></div>`).join("");
+      openDetail("👁 რას გააგზავნიდა ახლა", [], `<div class="muted">${esc(p.note)}${p.quiet_hours_now ? " ახლა ღამის საათებია — არაფერი გაიგზავნება." : ""}${p.engine && !p.engine.enabled ? " ფონური შეხსენებები ჯერ გამორთულია." : ""}</div>${rows || `<div class="empty">ახლა გასაგზავნი არაფერია</div>`}`);
+    } catch (e) { toast(e.message); }
+  };
 }
 
 /* ---------------------------------------------------------------- ცოდნის ბაზა (მენეჯერები) */

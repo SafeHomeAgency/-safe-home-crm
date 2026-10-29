@@ -2542,6 +2542,50 @@ async def check_hub_meetings(context: ContextTypes.DEFAULT_TYPE):
             log.warning("Property Hub შეხსენება ვერ გაიგზავნა (%s)", it.get("chat_id"), exc_info=True)
 
 
+async def check_lead_guard(context: ContextTypes.DEFAULT_TYPE):
+    """SAIRO Lead Protection Engine (15 წთ): ვადაგადაცილებული/დაკარგვის რისკის მქონე კლიენტები -> აგენტს შეხსენება, მენეჯერს ესკალაცია.
+    მდგომარეობა ცხრილშია (LeadGuardLog) — რესტარტი არ აორმაგებს; ღამით არ იგზავნება. LEAD_GUARD_ENABLED=0 -> არაფერს აკეთებს."""
+    if not config.LEAD_GUARD_ENABLED:
+        return
+    try:
+        import lead_guard_jobs
+        msgs = lead_guard_jobs.prepare_cycle()
+    except Exception:
+        log.exception("LeadGuard ციკლი ვერ გაეშვა")
+        return
+    for m in msgs:
+        ok = False
+        try:
+            for cid in m["chat_ids"]:
+                try:
+                    await context.bot.send_message(chat_id=cid, text=m["text"])
+                    ok = True
+                except Exception:
+                    log.warning("LeadGuard შეტყობინება ვერ გაიგზავნა (%s)", cid, exc_info=True)
+        finally:
+            lead_guard_jobs.finish(m, ok)
+
+
+async def send_lead_guard_digest(context: ContextTypes.DEFAULT_TYPE):
+    """SAIRO: ყოველდღიური რისკების ანგარიში — თიმლიდერს თავისი გუნდის, ადმინს სრული (დღეში ერთხელ ადამიანზე)."""
+    if not config.LEAD_GUARD_ENABLED:
+        return
+    try:
+        import lead_guard_jobs
+        msgs = lead_guard_jobs.prepare_digests()
+    except Exception:
+        log.exception("LeadGuard დღიური ანგარიში ვერ ჩამოყალიბდა")
+        return
+    for m in msgs:
+        ok = False
+        try:
+            await context.bot.send_message(chat_id=m["chat_id"], text=m["text"])
+            ok = True
+        except Exception:
+            log.warning("LeadGuard ანგარიში ვერ გაიგზავნა (%s)", m.get("chat_id"), exc_info=True)
+        finally:
+            lead_guard_jobs.finish_digest(m, ok)
+
 async def send_contracts_daily_summary(context: ContextTypes.DEFAULT_TYPE):
     """ადმინებისა და პასუხისმგებელი თანამშრომლების ყოველდღიური შეჯამება ხელშეკრულებების მარაგსა და ვადებზე."""
     try:
@@ -3254,6 +3298,11 @@ def main():
         app.job_queue.run_repeating(_tracked(check_queue_health, 300), interval=300, first=210)
         app.job_queue.run_repeating(_tracked(check_contract_deadlines, 900), interval=900, first=260)
         app.job_queue.run_repeating(_tracked(check_hub_meetings, 600), interval=600, first=280)
+        app.job_queue.run_repeating(_tracked(check_lead_guard, 900), interval=900, first=340)
+        app.job_queue.run_daily(
+            _tracked(send_lead_guard_digest, 86400),
+            time=datetime.time(hour=config.LEAD_GUARD_REPORT_HOUR, minute=15, tzinfo=ZoneInfo(config.TIMEZONE)),
+        )
         app.job_queue.run_repeating(_tracked(check_district_shuffle, 1800), interval=1800, first=320)
         app.job_queue.run_daily(
             _tracked(send_finance_reminders, 86400),

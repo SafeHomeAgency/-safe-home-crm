@@ -962,3 +962,19 @@ button.chip { cursor: pointer; font-family: inherit; }
 .ai-li.col { flex-direction: column; align-items: flex-start; gap: 2px; }
 .ai-warn { margin-top: 8px; padding: 9px 11px; border-radius: 12px; background: rgba(245, 185, 66, .1); border: 1px solid rgba(245, 185, 66, .3); font-size: 12.5px; line-height: 1.5; }
 @media (max-width: 380px) { .ai-kpis { grid-template-columns: repeat(3, 1fr); } .ai-msg { max-width: 100%; } }
+
+/* ================================================ SAIRO: მოქმედების ბარათები + კლიენტების დაცვა (ახალი; არსებულს არ ცვლის) ================================================ */
+.ai-act-card { margin-top: 10px; padding: 11px 12px; border-radius: 14px; background: rgba(201, 162, 39, .08); border: 1px solid rgba(201, 162, 39, .4); font-size: 13.5px; line-height: 1.5; }
+.ai-act-card.done { background: rgba(147, 166, 188, .08); border-color: var(--hairline); }
+.ai-act-card.err { border-color: rgba(242, 109, 109, .45); }
+.ai-act-h { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 6px; }
+.ai-act-r { margin: 5px 0; word-break: break-word; }
+.ai-act-edit { margin: 8px 0; }
+.ai-act-edit summary { cursor: pointer; color: var(--gold-light); font-size: 12.5px; }
+.ai-lg { border-left: 3px solid var(--hairline); }
+.ai-lg.lv-high { border-left-color: var(--red); }
+.ai-lg.lv-medium { border-left-color: var(--amber); }
+.ai-lg-t { margin: 8px 0 2px; font-size: 14.5px; }
+.ai-lg-f { margin: 6px 0; padding-left: 18px; color: var(--hint); font-size: 12.5px; }
+.ai-lg-n { margin-top: 6px; color: var(--gold-light); font-size: 13px; }
+.ai-kpis3 { grid-template-columns: repeat(3, 1fr); }

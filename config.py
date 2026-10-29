@@ -149,6 +149,7 @@ RATE_LIMITS = {
     "ai_ask": (8, 60),             # Safe Home AI: კითხვა (მომხმარებელზე; ყოველი კითხვა ფასიანია)
     "ai_read": (120, 60),          # Safe Home AI: ისტორია/ცოდნის ბაზა/დაშბორდი (წაკითხვა)
     "ai_write": (40, 60),          # Safe Home AI: უკუკავშირი, ცოდნის ბაზის რედაქტირება/დამტკიცება
+    "leadguard_read": (60, 60),    # SAIRO Lead Protection: რისკების ანგარიში/წინასწარი ნახვა (წაკითხვა)
 }
 RATE_LIMIT_ENABLED = os.environ.get("RATE_LIMIT_ENABLED", "1").strip().lower() not in ("0", "false", "no")
 
@@ -318,3 +319,24 @@ AI_KB_RESTRICTED_CATEGORIES = {
 }
 AI_KB_TEAMLEAD_CAN_PUBLISH = _flag("AI_KB_TEAMLEAD_CAN_PUBLISH", "1")
 AI_CANDIDATE_LOOKBACK_DAYS = int(os.environ.get("AI_CANDIDATE_LOOKBACK_DAYS", "60"))   # მენეჯერის პასუხები კანდიდატად ამ პერიოდიდან
+
+
+# --- SAIRO: Lead Protection Engine + AI მოქმედებები + ბიუჯეტის დამცავი ----------------------------------------
+# LEAD_GUARD_ENABLED=0 (ნაგულისხმევი) — ფონური შეხსენებები/ესკალაცია/დღიური ანგარიში გამორთულია (ანგარიში Mini App-ში მაინც ჩანს, ის მხოლოდ კითხვაა).
+LEAD_GUARD_ENABLED = _flag("LEAD_GUARD_ENABLED", "0")
+LEAD_GUARD_PILOT_TEAMS = {x.strip() for x in os.environ.get("LEAD_GUARD_PILOT_TEAMS", "").split(",") if x.strip()}   # ცარიელი = ყველა გუნდი; მითითებისას შეხსენება/ესკალაცია/ანგარიში მხოლოდ ამ გუნდებზე (პილოტი)
+LEAD_GUARD_REPORT_HOUR = int(os.environ.get("LEAD_GUARD_REPORT_HOUR", "9"))                  # დღიური ანგარიში მენეჯერებს/ადმინს (თბილისი)
+LEAD_GUARD_REMIND_COOLDOWN_H = float(os.environ.get("LEAD_GUARD_REMIND_COOLDOWN_H", "24"))   # ერთი საქმის შეხსენებებს შორის მინიმუმი
+LEAD_GUARD_MAX_REMINDERS = int(os.environ.get("LEAD_GUARD_MAX_REMINDERS", "3"))             # ამდენი შეხსენების მერე — ესკალაცია, აღარ ვიმეორებთ
+LEAD_GUARD_ESCALATE_AFTER_H = float(os.environ.get("LEAD_GUARD_ESCALATE_AFTER_H", "24"))    # რამდენი საათის გადაცილების მერე ეცნობება მენეჯერს
+LEAD_GUARD_HIGH_AFTER_H = float(os.environ.get("LEAD_GUARD_HIGH_AFTER_H", "72"))            # „მაღალი რისკი“
+LEAD_GUARD_SILENT_DAYS = int(os.environ.get("LEAD_GUARD_SILENT_DAYS", "3"))                 # აქტიური კლიენტი N დღეა უაქტივობაა და follow-up არ აქვს
+LEAD_GUARD_SILENT_MAX_DAYS = int(os.environ.get("LEAD_GUARD_SILENT_MAX_DAYS", "30"))        # ამაზე ძველი „მიძინებული“ კლიენტი რისკად არ ითვლება
+LEAD_GUARD_QUIET_FROM = int(os.environ.get("LEAD_GUARD_QUIET_FROM", "22"))                  # ღამის საათები: შეხსენება არ იგზავნება (დილას გაგრძელდება)
+LEAD_GUARD_QUIET_TO = int(os.environ.get("LEAD_GUARD_QUIET_TO", "8"))
+# AI ბიუჯეტი: ხისტი ზღვარი = AI_MONTHLY_BUDGET_USD × (1 − ბუფერი%); გამოძახებამდე ვამოწმებთ „ახლანდელი ხარჯი + ამ გამოძახების მაქსიმუმი“-ს
+AI_BUDGET_BUFFER_PCT = float(os.environ.get("AI_BUDGET_BUFFER_PCT", "10"))
+AI_MODEL_FAST = os.environ.get("AI_MODEL_FAST", "").strip()                                 # იაფი მოდელი მარტივი კითხვებისთვის (ცარიელი = მარშრუტიზაცია გამორთულია)
+AI_ACTION_TTL_MINUTES = int(os.environ.get("AI_ACTION_TTL_MINUTES", "30"))                  # მოქმედების დადასტურების ვადა
+AI_ACTION_MAX_RECIPIENTS = int(os.environ.get("AI_ACTION_MAX_RECIPIENTS", "60"))
+AI_ACTION_MAX_MESSAGES_PER_DAY = int(os.environ.get("AI_ACTION_MAX_MESSAGES_PER_DAY", "5"))             # ჯგუფური გაგზავნა მენეჯერზე დღეში
