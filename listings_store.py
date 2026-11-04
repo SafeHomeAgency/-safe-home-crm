@@ -252,6 +252,11 @@ def _match(row: dict, f: dict, viewer: dict, skip: str = "") -> bool:
         return False
     if f.get("not_last") and (fl is None or fls is None or fl >= fls):
         return False
+    if skip != "street" and f.get("street"):
+        want = _lc(f["street"])
+        stem = want[: max(4, len(want) - 2)] if len(want) > 5 else want
+        if stem not in m.street_parts(row.get("address"))[0] and stem not in _lc(row.get("address")):
+            return False
     if f.get("turkeys") and _lc(row.get("turkeys")) != "yes":
         return False
     if f.get("pets") and _lc(row.get("pets")) != _lc(f["pets"]):
@@ -315,6 +320,16 @@ def query(f: dict, viewer: dict, now: datetime.datetime | None = None) -> dict:
         d = _s(r.get("district"))
         if d:
             dcount[d] = dcount.get(d, 0) + 1
+    no_street = [r for r in rows if _match(r, f, viewer, skip="street")]       # ქუჩების ჩამონათვალი (ავტოდამატება): ამჟამინდელი ფილტრებით, ქუჩის გარეშე
+    if wanted:
+        no_street = [r for r in no_street if m.freshness(r, now, th)["color"] in wanted]
+    scount: dict[str, list] = {}
+    for r in no_street:
+        sk, sname, _h = m.street_parts(r.get("address"))
+        if sk:
+            e = scount.setdefault(sk, [sk, 0])           # სახელი = გასაღები (ტიპის სიტყვების — "ქ.", "გამზ." — გარეშე)
+            e[1] += 1
+    streets = [{"name": v[0], "count": v[1]} for _k, v in sorted(scount.items(), key=lambda kv: (-kv[1][1], kv[0]))[:60]]
     no_fresh = [r for r in rows if _match(r, f, viewer)]
     fcount = {c: 0 for c in m.FRESH_LABELS}
     for r in no_fresh:
@@ -325,7 +340,7 @@ def query(f: dict, viewer: dict, now: datetime.datetime | None = None) -> dict:
     return {
         "items": items, "total": len(ordered), "page": page, "per_page": per,
         "facets": {"districts": [{"name": k, "count": v} for k, v in sorted(dcount.items(), key=lambda kv: (-kv[1], kv[0]))],
-                   "cities": cities, "fresh": fcount,
+                   "streets": streets, "cities": cities, "fresh": fcount,
                    "deal_types": sorted({_s(r.get("deal_type")) for r in visible_all if _s(r.get("deal_type"))}),
                    "property_types": sorted({_s(r.get("property_type")) for r in visible_all if _s(r.get("property_type"))})},
         "meta": {"total_all": len(visible_all), "mine_total": mine_total, "thresholds": th, "fresh_labels": m.FRESH_LABELS},
@@ -382,7 +397,7 @@ def set_active(listing_id: str, viewer: dict, active: bool) -> dict:
         return {"listing_id": _s(r.get("listing_id")), "active": "yes" if active else "no"}
 
 
-def map_points(f: dict, viewer: dict, now: datetime.datetime | None = None, limit: int = 5000) -> dict:
+def map_points(f: dict, viewer: dict, now: datetime.datetime | None = None, limit: int = 1500) -> dict:
     """რუკისთვის: ფილტრებს დაქვემდებარებული განცხადებები **რეალური კოორდინატებით** (გამოგონილ წერტილს არ ვხატავთ). მხოლოდ საჯარო ველები."""
     now = now or now_dt()
     th = m.thresholds()
@@ -401,12 +416,9 @@ def map_points(f: dict, viewer: dict, now: datetime.datetime | None = None, limi
         ph = m.photo_list(r)
         pts.append({"id": _s(r.get("listing_id")), "lat": lat, "lng": lng, "price": m.num(r.get("price_usd")), "deal": _s(r.get("deal_type")),
                     "rooms": _s(r.get("rooms")), "area": m.num(r.get("area")), "fr": fr, "photo": ph[0] if ph else "",
-                    "district": _s(r.get("district")), "mine": bool(viewer.get("agent_id") and _s(r.get("agent_id")) == _s(viewer.get("agent_id"))),
-                    "_c": _s(r.get("created_at"))})
-    # ლიმიტზე მეტისას ჯერ უახლესები რჩება (ადრე ID-ით დალაგებისას ახალი, მაგ. ბათუმის, განცხადებები იჭრებოდა)
-    pts.sort(key=lambda p: (p["_c"], p["id"]), reverse=True)
-    for p in pts:
-        p.pop("_c", None)
+                    "floor": _s(r.get("floor")), "floors": _s(r.get("floors")), "addr": _s(r.get("address")), "b": m.building_key(r),
+                    "district": _s(r.get("district")), "mine": bool(viewer.get("agent_id") and _s(r.get("agent_id")) == _s(viewer.get("agent_id")))})
+    pts.sort(key=lambda p: p["id"])
     return {"points": pts[:limit], "total": len(pts), "no_coords": nocoord, "truncated": len(pts) > limit}
 
 

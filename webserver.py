@@ -103,6 +103,42 @@ def _track_request(resp):
     return resp
 
 
+_GZIP_TYPES = ("text/html", "text/css", "text/plain", "application/javascript", "text/javascript", "application/json")
+_GZIP_MIN = 1024
+_gz_static: dict = {}                                   # (ETag, სიგრძე) -> შეკუმშული ბაიტები (app.js 500KB-ს ყოველ მოთხოვნაზე თავიდან არ ვკუმშავთ)
+
+
+@app.after_request
+def _compress_response(resp):
+    """gzip ტექსტურ პასუხებზე (app.js 509KB -> ~110KB): Mini App-ის გახსნა მობილურზე სწრაფდება.
+    გამორთვა: HTTP_GZIP=0. ნებისმიერი შეცდომისას პასუხი უცვლელად გადის (შეკუმშვამ მოთხოვნას არასდროს უნდა შეუშალოს ხელი)."""
+    try:
+        if os.environ.get("HTTP_GZIP", "1") == "0" or resp.status_code != 200 or resp.is_streamed and not resp.direct_passthrough:
+            return resp
+        if resp.headers.get("Content-Encoding") or "gzip" not in (request.headers.get("Accept-Encoding") or "").lower():
+            return resp
+        if (resp.mimetype or "") not in _GZIP_TYPES:
+            return resp
+        resp.direct_passthrough = False
+        data = resp.get_data()
+        if len(data) < _GZIP_MIN:
+            return resp
+        import gzip
+        key = (resp.headers.get("ETag"), len(data)) if resp.headers.get("ETag") else None
+        packed = _gz_static.get(key) if key else None
+        if packed is None:
+            packed = gzip.compress(data, compresslevel=6, mtime=0)
+            if key and len(_gz_static) < 8:
+                _gz_static[key] = packed
+        resp.set_data(packed)
+        resp.headers["Content-Encoding"] = "gzip"
+        resp.headers["Content-Length"] = str(len(packed))
+        resp.headers.add("Vary", "Accept-Encoding")
+    except Exception:  # noqa: BLE001
+        log.warning("gzip შეკუმშვა ვერ მოხერხდა — პასუხი უცვლელად გადის", exc_info=True)
+    return resp
+
+
 def _save_base64_photos(photos) -> list[str]:
     """Mini App-იდან მოსული base64 ფოტოების (data URI) დისკზე
     შენახვა — აბრუნებს შენახული ფაილების ფარდობით გზებს (`file_id`
@@ -3048,6 +3084,18 @@ def app_js():
     return send_from_directory(BASE_DIR, "app.js")
 
 
+@app.get("/building3d.js")
+def building3d_js():
+    """რუკის შენობის 3D ხედი (სტატიკური UI-სკრიპტი, მონაცემის გარეშე)."""
+    return send_from_directory(BASE_DIR, "building3d.js")
+
+
+@app.get("/polish.js")
+def polish_js():
+    """UI-ს "პოლიშის" ფენა (გახსნის ანიმაცია, კოპირება/ჩასმა) — არ არსებობს => 404, app.js ამას უბრალოდ უგულებელყოფს."""
+    return send_from_directory(BASE_DIR, "polish.js")
+
+
 def _photo_owner_report(filename: str) -> dict | None:
     """იმ რეპორტის პოვნა, რომლის file_id-შიც ეს ფოტოა მითითებული."""
     needle = f"uploads/reports/{filename}"
@@ -3291,16 +3339,6 @@ myhome_bulk_retry.register(
 import myhome_export_api  # noqa: E402
 
 myhome_export_api.register(app, authed_worker=_authed_worker, rate_limited=rate_limited, sheets=_SheetsProxy())
-
-
-# MyHome job-ების მასობრივი დამატება ერთი აგენტის სახელით — მხოლოდ worker-ის გასაღებით (ჩავარდნა სერვერს არ აჩერებს)
-try:
-    import myhome_bulk_create  # noqa: E402
-    myhome_bulk_create.register(app, authed_worker=_authed_worker, rate_limited=rate_limited,
-                                sheets=_SheetsProxy() if "_SheetsProxy" in globals() else sheets,
-                                send_message=_send_telegram_message)
-except Exception:
-    log.exception("myhome_bulk_create ვერ ჩაირთო")
 
 
 def run():

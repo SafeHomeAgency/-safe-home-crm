@@ -1,5 +1,12 @@
 /* Safe Home Agency — Mini App dashboard (frontend, no build step). */
 
+/* "პოლიშის" ფენა (გახსნის ანიმაცია, ფონტი, კოპირება/ჩასმა) — ცალკე ფაილია; ვერ ჩაიტვირთა => აპი ძველებურად მუშაობს. გამორთვა: localStorage shPolish=0 */
+(function () {
+  try { if (localStorage.getItem("shPolish") === "0") return; } catch (e) { /* ignore */ }
+  const s = document.createElement("script"); s.src = "/polish.js?v=1"; s.async = true; s.onerror = () => { /* არაფერი */ };
+  document.head.appendChild(s);
+})();
+
 /* დაუჭერელი JS შეცდომების "დაჭერა" — რომ თუ რამე გაფუჭდა, ეკრანი
    უბრალოდ არ "გაშავდეს" დუმილში, არამედ თავად შეცდომის ტექსტი ჩანდეს
    (ეს გვეხმარება მალე ვიპოვოთ პრობლემა). */
@@ -279,7 +286,27 @@ function openClientReportModal({ phones, mandatory, onSubmit }) {
   };
 }
 
+/* GET-ების დაჩქარება: ერთი და იგივე მოთხოვნა 3 წამში ერთხელ მიდის სერვერზე (ტაბებს შორის სწრაფი გადართვა, ორმაგი გამოძახება);
+   ნებისმიერი ჩაწერა (POST/PUT/DELETE) ქეშს ასუფთავებს, AI/ჯანმრთელობის გამოძახებები ქეშში არ მოდის. */
+const _apiGetCache = new Map();
+const API_GET_TTL = 3000;
 async function api(path, opts) {
+  const method = String((opts && opts.method) || "GET").toUpperCase();
+  if (method !== "GET") { _apiGetCache.clear(); return _apiFetch(path, opts); }
+  if (/\/api\/(ai|health)\b|[?&]nocache=1/.test(path)) return _apiFetch(path, opts);
+  const hit = _apiGetCache.get(path);
+  if (hit && Date.now() - hit.t < API_GET_TTL) {
+    const body = await hit.p;
+    return typeof structuredClone === "function" ? structuredClone(body) : body;
+  }
+  const p = _apiFetch(path, opts);
+  _apiGetCache.set(path, { t: Date.now(), p });
+  p.catch(() => { if (_apiGetCache.get(path) && _apiGetCache.get(path).p === p) _apiGetCache.delete(path); });
+  if (_apiGetCache.size > 60) _apiGetCache.delete(_apiGetCache.keys().next().value);
+  const out = await p;
+  return typeof structuredClone === "function" ? structuredClone(out) : out;
+}
+async function _apiFetch(path, opts) {
   const headers = Object.assign(
     { "Content-Type": "application/json", "X-Telegram-Init-Data": tg ? tg.initData : "" },
     (opts && opts.headers) || {}
@@ -4677,7 +4704,7 @@ const HUB_CITIES = { თბილისი: [41.7151, 44.8271, 12], ბათუ
 const HUB_FR_RANK = { green: 0, orange: 1, red: 2, grey: 3 };
 state.hub = state.hub || {
   q: "", deal: "", ptype: "", rooms: [], pmin: "", pmax: "", district: "", fresh: [], mine: false, favOnly: false, agent: "", sort: "new",
-  bedrooms: [], amin: "", amax: "", fmin: "", fmax: "", tmin: "", tmax: "", notFirst: false, notLast: false, pets: "", turkeys: false, myDist: false, myDistNames: null, lead: null,
+  bedrooms: [], amin: "", amax: "", fmin: "", fmax: "", tmin: "", tmax: "", notFirst: false, notLast: false, pets: "", turkeys: false, street: "", myDist: false, myDistNames: null, lead: null,
   view: "list", page: 1, items: [], total: 0, facets: null, meta: null, seq: 0, panel: false, loading: false, err: "", ins: null, insOpen: false,
   map: null, mapSeq: 0,
 };
@@ -4746,7 +4773,7 @@ function hubEff() {                        // ეფექტური ფილ
 }
 function hubActiveCount() {                // ფილტრების რაოდენობა ⚙️ ღილაკის ბეჯისთვის
   const h = state.hub;
-  return [h.ptype, h.district, h.pmin, h.pmax, h.amin, h.amax, h.fmin, h.fmax, h.tmin, h.tmax, h.pets, h.turkeys].filter(Boolean).length
+  return [h.ptype, h.district, h.pmin, h.pmax, h.amin, h.amax, h.fmin, h.fmax, h.tmin, h.tmax, h.pets, h.turkeys, h.street].filter(Boolean).length
     + (h.rooms.length ? 1 : 0) + (h.bedrooms.length ? 1 : 0) + (h.notFirst ? 1 : 0) + (h.notLast ? 1 : 0) + (h.myDist ? 1 : 0);
 }
 function hubQS(page, forMap) {
@@ -4757,6 +4784,7 @@ function hubQS(page, forMap) {
   add("bedrooms", e.bedrooms); add("area_min", e.amin); add("area_max", e.amax); add("floor_min", h.fmin); add("floor_max", h.fmax);
   add("floors_min", h.tmin); add("floors_max", h.tmax); add("pets", e.pets);
   if (e.turkeys) p.push("turkeys=yes");
+  add("street", h.street);
   if (h.notFirst) p.push("not_first=1");
   if (h.notLast) p.push("not_last=1");
   if (h.mine) p.push("mine=1");
@@ -4828,7 +4856,7 @@ function hubDrawChips() {
 function hubKeepPanel() {
   const h = state.hub, g = (id) => { const e = document.getElementById(id); return e ? e.value : null; };
   const set = (key, id, fn) => { const v = g(id); if (v !== null) h[key] = fn ? fn(v) : v; };
-  set("ptype", "hubPtype"); set("district", "hubDistrict"); set("pmin", "hubPmin", hubNum); set("pmax", "hubPmax", hubNum);
+  set("ptype", "hubPtype"); set("district", "hubDistrict"); set("street", "hubStreet", (v) => String(v).trim()); set("pmin", "hubPmin", hubNum); set("pmax", "hubPmax", hubNum);
   set("amin", "hubAmin", hubNum); set("amax", "hubAmax", hubNum); set("fmin", "hubFmin", hubNum); set("fmax", "hubFmax", hubNum); set("tmin", "hubTmin", hubNum); set("tmax", "hubTmax", hubNum);
 }
 function hubDrawPanel() {
@@ -4841,6 +4869,8 @@ function hubDrawPanel() {
     <div class="hub-grid2">
       <label>ქონების ტიპი<select id="hubPtype">${opts(f.property_types || [], h.ptype, "ყველა")}</select></label>
       <label>რაიონი<select id="hubDistrict">${opts(f.districts || [], h.district, "ყველა")}</select></label>
+      <label style="grid-column:1/-1">🛣 ქუჩა<input id="hubStreet" list="hubStreets" autocomplete="off" value="${esc(h.street)}" placeholder="მაგ. ჭავჭავაძის — აკრიფეთ ან აირჩიეთ"><datalist id="hubStreets">${(f.streets || []).map((s) => `<option value="${esc(s.name)}">${s.count}</option>`).join("")}</datalist></label>
+      <div class="hub-row" style="grid-column:1/-1;margin:-2px 0 4px">${(f.streets || []).slice(0, 8).map((s) => `<button class="hub-chip ${h.street === s.name ? "on" : ""}" data-hub-street="${esc(s.name)}">${esc(s.name)} <small>${s.count}</small></button>`).join("")}</div>
       <label>ფასი, $ (დან)<input id="hubPmin" inputmode="numeric" value="${esc(h.pmin)}" placeholder="0"></label>
       <label>ფასი, $ (მდე)<input id="hubPmax" inputmode="numeric" value="${esc(h.pmax)}" placeholder="∞"></label>
     </div>
@@ -4868,11 +4898,12 @@ function hubDrawPanel() {
   const keepInputs = hubKeepPanel;
   el.querySelectorAll("[data-hub-bed]").forEach((b) => { b.onclick = () => { keepInputs(); const r = b.dataset.hubBed; h.bedrooms = h.bedrooms.includes(r) ? h.bedrooms.filter((x) => x !== r) : h.bedrooms.concat(r); hubDrawPanel(); }; });
   el.querySelectorAll("[data-hub-tog]").forEach((b) => { b.onclick = () => { keepInputs(); h[b.dataset.hubTog] = !h[b.dataset.hubTog]; hubDrawPanel(); }; });
+  el.querySelectorAll("[data-hub-street]").forEach((b) => { b.onclick = () => { keepInputs(); h.street = h.street === b.dataset.hubStreet ? "" : b.dataset.hubStreet; hubDrawPanel(); }; });
   el.querySelectorAll("[data-hub-pets]").forEach((b) => { b.onclick = () => { keepInputs(); h.pets = h.pets === b.dataset.hubPets ? "" : b.dataset.hubPets; hubDrawPanel(); }; });
   document.getElementById("hubApply").onclick = () => { keepInputs(); h.panel = false; hubReload(); };
   document.getElementById("hubReset").onclick = () => {
     Object.assign(h, { q: "", deal: "", ptype: "", rooms: [], pmin: "", pmax: "", district: "", fresh: [], mine: false, favOnly: false, agent: "", sort: "new", panel: false,
-      bedrooms: [], amin: "", amax: "", fmin: "", fmax: "", tmin: "", tmax: "", notFirst: false, notLast: false, pets: "", turkeys: false, myDist: false, myDistNames: null });
+      bedrooms: [], amin: "", amax: "", fmin: "", fmax: "", tmin: "", tmax: "", notFirst: false, notLast: false, pets: "", turkeys: false, street: "", myDist: false, myDistNames: null });
     const s = document.getElementById("hubQ"); if (s) s.value = "";
     hubReload();
   };
@@ -5013,6 +5044,7 @@ async function hubOpenDetail(idOrItem) {
         <button class="btn secondary" id="hubSold">🏁 ${/ქირ/.test(it.deal_type || "") ? "გაქირავდა" : "გაიყიდა"}</button></div></div>` : ""}
     <div class="hub-row" style="margin-top:12px">${links}<button class="btn secondary" id="hubCopy">📋 კოპირება</button><button class="btn" id="hubCoop">${it.private ? "📅 შეხვედრა" : "🤝 შეხვედრა + თანამშრომლობა"}</button>
       ${state.hub.ins && state.hub.ins.scope !== "mine" ? `<button class="btn secondary" id="hubAssign">👤 კლიენტის გადაბარება</button>` : ""}</div>`;
+  if (typeof window.shDoor === "function") window.shDoor();           /* კარი იღება (polish.js; არ არსებობს => უბრალოდ იხსნება) */
   backdrop.hidden = false;
   document.getElementById("modalClose").onclick = closeDetail;
   backdrop.onclick = (e) => { if (e.target === backdrop) closeDetail(); };
@@ -5073,6 +5105,43 @@ function hubCluster(points, project, cell) {
              lat: g.items.reduce((s, p) => s + p.lat, 0) / n, lng: g.items.reduce((s, p) => s + p.lng, 0) / n };
   });
 }
+/* წმინდა ფუნქცია: ერთი შენობის (b გასაღები) 2+ ბინა -> "შენობა"; დანარჩენი — ცალკე წერტილები */
+function hubBuildings(points) {
+  const by = new Map(), singles = [];
+  points.forEach((p) => { if (p.b) { if (!by.has(p.b)) by.set(p.b, []); by.get(p.b).push(p); } else singles.push(p); });
+  const buildings = [];
+  by.forEach((arr) => {
+    if (arr.length < 2) { singles.push(arr[0]); return; }
+    const best = arr.reduce((a, b) => (HUB_FR_RANK[b.fr] < HUB_FR_RANK[a.fr] ? b : a)), prices = arr.map((p) => p.price).filter((v) => v != null);
+    buildings.push({ b: arr[0].b, items: arr, n: arr.length, fr: best.fr, minPrice: prices.length ? Math.min(...prices) : null,
+                     lat: arr.reduce((s, p) => s + p.lat, 0) / arr.length, lng: arr.reduce((s, p) => s + p.lng, 0) / arr.length });
+  });
+  return { buildings, singles };
+}
+function hubBldPill(g) { return `<div class="hub-pill hub-bld fr-b-${g.fr}">🏢 <b>${g.n}</b> <small>from ${hubShort(g.minPrice)}</small></div>`; }
+let _hub3d = null;
+function hubLoad3d() {
+  if (typeof window.shBuilding3D === "function") return Promise.resolve(true);
+  if (_hub3d) return _hub3d;
+  _hub3d = new Promise((resolve) => {
+    const js = document.createElement("script"); js.src = "/building3d.js?v=1";
+    js.onload = () => resolve(typeof window.shBuilding3D === "function"); js.onerror = () => { _hub3d = null; resolve(false); };
+    document.head.appendChild(js);
+  });
+  return _hub3d;
+}
+async function hubOpenBuilding(b) {
+  hubHaptic();
+  if (await hubLoad3d()) { window.shBuilding3D(b, { open: (id) => hubOpenDetail(id) }); return; }
+  /* 3D ვერ ჩაიტვირთა — მარტივი სია */
+  const backdrop = document.getElementById("modalBackdrop"), box = document.getElementById("modalBox");
+  box.innerHTML = `<h3>🏢 ${esc((b.items[0] && b.items[0].addr) || "შენობა")}<button class="close" id="modalClose">✕</button></h3>` +
+    b.items.slice().sort((x, y) => (parseInt(y.floor, 10) || 0) - (parseInt(x.floor, 10) || 0)).map((p) => `<div class="hub-kv" data-bid="${esc(p.id)}" style="cursor:pointer"><span>${esc(p.floor || "?")} სართ. · ${esc(p.rooms || "")} ოთ</span><b>${hubMoney(p.price)}</b></div>`).join("");
+  backdrop.hidden = false;
+  document.getElementById("modalClose").onclick = closeDetail;
+  backdrop.onclick = (e) => { if (e.target === backdrop) closeDetail(); };
+  box.querySelectorAll("[data-bid]").forEach((r) => { r.onclick = () => hubOpenDetail(r.dataset.bid); });
+}
 function hubPill(g) {
   const rent = g.n === 1 && /ქირ/.test(g.items[0].deal || "");
   const label = g.n === 1 ? hubShort(g.items[0].price) + (rent ? "/თვე" : "") : `from ${hubShort(g.minPrice)} <b>${g.n}</b>`;
@@ -5091,95 +5160,39 @@ async function hubMapRefresh() {
   if (seq !== h.mapSeq || h.view !== "map") return;
   if (!h.map || !h.map.map || !document.getElementById("hubMapCanvas")) {
     box.innerHTML = `<div id="hubMapCanvas"></div>
-      <div class="hub-map-top"><div class="hub-row" style="margin:0">${Object.keys(HUB_CITIES).map((c) => `<button class="hub-chip" data-hub-city="${c}">${c}</button>`).join("")}<button class="hub-chip" id="hubMapLocate" title="ჩემი მდებარეობა">📍</button></div></div>
-      <div class="hub-map-legend"><span class="fr-green"><i></i>ახალი</span><span class="fr-orange"><i></i>საშუალო</span><span class="fr-red"><i></i>ძველი</span></div>
-      <div class="hub-mprev" id="hubMapPrev" hidden></div>`;
+      <div class="hub-map-top"><div class="hub-row" style="margin:0">${Object.keys(HUB_CITIES).map((c) => `<button class="hub-chip" data-hub-city="${c}">${c}</button>`).join("")}</div></div>
+      <div class="hub-map-legend"><span class="fr-green"><i></i>ახალი</span><span class="fr-orange"><i></i>საშუალო</span><span class="fr-red"><i></i>ძველი</span></div>`;
     const map = L.map("hubMapCanvas", { zoomControl: true, attributionControl: true, preferCanvas: true }).setView([41.7151, 44.8271], 12);
     L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", { maxZoom: 19, attribution: "© OpenStreetMap" }).addTo(map);   /* მუქი სტილი CSS ფილტრით (.hub-mapbox .leaflet-tile-pane) */
     const layer = L.layerGroup().addTo(map);
-    h.map = { map, layer, fitted: false, points: [], me: null };
+    h.map = { map, layer, fitted: false, points: [] };
     map.on("zoomend moveend", () => hubMapDraw());
-    map.on("click", () => hubMapPreview(null));
-    box.querySelectorAll("[data-hub-city]").forEach((b) => { b.onclick = () => { hubHaptic(); hubMapPreview(null); const c = HUB_CITIES[b.dataset.hubCity]; map.flyTo([c[0], c[1]], c[2], { duration: 0.8 }); }; });
-    document.getElementById("hubMapLocate").onclick = () => hubMapLocate();
+    box.querySelectorAll("[data-hub-city]").forEach((b) => { b.onclick = () => { hubHaptic(); const c = HUB_CITIES[b.dataset.hubCity]; map.flyTo([c[0], c[1]], c[2], { duration: 0.8 }); }; });
     setTimeout(() => map.invalidateSize(), 60);
   }
   h.map.points = data.points;
-  const byCity = hubMapCityCounts(data.points);
-  box.querySelectorAll("[data-hub-city]").forEach((b) => { const n = byCity[b.dataset.hubCity] || 0; b.innerHTML = `${esc(b.dataset.hubCity)}${n ? ` <b>${n}</b>` : ""}`; });
-  if (info) info.textContent = `🗺 ${data.total} განცხადება რუკაზე${data.no_coords ? ` · ${data.no_coords} კოორდინატის გარეშე (სიაში ჩანს)` : ""}${data.truncated ? " · ნაწილი (დააზუსტეთ ფილტრი)" : ""}`;
+  if (info) info.textContent = `🗺 ${data.total} განცხადება რუკაზე${data.no_coords ? ` · ${data.no_coords} კოორდინატის გარეშე (სიაში ჩანს)` : ""}${data.truncated ? " · ნაწილი" : ""}`;
   if (data.points.length && !h.map.fitted) {
     h.map.fitted = true;
-    // საწყისი ხედი — ქალაქი, სადაც ყველაზე მეტი განცხადებაა (თბილისი+ბათუმი ერთად ძალიან შორიდან ჩანდა)
-    const top = Object.keys(byCity).sort((a, b) => byCity[b] - byCity[a])[0];
-    const pts = data.points.filter((p) => hubMapCityOf(p) === top);
-    try { h.map.map.fitBounds((pts.length ? pts : data.points).map((p) => [p.lat, p.lng]), { padding: [40, 40], maxZoom: 15 }); } catch (e) { /* ignore */ }
+    try { h.map.map.fitBounds(data.points.map((p) => [p.lat, p.lng]), { padding: [40, 40], maxZoom: 15 }); } catch (e) { /* ignore */ }
   }
   hubMapDraw();
-}
-/* წერტილის ქალაქი — უახლოესი ცენტრი HUB_CITIES-დან */
-function hubMapCityOf(p) {
-  let best = null, bd = Infinity;
-  Object.keys(HUB_CITIES).forEach((c) => { const d = (p.lat - HUB_CITIES[c][0]) ** 2 + (p.lng - HUB_CITIES[c][1]) ** 2; if (d < bd) { bd = d; best = c; } });
-  return best;
-}
-function hubMapCityCounts(points) {
-  const out = {};
-  points.forEach((p) => { const c = hubMapCityOf(p); out[c] = (out[c] || 0) + 1; });
-  return out;
-}
-function hubMapLocate() {
-  const m = state.hub.map;
-  if (!m || !navigator.geolocation) { toast("მდებარეობა მიუწვდომელია"); return; }
-  hubHaptic();
-  navigator.geolocation.getCurrentPosition((pos) => {
-    const ll = [pos.coords.latitude, pos.coords.longitude];
-    if (m.me) m.me.remove();
-    m.me = L.circleMarker(ll, { radius: 8, color: "#fff", weight: 3, fillColor: "#3b82f6", fillOpacity: 1 }).addTo(m.map);
-    m.map.flyTo(ll, 15, { duration: 0.8 });
-  }, () => toast("მდებარეობის ნებართვა არ არის"), { enableHighAccuracy: true, timeout: 10000 });
-}
-/* ერთი განცხადების მოკლე ბარათი რუკის ქვემოთ (p = null — დახურვა) */
-function hubMapPreview(p) {
-  const el = document.getElementById("hubMapPrev");
-  if (!el) return;
-  if (!p) { el.hidden = true; el.innerHTML = ""; return; }
-  const rent = /ქირ/.test(p.deal || "");
-  el.innerHTML = `${p.photo ? `<img referrerpolicy="no-referrer" src="${esc(p.photo)}" alt="" onerror="this.style.display='none'">` : `<div class="hub-mprev-noph">🏠</div>`}
-    <div class="hub-mprev-body"><b>${hubMoney(p.price)}${rent ? "<small>/თვე</small>" : ""}</b>
-      <div class="muted">${esc([p.rooms ? p.rooms + " ოთ." : "", p.area ? Math.round(p.area) + " მ²" : "", p.district].filter(Boolean).join(" · "))}</div></div>
-    <button class="btn" id="hubMapPrevOpen">გახსნა</button><button class="hub-mprev-x" id="hubMapPrevX">✕</button>`;
-  el.hidden = false;
-  document.getElementById("hubMapPrevOpen").onclick = (e) => { e.stopPropagation(); hubOpenDetail(p.id); };
-  document.getElementById("hubMapPrevX").onclick = (e) => { e.stopPropagation(); hubMapPreview(null); };
-}
-/* ერთ შენობაში რამდენიმე განცხადება — მიახლოებით ვერ დაიშლება, ამიტომ სიას ვაჩვენებთ */
-function hubMapGroupList(g) {
-  const backdrop = document.getElementById("modalBackdrop"), box = document.getElementById("modalBox");
-  const items = g.items.slice().sort((a, b) => (a.price || 0) - (b.price || 0));
-  box.innerHTML = `<h3>${items.length} განცხადება ამ ადგილას<button class="close" id="modalClose">✕</button></h3>
-    <div class="hub-mlist">${items.map((p) => `<button class="hub-mlist-row" data-hub-open="${esc(p.id)}">
-      ${p.photo ? `<img referrerpolicy="no-referrer" src="${esc(p.photo)}" alt="" onerror="this.style.display='none'">` : `<span class="hub-mprev-noph">🏠</span>`}
-      <span><b>${hubMoney(p.price)}${/ქირ/.test(p.deal || "") ? "/თვე" : ""}</b><small class="muted">${esc([p.rooms ? p.rooms + " ოთ." : "", p.area ? Math.round(p.area) + " მ²" : "", p.district].filter(Boolean).join(" · "))}</small></span>
-      <i class="hub-fr fr-${esc(p.fr)}"><i></i></i></button>`).join("")}</div>`;
-  backdrop.hidden = false;
-  document.getElementById("modalClose").onclick = closeDetail;
-  backdrop.onclick = (e) => { if (e.target === backdrop) closeDetail(); };
-  box.querySelectorAll("[data-hub-open]").forEach((b) => { b.onclick = () => hubOpenDetail(b.dataset.hubOpen); });
 }
 function hubMapDraw() {
   const h = state.hub, m = h.map;
   if (!m || !m.map) return;
   m.layer.clearLayers();
   const proj = (lat, lng) => { const p = m.map.latLngToContainerPoint([lat, lng]); return { x: p.x, y: p.y }; };
-  hubCluster(m.points, proj, 70).forEach((g) => {
+  const split = hubBuildings(m.points);
+  split.buildings.forEach((g) => {
+    const mk = L.marker([g.lat, g.lng], { icon: L.divIcon({ className: "hub-pin", html: hubBldPill(g), iconSize: null }), zIndexOffset: 500 }).addTo(m.layer);
+    mk.on("click", () => hubOpenBuilding(g));
+  });
+  hubCluster(split.singles, proj, 70).forEach((g) => {
     const mk = L.marker([g.lat, g.lng], { icon: L.divIcon({ className: "hub-pin", html: hubPill(g), iconSize: null }) }).addTo(m.layer);
     mk.on("click", () => {
       hubHaptic();
-      if (g.n === 1) { hubMapPreview(g.items[0]); return; }
-      const lats = g.items.map((p) => p.lat), lngs = g.items.map((p) => p.lng);
-      const tight = Math.max(...lats) - Math.min(...lats) < 0.0005 && Math.max(...lngs) - Math.min(...lngs) < 0.0005;
-      if (tight || m.map.getZoom() >= 17) hubMapGroupList(g);
+      if (g.n === 1) hubOpenDetail(g.items[0].id);
       else m.map.fitBounds(g.items.map((p) => [p.lat, p.lng]), { padding: [60, 60], maxZoom: 18 });
     });
   });

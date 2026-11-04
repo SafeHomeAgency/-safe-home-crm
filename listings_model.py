@@ -47,6 +47,46 @@ def turkeys_from_notes(notes) -> str:
     return "yes" if _TURKEYS_RE.search(str(notes or "")) else ""
 
 
+# ---- ქუჩა / შენობა (მისამართიდან): ფილტრი ქუჩით და რუკაზე "ერთი შენობა = ბევრი ბინა"
+_STREET_NUM = re.compile(r"^(?P<name>[^\d]*?[^\W\d_][^\d]*?)[\s,#№N.-]*(?P<house>\d+[ა-ჰA-Za-z]?(?:\s*[/-]\s*\d+[ა-ჰA-Za-z]?)?)\b")
+
+
+def street_parts(address) -> tuple[str, str, str]:
+    """მისამართიდან -> (გასაღები პატარა ასოებით, ჩვენებისთვის სახელი, სახლის ნომერი). ვერ ამოვიცანით — ('', '', '').
+    მაგ. 'ილია ჭავჭავაძის გამზირი 12ა, ბინა 5' -> ('ილია ჭავჭავაძის', 'ილია ჭავჭავაძის', '12ა')."""
+    a = str(address or "").replace("№", " ").strip()
+    if not a:
+        return "", "", ""
+    segs = [s.strip() for s in re.split(r"[;|]|,(?!\d)", a) if s.strip()]
+    for seg in segs:
+        mm = _STREET_NUM.match(seg)
+        if mm and len(re.sub(r"[^\w]", "", mm.group("name"))) >= 3:
+            name, house = mm.group("name").strip(" .,-"), mm.group("house").replace(" ", "").lower()
+            return _street_key(name), name, house
+    for seg in segs:                                           # ნომერი არ არის — სახელი მაინც გამოგვადგება ფილტრისთვის
+        name = re.sub(r"\d+", "", seg).strip(" .,-")
+        if len(re.sub(r"[^\w]", "", name)) >= 4:
+            return _street_key(name), name, ""
+    return "", "", ""
+
+
+_STREET_STOP = {"გამზირი", "გამზ", "ქუჩა", "ქ", "შესახვევი", "შეს", "ჩიხი", "გზატკეცილი", "ტრაქტი", "მოედანი", "მ/რ", "მიკრორაიონი", "უბანი", "ქალაქი"}
+
+
+def _street_key(name: str) -> str:
+    toks = [t for t in re.sub(r"[.,]", " ", str(name or "").lower()).split() if t not in _STREET_STOP]
+    return " ".join(toks).strip(" -")
+
+
+def building_key(row: dict) -> str:
+    """ერთი შენობის გასაღები: ქუჩა + სახლის ნომერი + რაიონი/ქალაქი. ნომრის გარეშე — '' (გამოგონილ შენობას არ ვაჯგუფებთ)."""
+    key, _name, house = street_parts(row.get("address"))
+    if not key or not house:
+        return ""
+    sig = key.split()[-1][:6]                                  # "ილია ჭავჭავაძის" და "ჭავჭავაძის 12" ერთი ქუჩაა (ბოლო სიტყვის ძირი)
+    return "|".join((sig, house, str(row.get("district") or "").strip().lower() or str(row.get("city") or "").strip().lower()))
+
+
 # ეს ველები სხვა აგენტს ეგზავნება; დანარჩენი (owner_number, notes, job_id, src_id, src_site...) — მხოლოდ მფლობელს/გუნდის ლიდერს/ადმინს
 PUBLIC_FIELDS = [
     "listing_id", "agent_id", "agent_name", "team", "myhome_id", "ssge_id", "deal_type", "property_type", "title", "city", "district",

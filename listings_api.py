@@ -55,6 +55,7 @@ def parse_filters(args=None) -> dict:
         "not_first": g("not_first") in ("1", "true", "yes"), "not_last": g("not_last") in ("1", "true", "yes"),
         "pets": g("pets") if g("pets") in ("yes", "no", "ask") else "",
         "turkeys": "yes" if g("turkeys") in ("yes", "1", "true") else "",
+        "street": g("street")[:60],
     }
 
 
