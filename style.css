@@ -790,6 +790,23 @@ button.chip { cursor: pointer; font-family: inherit; }
 .hub-link { background: none; border: none; color: var(--gold-light); font-size: 12px; font-weight: 600; }
 .hub-mapbox { position: relative; height: calc(100vh - 330px); min-height: 380px; border-radius: var(--radius); overflow: hidden; border: 1px solid var(--border); box-shadow: var(--shadow); margin-bottom: 8px; background: #0b1a2a; }
 .hub-mapbox[hidden] { display: none; }
+/* Leaflet-ის შრეები (z-index 400–1000) რუკის შიგნით რჩება — ადრე განცხადების მოდალს (50) ზემოდან ეფარებოდა */
+.hub-mapbox { isolation: isolate; z-index: 0; }
+.hub-map-top .hub-chip b { margin-left: 4px; padding: 0 6px; border-radius: 99px; background: rgba(255,255,255,.18); font-size: 11px; }
+.hub-mprev { position: absolute; left: 10px; right: 10px; bottom: 44px; z-index: 600; display: flex; align-items: center; gap: 10px; padding: 8px; border-radius: 14px; background: rgba(8,16,26,.94); border: 1px solid var(--border); box-shadow: 0 6px 20px rgba(0,0,0,.5); }
+.hub-mprev[hidden] { display: none; }
+.hub-mprev img, .hub-mprev-noph { width: 64px; height: 64px; border-radius: 10px; object-fit: cover; flex: none; display: flex; align-items: center; justify-content: center; background: #13263a; font-size: 24px; }
+.hub-mprev-body { flex: 1; min-width: 0; }
+.hub-mprev-body b { font-size: 16px; } .hub-mprev-body small { font-size: 11px; opacity: .7; margin-left: 2px; }
+.hub-mprev-body .muted { font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.hub-mprev .btn { flex: none; padding: 8px 12px; }
+.hub-mprev-x { flex: none; width: 28px; height: 28px; border-radius: 50%; border: none; background: rgba(255,255,255,.12); color: inherit; }
+.hub-mlist { display: flex; flex-direction: column; gap: 8px; max-height: 60vh; overflow-y: auto; }
+.hub-mlist-row { display: flex; align-items: center; gap: 10px; padding: 8px; border-radius: 12px; border: 1px solid var(--border); background: transparent; color: inherit; text-align: left; }
+.hub-mlist-row img, .hub-mlist-row .hub-mprev-noph { width: 56px; height: 56px; }
+.hub-mlist-row img { border-radius: 10px; object-fit: cover; flex: none; }
+.hub-mlist-row > span { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+.hub-mlist-row small { font-size: 12px; }
 #hubMapCanvas { position: absolute; inset: 0; }
 .hub-map-top { position: absolute; left: 10px; top: 10px; z-index: 500; }
 .hub-map-top .hub-chip { background: rgba(8,16,26,.86); backdrop-filter: blur(4px); }
