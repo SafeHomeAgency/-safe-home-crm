@@ -3293,6 +3293,16 @@ import myhome_export_api  # noqa: E402
 myhome_export_api.register(app, authed_worker=_authed_worker, rate_limited=rate_limited, sheets=_SheetsProxy())
 
 
+# MyHome job-ების მასობრივი დამატება ერთი აგენტის სახელით — მხოლოდ worker-ის გასაღებით (ჩავარდნა სერვერს არ აჩერებს)
+try:
+    import myhome_bulk_create  # noqa: E402
+    myhome_bulk_create.register(app, authed_worker=_authed_worker, rate_limited=rate_limited,
+                                sheets=_SheetsProxy() if "_SheetsProxy" in globals() else sheets,
+                                send_message=_send_telegram_message)
+except Exception:
+    log.exception("myhome_bulk_create ვერ ჩაირთო")
+
+
 def run():
     """ბლოკავს — bot.py იძახებს ცალკე thread-ში."""
     log.info("Mini App ვებ-სერვერი ეშვება პორტზე %s", config.PORT)
