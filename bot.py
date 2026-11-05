@@ -2592,10 +2592,14 @@ async def check_recruit(context: ContextTypes.DEFAULT_TYPE):
         return
     for m in msgs:
         ok = False
+        markup = None
+        if config.WEBAPP_URL and m.get("buttons"):
+            # ღილაკზე დაჭერით Mini App პირდაპირ იხსნება: ?rc=<კანდიდატი> — კანდიდატის ბარათი; ?rv=today|cal — სია/კალენდარი
+            markup = InlineKeyboardMarkup([[InlineKeyboardButton(t, web_app=WebAppInfo(url=f"{config.WEBAPP_URL}/?{q}"))] for t, q in m["buttons"][:6]])
         try:
             for cid in m["chat_ids"]:
                 try:
-                    await context.bot.send_message(chat_id=cid, text=m["text"])
+                    await context.bot.send_message(chat_id=cid, text=m["text"], reply_markup=markup)
                     ok = True
                 except Exception:
                     log.warning("Recruit შეტყობინება ვერ გაიგზავნა (%s)", cid, exc_info=True)

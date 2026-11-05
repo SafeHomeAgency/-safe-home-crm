@@ -5911,7 +5911,51 @@ function recDial(phone) {
   if (!recIsDesktop()) { try { window.location.href = "tel:" + phone; } catch (e) { /* ნომერი უკვე დაკოპირებულია */ } }
 }
 function recTel(it) { return it.phone ? `<a class="rc-tel" href="tel:${esc(it.phone)}" data-rc-dial="${esc(it.phone)}" data-rc-stop="1">📞 ${esc(it.phone_pretty || it.phone)}</a>` : `<span class="muted">📵 ${esc(it.phone_raw || "ტელეფონი არ არის")}</span>`; }
-function recFlags(it) { return (it.flags || []).map((f) => `<span class="rc-flag f-${esc(f)}">${esc(({ uncontacted: "🆕 დაუკავშირებელია", result_missing: "✍️ შედეგი ჩაუწერელია", stalled: "🧊 უმოქმედოა 3+ დღე", no_phone: "📵 ტელეფონის გარეშე", duplicate: "👯 დუბლიკატი" })[f] || f)}</span>`).join(""); }
+/* Telegram-ის შეტყობინების ღილაკიდან: ?rc=<კანდიდატი> — ბარათი პირდაპირ იხსნება; ?rv=today|cal|all|stats — სიაზე/კალენდარზე გადავდივართ */
+async function recDeepLink(search) {
+  if (state._recDeep) return;
+  let q;
+  try { q = new URLSearchParams(search != null ? search : location.search); } catch (e) { return; }
+  const rc = q.get("rc"), rv = q.get("rv");
+  if (!rc && !rv) return;
+  state._recDeep = true;
+  await recLoadAccess();
+  if (!(state.recAccess || {}).can_view) return;
+  state.tab[state.role] = "recruit";
+  state.rec.view = ["today", "cal", "all", "stats"].includes(rv) ? rv : "today";
+  try { history.replaceState(null, "", location.pathname); } catch (e) { /* ignore */ }
+  await renderContent();
+  if (rc) recOpen(rc);
+}
+function recAskReason() {
+  const reasons = ((state.rec.home || {}).options || {}).reasons || ["ანაზღაურება", "გრაფიკი", "გადაიფიქრა", "სხვა"];
+  return new Promise((resolve) => {
+    let done = false;
+    hubAsk("❓ რატომ იხურება კანდიდატი?", `<select id="rcrSel"><option value="">— აირჩიეთ მიზეზი —</option>${reasons.map((x) => `<option>${esc(x)}</option>`).join("")}</select><input id="rcrTxt" placeholder="დეტალი (არასავალდებულო)">`, "✅ დახურვა", async (b) => {
+      const v = b.querySelector("#rcrSel").value;
+      if (!v) throw new Error("აირჩიეთ მიზეზი");
+      const t = b.querySelector("#rcrTxt").value.trim();
+      done = true; closeDetail(); resolve(t ? `${v}: ${t}` : v);
+    });
+    const bd = document.getElementById("modalBackdrop"), x = document.getElementById("modalClose");
+    if (bd) bd.addEventListener("click", (e) => { if (e.target === bd && !done) resolve(null); });
+    if (x) x.addEventListener("click", () => { if (!done) resolve(null); });
+  });
+}
+/* ცვლილების გაგზავნა; თუ კანდიდატი იხურება და მიზეზი არ არის — სერვერი მოითხოვს (reason_required), ვეკითხებით და ვიმეორებთ */
+async function recPost(id, changes) {
+  const send = (ch) => api("/api/recruit/" + encodeURIComponent(id), { method: "POST", body: JSON.stringify({ changes: ch }) });
+  try { return await send(changes); }
+  catch (e) {
+    if (e && e.data && e.data.code === "reason_required") {
+      const reason = await recAskReason();
+      if (!reason) throw new Error("მიზეზის გარეშე დახურვა არ შეიძლება — კანდიდატი ღია დარჩა");
+      return send(Object.assign({}, changes, { left_reason: reason }));
+    }
+    throw e;
+  }
+}
+function recFlags(it) { return (it.flags || []).map((f) => `<span class="rc-flag f-${esc(f)}">${esc(({ uncontacted: "🆕 დაუკავშირებელია", result_missing: "✍️ შედეგი ჩაუწერელია", stalled: "🧊 უმოქმედოა 3+ დღე", no_phone: "📵 ტელეფონის გარეშე", duplicate: "👯 დუბლიკატი", postponed: "⏭ გადაიდო", no_reason: "❓ მიზეზი არ არის" })[f] || f)}</span>`).join(""); }
 function recChips(it) {
   const iv = it.interview_day ? `<span class="rc-iv">🗓 ${esc(it.interview_day)}${it.interview_time ? " " + esc(it.interview_time) : ""}</span>` : "";
   const cs = it.call_label && it.call_status ? `<span class="rc-call c-${esc(it.call_status)}">${esc(it.call_label)}</span>` : (it.stage === "new" || it.stage === "invited" ? `<span class="rc-call c-todo">📞 დასარეკია</span>` : "");
@@ -5924,7 +5968,7 @@ function recCard(it, can) {
   return `<div class="card rc-card" data-rc-open="${esc(it.recruit_id)}">
     <div class="rc-top"><b>${esc(it.name)}</b>${it.age ? `<small> · ${esc(it.age)} წ.</small>` : ""}</div>
     <div class="rc-line">${recTel(it)}</div><div class="rc-line">${recChips(it)}${recFlags(it)}</div>
-    ${it.comment ? `<div class="rc-note">💬 ${esc(it.comment.slice(0, 110))}</div>` : ""}${quick}</div>`;
+    ${it.comment ? `<div class="rc-note">💬 ${esc(it.comment.slice(0, 110))}</div>` : ""}${it.reason ? `<div class="rc-note">🔒 დახურვის მიზეზი: <b>${esc(it.reason)}</b>${it.reason_auto ? " (ცხრილიდან)" : ""}</div>` : ""}${quick}</div>`;
 }
 async function recLoadHome() {
   const r = state.rec;
@@ -6070,6 +6114,7 @@ function recTrainingHtml(s) {
     ${kv("მხოლოდ ქირა", t.rent_only)}${kv("მხოლოდ ყიდვა", t.sale_only)}${kv("არ მოდის / გადაიფიქრა", t.declined)}${kv("არ გვიპასუხა", t.no_answer)}
     ${days ? `<div class="rc-sec">ტრენინგის დღეების მიხედვით</div>${days}` : ""}</div>
     <div class="card"><h2>🤝 ინტერაქციები</h2>${inter}</div>
+    ${(s.reasons || []).length || s.reason_unknown ? `<div class="card"><h2>❓ რატომ დაიკარგა კანდიდატი</h2>${(s.reasons || []).map((x) => kv(esc(x.reason), x.count)).join("")}${s.reason_unknown ? kv("⚠️ მიზეზი არ არის მითითებული", s.reason_unknown) : ""}</div>` : ""}
     <div class="card"><h2>🏁 შედეგი</h2>${kv("ტესტი ჩაიარა", o.tested || 0)}${kv("სტაჟირება დაიწყო", o.internship || 0)}${kv("აგვყავს", o.hire_yes || 0)}${kv("გადაიფიქრა", o.hire_changed || 0)}${kv("ჩაშტატდა", o.staffed || 0)}${kv("წავიდა", o.left || 0)}</div>`;
 }
 function recSettingsHtml(h) {
@@ -6106,7 +6151,7 @@ async function recLoadSlots(day) {
 async function recDoCall(id, status) {
   hubHaptic();
   try {
-    await api("/api/recruit/" + encodeURIComponent(id), { method: "POST", body: JSON.stringify({ changes: { call_status: status } }) });
+    await recPost(id, { call_status: status });
     toast({ confirmed: "✅ მოდის", declined: "❌ არ მოდის", no_contact: "📵 ვერ დაუკავშირდით", repeat: "🔁 განმეორებითი ზარი" }[status] || "შენახულია");
     state.rec.list = null; state.rec.cal = null; state.rec.stats = null; await recLoadHome(); recDraw();
   } catch (e) { toast(e.message || "შეცდომა"); }
@@ -6220,7 +6265,7 @@ async function recOpen(id) {
       <div class="rc-sec">🏢 ჩაშტატება და წასვლა</div>
       ${dateRow("ჩაშტატების თარიღი", "rc_staffed_at", "date", it.staffed_at)}
       ${dateRow("წასვლის თარიღი", "rc_left_at", "date", it.left_at)}
-      ${row("წასვლის/უარის მიზეზი", `<input id="rc_left_reason" value="${esc(it.left_reason)}" ${ro}>`)}
+      ${row("დახურვის / წასვლის მიზეზი" + (it.reason && !it.left_reason ? ` <small>(ცხრილიდან: ${esc(it.reason)})</small>` : ""), `<input id="rc_left_reason" list="rcReasons" value="${esc(it.left_reason)}" placeholder="აირჩიეთ ან ჩაწერეთ" ${ro}><datalist id="rcReasons">${(O.reasons || []).map((x) => `<option value="${esc(x)}">`).join("")}</datalist>`)}
       <div class="rc-sec">📌 ეტაპი და შენიშვნა</div>
       ${row("ეტაპი", sel("rc_stage", Object.keys(stages).map((k) => [k, stages[k]]), it.stage))}
       ${row("შენიშვნა", `<textarea id="rc_comment" rows="2" ${ro}>${esc(it.comment)}</textarea>`)}
@@ -6237,7 +6282,7 @@ async function recOpen(id) {
   box.querySelectorAll("[data-rc-copy]").forEach((b) => { b.onclick = () => (window.shCopy ? window.shCopy(d.templates[b.dataset.rcCopy], "📋 ტექსტი დაკოპირდა") : toast(d.templates[b.dataset.rcCopy])); });
   box.querySelectorAll("[data-rc-wa]").forEach((b) => { b.onclick = () => hubOpenLink(`https://wa.me/${digits}?text=${encodeURIComponent(d.templates[b.dataset.rcWa])}`); });
   box.querySelectorAll("[data-rc-setcall]").forEach((b) => { b.onclick = async () => {
-    try { await api("/api/recruit/" + encodeURIComponent(id), { method: "POST", body: JSON.stringify({ changes: { call_status: b.dataset.rcSetcall } }) }); toast("✅ შენახულია"); state.rec.list = null; state.rec.cal = null; state.rec.stats = null; await recLoadHome(); recDraw(); recOpen(id); }
+    try { await recPost(id, { call_status: b.dataset.rcSetcall }); toast("✅ შენახულია"); state.rec.list = null; state.rec.cal = null; state.rec.stats = null; await recLoadHome(); recDraw(); recOpen(id); }
     catch (e) { toast(e.message || "შეცდომა"); } }; });
   box.querySelectorAll(".rc-qd button").forEach((b) => { b.onclick = (e) => {
     e.preventDefault();
@@ -6257,7 +6302,7 @@ async function recOpen(id) {
     Object.keys(ch).forEach((k) => { if (String(ch[k] || "") !== String(k === "interview_at" || k === "training_at" ? (it[k] || "") : (it[k] || ""))) changes[k] = ch[k]; });
     if (!Object.keys(changes).length) { toast("ცვლილება არ არის"); return; }
     save.disabled = true;
-    try { await api("/api/recruit/" + encodeURIComponent(id), { method: "POST", body: JSON.stringify({ changes }) }); hubHaptic("ok"); toast("✅ შენახულია"); closeDetail(); state.rec.list = null; state.rec.cal = null; state.rec.stats = null; await recLoadHome(); recDraw(); }
+    try { await recPost(id, changes); hubHaptic("ok"); toast("✅ შენახულია"); closeDetail(); state.rec.list = null; state.rec.cal = null; state.rec.stats = null; await recLoadHome(); recDraw(); }
     catch (e) { toast(e.message || "შეცდომა"); save.disabled = false; }
   };
 }
@@ -6815,6 +6860,7 @@ async function load() {
     finLoadAccess();
     aiLoadAccess();
     recLoadAccess();
+    recDeepLink();
   } catch (e) {
     document.getElementById("content").innerHTML =
       `<div class="card"><div class="empty">⚠️ ${esc(e.message)}</div></div>`;

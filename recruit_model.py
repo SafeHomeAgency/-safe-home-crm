@@ -54,6 +54,8 @@ ATTENDED = {"": "—", "yes": "კი", "no": "არა", "changed": "გად
 TRAIN_OK = {"": "—", "yes": "მოდის", "no": "არ მოდის", "changed": "გადაიფიქრა", "no_answer": "არ გვიპასუხა"}
 # ინტერაქცია (ლაშასთან / მეპატრონესთან / კლიენტთან): დანიშნულია -> ჩატარდა -> გაიარა / ვერ გაიარა / გადაიფიქრა
 INTERACTION = {"": "—", "scheduled": "დანიშნულია", "held": "ჩატარდა", "passed": "გაიარა", "failed": "ვერ გაიარა", "changed": "გადაიფიქრა"}
+REASONS = ["ანაზღაურება", "გრაფიკი", "სხვა სამსახური", "სწავლა / დრო არ აქვს", "არ პასუხობს / ვერ დავუკავშირდით", "არ მოვიდა გასაუბრებაზე", "არ მოვიდა ტრენინგზე",
+           "გადაიფიქრა", "ვერ გაიარა ტესტი / ინტერაქცია", "უარყოფილია გასაუბრების შემდეგ", "არ შეესაბამება პირობებს", "პირადი მიზეზი", "სხვა"]
 TRAIN_SESSIONS = ["", "ქირა", "ყიდვა", "არ მოდის/ქირა", "არ მოდის/ყიდვა", "არ გვპასუხობს", "გადაიფიქრა"]   # ტრენინგის 1/2 და 2/2 (ქირა — ქირის ტრენინგი, ყიდვა — გაყიდვის ტრენინგი)
 
 # რედაქტირებადი ველები (ტიპი)
@@ -481,3 +483,34 @@ def map_archive_row(header: list[str], row: list[str]) -> dict | None:
         rec["interview_at"] = f"{d.strftime('%Y-%m-%d')} {t or '00:00'}"
     rec["stage"], rec["closed"], rec["silent"] = "archive", "yes", "yes"
     return rec
+
+
+def derive_reason(r: dict) -> str:
+    """დახურული ჩანაწერის მიზეზი ცხრილის ფაქტებიდან (როცა ხელით არ არის მითითებული): მხოლოდ ის, რაც ცხრილში პირდაპირ წერია — არაფერს ვარაუდობთ."""
+    if _s(r.get("stage")) == "archive":
+        return "ძველი ფორმა — შედეგი უცნობია"
+    if _s(r.get("decision")) == "rejected":
+        return "უარყოფილია გასაუბრების შემდეგ"
+    if _s(r.get("hire")) in ("changed", "no"):
+        return "გადაიფიქრა (აყვანამდე)"
+    if _s(r.get("training_ok")) == "changed":
+        return "გადაიფიქრა (ტრენინგამდე)"
+    if _s(r.get("training_ok")) == "no":
+        return "არ მოდის ტრენინგზე"
+    if _s(r.get("training_ok")) == "no_answer":
+        return "არ გვიპასუხა (ტრენინგი)"
+    if _s(r.get("attended")) == "changed":
+        return "გადაიფიქრა (გასაუბრებამდე)"
+    if _s(r.get("attended")) == "no":
+        return "არ მოვიდა გასაუბრებაზე"
+    if _s(r.get("call_status")) == "declined":
+        return "არ მოდის (დარეკვისას თქვა)"
+    return ""
+
+
+def reason_of(r: dict) -> tuple[str, bool]:
+    """(მიზეზი, მითითებულია_ხელით). ცარიელი ტექსტი = მიზეზი უცნობია."""
+    explicit = _s(r.get("left_reason"), 200)
+    if explicit:
+        return explicit, True
+    return derive_reason(r), False

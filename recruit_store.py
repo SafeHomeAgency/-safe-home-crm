@@ -23,9 +23,10 @@ _backend = SheetsBackend()
 
 
 class RecruitError(Exception):
-    def __init__(self, msg: str, status: int = 400):
+    def __init__(self, msg: str, status: int = 400, code: str = ""):
         super().__init__(msg)
         self.status = status
+        self.code = code
 
 
 def set_backend(b) -> None:
@@ -225,6 +226,9 @@ def update(recruit_id: str, changes: dict, by: dict, comment: str = "") -> dict:
                 ch["stage"] = auto                                  # ავტომატურად მხოლოდ წინ (ან დახურვა); უკან — მხოლოდ ხელით
         stage = ch.get("stage", _s(r.get("stage")))
         ch["closed"] = "yes" if stage in m.CLOSED_STAGES else ""
+        if ch["closed"] == "yes" and _s(r.get("closed")) != "yes" and stage != "archive" and not _s(merged.get("left_reason")):
+            # დახურვა მიზეზის გარეშე არ შეიძლება: „ყველას მიზეზი უნდა ვიცოდეთ“
+            raise RecruitError("მიუთითეთ მიზეზი — რატომ იხურება კანდიდატი (მაგ. ანაზღაურება, გრაფიკი, გადაიფიქრა…)", 400, "reason_required")
         ch["updated_at"], ch["updated_by"] = now_str(), _s((by or {}).get("name"), 80)
         ch["last_contact_at"] = now_str() if any(k in ch for k in ("call_status", "attended", "decision", "comment", "stage", "interview_at")) else _s(r.get("last_contact_at"))
         diffs = [f"{NAMES.get(k, k)}: {_label(k, _s(r.get(k)))} → {_label(k, v)}" for k, v in ch.items()
@@ -275,6 +279,9 @@ def public(r: dict, now: datetime.datetime | None = None) -> dict:
     out["age_hours"] = round((now - fc).total_seconds() / 3600, 1) if fc else None
     out["flags"] = flags_of(r, now)
     out["train"] = m.train_info(r)
+    if not _active(r):
+        out["reason"], explicit = m.reason_of(r)
+        out["reason_auto"] = not explicit and bool(out["reason"])
     return out
 
 
@@ -354,7 +361,18 @@ def stats(now: datetime.datetime | None = None, days: int = 90) -> dict:
     outcome = {"internship": sum(1 for r in rows if _s(r.get("internship_at"))), "hire_yes": sum(1 for r in rows if _s(r.get("hire")) == "yes"),
                "hire_changed": sum(1 for r in rows if _s(r.get("hire")) in ("changed", "no")), "staffed": staffed, "left": sum(1 for r in rows if _s(r.get("left_at"))),
                "tested": len(scores)}
-    return {"days": days, "training": training, "interactions": inter, "outcome": outcome, "total": total, "by_stage": cnt, "booked": booked, "interviewed": interviewed, "trained": trained, "staffed": staffed, "no_show": noshow,
+    reasons: dict[str, int] = {}
+    unknown = 0
+    for r in rows:
+        if not _active(r) and _s(r.get("stage")) != "archive":
+            txt = m.reason_of(r)[0]
+            if txt:
+                k = txt.split(":")[0].strip()                  # „ანაზღაურება: დეტალი“ -> „ანაზღაურება“
+                reasons[k] = reasons.get(k, 0) + 1
+            else:
+                unknown += 1
+    return {"days": days, "reasons": sorted(({"reason": k, "count": v} for k, v in reasons.items()), key=lambda x: -x["count"])[:14], "reason_unknown": unknown,
+            "training": training, "interactions": inter, "outcome": outcome, "total": total, "by_stage": cnt, "booked": booked, "interviewed": interviewed, "trained": trained, "staffed": staffed, "no_show": noshow,
             "conv": {"booked": pct(booked, total), "interviewed": pct(interviewed, booked), "trained": pct(trained, interviewed), "staffed": pct(staffed, total)},
             "median_first_contact_h": round(first[len(first) // 2], 1) if first else None, "avg_test": round(sum(scores) / len(scores), 1) if scores else None,
             "left_reasons": sorted(({"reason": k, "count": v} for k, v in reasons.items()), key=lambda x: -x["count"])[:8],
@@ -380,7 +398,7 @@ def slots(day: str) -> dict:
     return {"day": m.fmt_date(d0), "slots": [by[k] for k in sorted(by)], "total": sum(b["total"] for b in by.values())}
 
 
-FLAG_LABELS = {"uncontacted": "🆕 დაუკავშირებელი (3 სთ+)", "result_missing": "✍️ გასაუბრების შედეგი ჩაუწერელია", "postponed": "⏭ გადაიდო — ახალი დრო დაუნიშნეთ",
+FLAG_LABELS = {"no_reason": "❓ დახურულია, მიზეზი არ არის მითითებული", "uncontacted": "🆕 დაუკავშირებელი (3 სთ+)", "result_missing": "✍️ გასაუბრების შედეგი ჩაუწერელია", "postponed": "⏭ გადაიდო — ახალი დრო დაუნიშნეთ",
                "stalled": "🧊 3 დღეზე მეტია უმოქმედოა", "no_phone": "📵 ტელეფონი არ არის", "duplicate": "👯 დუბლიკატი"}
 _IN_PROGRESS = ("new", "invited", "confirmed", "interviewed", "considering", "training", "internship")
 
@@ -388,6 +406,8 @@ _IN_PROGRESS = ("new", "invited", "confirmed", "interviewed", "considering", "tr
 def flags_of(r: dict, now: datetime.datetime) -> list[str]:
     """„ყურადღების“ ნიშნები (აქტიურ ჩანაწერზე): რომ არცერთი კანდიდატი არ დაიკარგოს. ძველი (silent) ისტორია ხმაურს არ ქმნის."""
     if not _active(r):
+        if _s(r.get("stage")) != "archive" and not m.reason_of(r)[0]:
+            return ["no_reason"]                                # დახურულია, მაგრამ რატომ — უცნობია: შესავსებად ჩანს „ყურადღებაში“
         return []
     out = []
     stage = _s(r.get("stage")) or "new"

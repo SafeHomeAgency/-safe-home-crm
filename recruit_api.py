@@ -64,7 +64,7 @@ def register(app, *, authed, audit, rate_limited, get_agents) -> None:
                 try:
                     return fn(agent, admin, p, *a, **kw)
                 except st.RecruitError as e:
-                    return jsonify(error=str(e)), e.status
+                    return jsonify(error=str(e), code=getattr(e, "code", "")), e.status
                 except ValueError as e:
                     return jsonify(error=str(e)), 400
                 except Exception:  # noqa: BLE001
@@ -101,7 +101,7 @@ def register(app, *, authed, audit, rate_limited, get_agents) -> None:
                   if str(a.get("active", "yes")).strip().lower() not in ("no", "false", "0")] if p["admin"] else []
         return jsonify(perm={k: p[k] for k in ("view", "edit", "admin", "responsible")}, lists=st.lists(), stats=st.stats(days=30),
                        responsible=_names(s["responsible_ids"]), remind_hour=s["remind_hour"], stages=m.STAGES, call_status=m.CALL_STATUS,
-                       options={"attended": m.ATTENDED, "train_ok": m.TRAIN_OK, "interaction": m.INTERACTION, "sessions": m.TRAIN_SESSIONS},
+                       options={"attended": m.ATTENDED, "train_ok": m.TRAIN_OK, "interaction": m.INTERACTION, "sessions": m.TRAIN_SESSIONS, "reasons": m.REASONS},
                        enabled=bool(config.RECRUIT_ENABLED), agents=agents)
 
     @app.get("/api/recruit/list")

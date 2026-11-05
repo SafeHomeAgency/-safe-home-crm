@@ -77,9 +77,14 @@ def prepare_alerts(now: datetime.datetime | None = None, agents: list[dict] | No
     today, tomorrow = now.date(), now.date() + datetime.timedelta(days=1)
     out: list[dict] = []
 
-    def emit(key: str, kind: str, rid: str, chats: list[int], text: str) -> None:
+    def emit(key: str, kind: str, rid: str, chats: list[int], text: str, buttons: list | None = None) -> None:
         if chats and text and st.claim_alert(key, kind, rid, ",".join(map(str, chats))):
-            out.append({"key": key, "kind": kind, "chat_ids": chats, "text": text, "recruit_id": rid})
+            out.append({"key": key, "kind": kind, "chat_ids": chats, "text": text, "recruit_id": rid, "buttons": buttons or []})
+
+    def openers(arr: list, extra: tuple | None = None) -> list:
+        """ღილაკები: თითო კანდიდატზე (Mini App პირდაპირ მის ბარათზე იხსნება) + დამატებითი (სია/კალენდარი)."""
+        btns = [(f"📂 {_s(r.get('name'))[:28]}", "rc=" + _s(r.get("recruit_id"))) for r in arr[:5]]
+        return btns + ([extra] if extra else [])
 
     # 1) ახალი კანდიდატები
     fresh = [r for r in rows if _s(r.get("stage")) == "new" and not _s(r.get("silent")) and not _s(r.get("last_contact_at"))
@@ -100,18 +105,29 @@ def prepare_alerts(now: datetime.datetime | None = None, agents: list[dict] | No
         claimed = [r for r, k in zip(new_now, keys) if st.claim_alert(k, "new", _s(r.get("recruit_id")), "all")]
         if claimed:
             head = "🆕 ახალი კანდიდატი" if len(claimed) == 1 else f"🆕 ახალი კანდიდატები: {len(claimed)}"
-            body = "\n".join(_line(r, now, False) + (f"\n   🗓 გასაუბრება: {st.public(r, now).get('interview_day', '')} {st.public(r, now).get('interview_time', '')}".rstrip() if _s(r.get("interview_at")) else "") for r in claimed)
+            def detail(r):
+                p = st.public(r, now)
+                s = _line(r, now, False)
+                if _s(r.get("interview_at")):
+                    s += f"\n   🗓 არჩეული გასაუბრება: {p.get('interview_day', '')} {p.get('interview_time', '')}".rstrip()
+                if _s(r.get("motivation")):
+                    s += "\n   💬 " + _s(r.get("motivation"))[:110]
+                if _s(r.get("experience")):
+                    s += "\n   🧰 გამოცდილება: " + _s(r.get("experience"))[:40]
+                return s
+            body = "\n\n".join(detail(r) for r in claimed)
             out.append({"key": ",".join(keys), "kind": "new", "chat_ids": everyone, "recruit_id": "", "keys": [k for r, k in zip(new_now, keys) if r in claimed],
-                        "text": f"{head}\n{body}\n\n👉 დარეკეთ და დაადასტურეთ გასაუბრება (Mini App → 👥 კადრები)."})
+                        "buttons": openers(claimed, ("📋 დღევანდელი სია", "rv=today")),
+                        "text": f"{head}\n\n{body}\n\n👉 დარეკეთ და დაადასტურეთ გასაუბრება — ღილაკზე დაჭერით კანდიდატის ბარათი პირდაპირ იხსნება."})
     if new_3h:
         for r in new_3h:
             if not st.claim_alert(f"new3:{_s(r.get('recruit_id'))}", "new3", _s(r.get("recruit_id")), "owners"):
                 continue
-            out.append({"key": f"new3:{_s(r.get('recruit_id'))}", "kind": "new3", "chat_ids": owners, "recruit_id": _s(r.get("recruit_id")),
+            out.append({"key": f"new3:{_s(r.get('recruit_id'))}", "kind": "new3", "chat_ids": owners, "recruit_id": _s(r.get("recruit_id")), "buttons": openers([r]),
                         "text": "⏰ კანდიდატს ჯერ არავინ დაუკავშირდა (3 საათზე მეტია):\n" + _line(r, now, False)})
     for r in new_8h:
         if st.claim_alert(f"new8:{_s(r.get('recruit_id'))}", "new8", _s(r.get("recruit_id")), "admins"):
-            out.append({"key": f"new8:{_s(r.get('recruit_id'))}", "kind": "new8", "chat_ids": admins, "recruit_id": _s(r.get("recruit_id")),
+            out.append({"key": f"new8:{_s(r.get('recruit_id'))}", "kind": "new8", "chat_ids": admins, "recruit_id": _s(r.get("recruit_id")), "buttons": openers([r]),
                         "text": "⚠️ კანდიდატს 8 საათზე მეტია არავინ დაუკავშირდა (პასუხისმგებელმა ვერ მოასწრო):\n" + _line(r, now, False) + "\n\nთქვენც შეგიძლიათ აპში შეიყვანოთ შედეგი."})
 
     # 2) ხვალინდელი გასაუბრებების დადასტურება
@@ -120,16 +136,16 @@ def prepare_alerts(now: datetime.datetime | None = None, agents: list[dict] | No
     dk = tomorrow.strftime("%Y-%m-%d")
     if unconf and hour <= now.hour < 21:
         emit(f"confirm:{dk}", "confirm", "", owners if now.hour >= hour else [],
-             f"📞 ხვალ გასაუბრება {len(tm)}-ს აქვს, დასადასტურებელია {len(unconf)}:\n" + "\n".join(_line(r, now) for r in unconf) + "\n\nდარეკეთ და ჩაწერეთ: მოდის / არ მოდის (Mini App → 👥 კადრები).")
+             f"📞 ხვალ გასაუბრება {len(tm)}-ს აქვს, დასადასტურებელია {len(unconf)}:\n" + "\n".join(_line(r, now) for r in unconf) + "\n\nდარეკეთ და ჩაწერეთ: მოდის / არ მოდის (Mini App → 👥 კადრები).", openers(unconf, ("📋 სია", "rv=today")))
     if unconf and now.hour >= hour + 4 and now.hour < 21:
-        emit(f"confirm2:{dk}", "confirm2", "", owners, f"🔁 ხვალინდელი გასაუბრებებიდან ისევ დაუდასტურებელია {len(unconf)}:\n" + "\n".join(_line(r, now) for r in unconf))
+        emit(f"confirm2:{dk}", "confirm2", "", owners, f"🔁 ხვალინდელი გასაუბრებებიდან ისევ დაუდასტურებელია {len(unconf)}:\n" + "\n".join(_line(r, now) for r in unconf), openers(unconf, ("📋 სია", "rv=today")))
     if unconf and now.hour >= hour + 6 and now.hour < 21:
-        emit(f"confirm3:{dk}", "confirm3", "", admins, f"⚠️ ხვალინდელი გასაუბრებებიდან {len(unconf)} დაუდასტურებელია (პასუხისმგებელმა ვერ მოასწრო):\n" + "\n".join(_line(r, now) for r in unconf))
+        emit(f"confirm3:{dk}", "confirm3", "", admins, f"⚠️ ხვალინდელი გასაუბრებებიდან {len(unconf)} დაუდასტურებელია (პასუხისმგებელმა ვერ მოასწრო):\n" + "\n".join(_line(r, now) for r in unconf), openers(unconf, ("📋 სია", "rv=today")))
 
     # 3) დღევანდელი გასაუბრებები (დილით)
     td = sorted([r for r in rows if (d := m.parse_dt(r.get("interview_at"))) and d.date() == today and _s(r.get("stage")) in ("new", "invited", "confirmed")], key=lambda r: _s(r.get("interview_at")))
     if td and now.hour >= 9:
-        emit(f"today:{today.strftime('%Y-%m-%d')}", "today", "", everyone, f"🗓 დღეს გასაუბრება: {len(td)}\n" + "\n".join(_line(r, now) for r in td))
+        emit(f"today:{today.strftime('%Y-%m-%d')}", "today", "", everyone, f"🗓 დღეს გასაუბრება: {len(td)}\n" + "\n".join(_line(r, now) for r in td), openers(td, ("📅 კალენდარი", "rv=cal")))
 
     # 4) გასაუბრების შედეგი ჩაუწერელია
     pend = [r for r in rows if (d := m.parse_dt(r.get("interview_at"))) and datetime.timedelta(minutes=60) <= now - d < datetime.timedelta(hours=26)
@@ -137,7 +153,7 @@ def prepare_alerts(now: datetime.datetime | None = None, agents: list[dict] | No
     new_pend = [r for r in pend if f"result:{_s(r.get('recruit_id'))}" not in done]
     claimed = [r for r in new_pend if st.claim_alert(f"result:{_s(r.get('recruit_id'))}", "result", _s(r.get("recruit_id")), "owners")]
     if claimed:
-        out.append({"key": ",".join(f"result:{_s(r.get('recruit_id'))}" for r in claimed), "kind": "result", "chat_ids": owners, "recruit_id": "",
+        out.append({"key": ",".join(f"result:{_s(r.get('recruit_id'))}" for r in claimed), "kind": "result", "chat_ids": owners, "recruit_id": "", "buttons": openers(claimed),
                     "keys": [f"result:{_s(r.get('recruit_id'))}" for r in claimed],
                     "text": "✍️ ჩაწერეთ, მოვიდა თუ არა გასაუბრებაზე:\n" + "\n".join(_line(r, now) for r in claimed)})
 
@@ -146,7 +162,7 @@ def prepare_alerts(now: datetime.datetime | None = None, agents: list[dict] | No
            and now - c >= datetime.timedelta(hours=48)]
     claimed = [r for r in und if st.claim_alert(f"decision:{_s(r.get('recruit_id'))}", "decision", _s(r.get("recruit_id")), "owners+admins")]
     if claimed:
-        out.append({"key": ",".join(f"decision:{_s(r.get('recruit_id'))}" for r in claimed), "kind": "decision", "chat_ids": everyone, "recruit_id": "",
+        out.append({"key": ",".join(f"decision:{_s(r.get('recruit_id'))}" for r in claimed), "kind": "decision", "chat_ids": everyone, "recruit_id": "", "buttons": openers(claimed),
                     "keys": [f"decision:{_s(r.get('recruit_id'))}" for r in claimed],
                     "text": "🧭 გასაუბრების შემდეგ გადაწყვეტილება 48 საათზე მეტია არ არის (მიღებულია / განიხილება / უარყოფილია):\n" + "\n".join(_line(r, now) for r in claimed)})
 
@@ -154,7 +170,7 @@ def prepare_alerts(now: datetime.datetime | None = None, agents: list[dict] | No
     tr = sorted([r for r in rows if (d := m.parse_dt(r.get("training_at"))) and d.date() == tomorrow and _s(r.get("training_ok")) != "yes" and _s(r.get("stage")) in ("training", "interviewed", "considering")],
                 key=lambda r: _s(r.get("training_at")))
     if tr and hour <= now.hour < 21:
-        emit(f"train:{dk}", "train", "", owners, f"🎓 ხვალ ტრენინგია, არ არის დადასტურებული ({len(tr)}):\n" + "\n".join(_line(r, now, False) for r in tr))
+        emit(f"train:{dk}", "train", "", owners, f"🎓 ხვალ ტრენინგია, არ არის დადასტურებული ({len(tr)}):\n" + "\n".join(_line(r, now, False) for r in tr), openers(tr, ("📅 კალენდარი", "rv=cal")))
     return out
 
 
