@@ -2566,6 +2566,43 @@ async def check_lead_guard(context: ContextTypes.DEFAULT_TYPE):
             lead_guard_jobs.finish(m, ok)
 
 
+async def check_recruit(context: ContextTypes.DEFAULT_TYPE):
+    """კადრების აყვანა (10 წთ): 1) Google Form-ის ცხრილიდან ახალი კანდიდატების იმპორტი; 2) შეხსენებები პასუხისმგებელს/ადმინებს
+    (ახალი კანდიდატი, ხვალინდელი გასაუბრებების დადასტურება, შედეგის ჩაწერა...). RECRUIT_ENABLED=0 -> არაფერს აკეთებს. მდგომარეობა ცხრილშია (რესტარტი არ აორმაგებს)."""
+    if not config.RECRUIT_ENABLED:
+        return
+    try:
+        import recruit_jobs
+        import recruit_store
+        st = getattr(check_recruit, "_state", None)
+        if st is None:
+            st = check_recruit._state = {"last_import": 0.0}
+        import time as _t
+        if _t.time() - st["last_import"] >= max(5, config.RECRUIT_IMPORT_MINUTES) * 60 - 20:
+            st["last_import"] = _t.time()
+            try:
+                res = await asyncio.to_thread(recruit_store.sync)
+                if res.get("added"):
+                    log.info("Recruit: იმპორტი — დაემატა %s (დუბლიკატი: %s, ბოოტსტრაპი: %s)", res["added"], res.get("duplicates"), res.get("bootstrap"))
+            except Exception:
+                log.warning("Recruit: ცხრილის იმპორტი ვერ მოხერხდა (შეამოწმეთ გაზიარება: ბმულის მქონე ყველასთვის — Viewer)", exc_info=True)
+        msgs = await asyncio.to_thread(recruit_jobs.prepare_alerts)
+    except Exception:
+        log.exception("Recruit ციკლი ვერ გაეშვა")
+        return
+    for m in msgs:
+        ok = False
+        try:
+            for cid in m["chat_ids"]:
+                try:
+                    await context.bot.send_message(chat_id=cid, text=m["text"])
+                    ok = True
+                except Exception:
+                    log.warning("Recruit შეტყობინება ვერ გაიგზავნა (%s)", cid, exc_info=True)
+        finally:
+            recruit_jobs.finish(m, ok)
+
+
 async def send_lead_guard_digest(context: ContextTypes.DEFAULT_TYPE):
     """SAIRO: ყოველდღიური რისკების ანგარიში — თიმლიდერს თავისი გუნდის, ადმინს სრული (დღეში ერთხელ ადამიანზე)."""
     if not config.LEAD_GUARD_ENABLED:
@@ -3299,6 +3336,7 @@ def main():
         app.job_queue.run_repeating(_tracked(check_contract_deadlines, 900), interval=900, first=260)
         app.job_queue.run_repeating(_tracked(check_hub_meetings, 600), interval=600, first=280)
         app.job_queue.run_repeating(_tracked(check_lead_guard, 900), interval=900, first=340)
+        app.job_queue.run_repeating(_tracked(check_recruit, 300), interval=300, first=360)
         app.job_queue.run_daily(
             _tracked(send_lead_guard_digest, 86400),
             time=datetime.time(hour=config.LEAD_GUARD_REPORT_HOUR, minute=15, tzinfo=ZoneInfo(config.TIMEZONE)),

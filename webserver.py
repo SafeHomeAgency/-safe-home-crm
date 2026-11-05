@@ -3301,6 +3301,13 @@ import leadguard_api  # noqa: E402
 
 leadguard_api.register(app, authed=_authed_agent, audit=_audit, rate_limited=rate_limited, chat_id=_requester_chat_id)
 
+# კადრების აყვანა (Recruitment): /api/recruit/... — ნახვა: ადმინი/თიმლიდერი/პასუხისმგებელი; რედაქტირება: ადმინი + პასუხისმგებელი. ჩავარდნა სერვერს არ აჩერებს.
+try:
+    import recruit_api  # noqa: E402
+    recruit_api.register(app, authed=_authed_agent, audit=_audit, rate_limited=rate_limited, get_agents=lambda: sheets.get_agents())
+except Exception:
+    log.exception("recruit_api ვერ ჩაირთო")
+
 
 def _agent_chat_id(agent_id):
     a = next((x for x in sheets.get_agents() if str(x.get("agent_id")) == str(agent_id)), None)

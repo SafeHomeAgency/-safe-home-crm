@@ -5857,6 +5857,8 @@ function tabsFor(role) {
   // 🏙️ განცხადებების კატალოგი (Property Hub): ყველა როლს; ფინანსების ტაბის (თუ ჩანს) მერე, რომ მისი ადგილი არ შეიცვალოს
   tabs = tabs.slice();
   tabs.splice(tabs.includes(FIN_TAB) ? 2 : 1, 0, HUB_TAB);
+  // 🧑‍💼 კადრები (აყვანა): სერვერი ამბობს, ვის შეუძლია ნახვა (ადმინი/თიმლიდერი/პასუხისმგებელი) — /api/recruit/access
+  if (state.recAccess && state.recAccess.can_view) tabs.splice(tabs.indexOf(HUB_TAB) + 1, 0, REC_TAB);
   return tabs;
 }
 
@@ -5879,6 +5881,257 @@ function renderTabbar() {
   });
   const more = bar.querySelector("button[data-more]");
   if (more) more.onclick = () => openMoreSheet(rest);
+}
+
+/* ================================================ 🧑‍💼 კადრები (Recruitment) =========================================
+   რეკლამა (Meta) -> ფორმა -> ცხრილი -> აქ: ახალი კანდიდატი, გასაუბრების დადასტურება (ერთი დღით ადრე), შედეგი, გადაწყვეტილება, ტრენინგი,
+   სტაჟირება, ჩაშტატება, წასვლა — ყველა ეტაპი ისტორიით. ხილვადობა/უფლებები სერვერზეა (/api/recruit/*): ნახვა — ადმინი/თიმლიდერი/პასუხისმგებელი,
+   რედაქტირება — ადმინი + პასუხისმგებელი. აქ მხოლოდ ჩვენებაა. */
+const REC_TAB = { id: "recruit", label: "კადრები", icon: "🧑‍💼" };
+const REC_CLS = { new: "blue", invited: "blue", confirmed: "green", interviewed: "amber", considering: "amber", training: "green", internship: "green", staffed: "gold", left: "gray", rejected: "red", dropped: "gray" };
+const REC_YN = [["", "—"], ["yes", "კი"], ["no", "არა"], ["changed", "გადაიფიქრა"]];
+if (!state.rec) state.rec = { view: "today", q: "", stage: "", page: 1, list: null, home: null, stats: null, day: "", busy: false };
+
+async function recLoadAccess() {
+  try {
+    const a = await api("/api/recruit/access");
+    const changed = JSON.stringify(a) !== JSON.stringify(state.recAccess || null);
+    state.recAccess = a;
+    if (changed) renderTabbar();
+  } catch (e) { /* წვდომა არ აქვს ან ქსელი — ტაბი უბრალოდ არ გამოჩნდება */ }
+}
+function recDtVal(s) { return String(s || "").replace(" ", "T").slice(0, 16); }
+function recDtOut(s) { return String(s || "").replace("T", " "); }
+function recTel(it) { return it.phone ? `<a class="rc-tel" href="tel:${esc(it.phone)}" data-rc-stop="1">📞 ${esc(it.phone_pretty || it.phone)}</a>` : `<span class="muted">📵 ${esc(it.phone_raw || "ტელეფონი არ არის")}</span>`; }
+function recChips(it) {
+  const iv = it.interview_day ? `<span class="rc-iv">🗓 ${esc(it.interview_day)}${it.interview_time ? " " + esc(it.interview_time) : ""}</span>` : "";
+  const cs = it.call_label && it.call_status ? `<span class="rc-call c-${esc(it.call_status)}">${esc(it.call_label)}</span>` : (it.stage === "new" || it.stage === "invited" ? `<span class="rc-call c-todo">📞 დასარეკია</span>` : "");
+  return `<span class="rc-st ${REC_CLS[it.stage] || "gray"}">${esc(it.stage_label)}</span>${iv}${cs}`;
+}
+function recCard(it, can) {
+  const quick = can && ["new", "invited", "confirmed"].includes(it.stage) ? `<div class="rc-quick" data-rc-stop="1">
+    <button class="rc-q ok" data-rc-call="confirmed" data-id="${esc(it.recruit_id)}">✅ მოდის</button><button class="rc-q no" data-rc-call="declined" data-id="${esc(it.recruit_id)}">❌ არ მოდის</button>
+    <button class="rc-q" data-rc-call="no_contact" data-id="${esc(it.recruit_id)}">📵 ვერ</button><button class="rc-q" data-rc-call="repeat" data-id="${esc(it.recruit_id)}">🔁</button></div>` : "";
+  return `<div class="card rc-card" data-rc-open="${esc(it.recruit_id)}">
+    <div class="rc-top"><b>${esc(it.name)}</b>${it.age ? `<small> · ${esc(it.age)} წ.</small>` : ""}</div>
+    <div class="rc-line">${recTel(it)}</div><div class="rc-line">${recChips(it)}</div>
+    ${it.comment ? `<div class="rc-note">💬 ${esc(it.comment.slice(0, 110))}</div>` : ""}${quick}</div>`;
+}
+async function recLoadHome() {
+  const r = state.rec;
+  r.home = await api("/api/recruit/home");
+}
+async function renderRecruit(content) {
+  const r = state.rec, a = state.recAccess || {};
+  if (!a.can_view) { content.innerHTML = `<div class="card"><div class="empty">🔒 ამ განყოფილებაზე წვდომა არ გაქვთ</div></div>`; return; }
+  content.innerHTML = `<div class="card"><div class="empty">იტვირთება…</div></div>`;
+  try { if (!r.home || r.view === "today") await recLoadHome(); } catch (e) { content.innerHTML = `<div class="card"><div class="empty">⚠️ ${esc(e.message || "შეცდომა")}</div></div>`; return; }
+  recDraw(content);
+}
+function recDraw(content) {
+  content = content || document.getElementById("content");
+  const r = state.rec, a = state.recAccess || {}, h = r.home || {}, can = !!a.can_edit;
+  const tabs = [["today", "📞 დღეს"], ["all", "👥 ყველა"], ["stats", "📊 ვორონკა"]].concat(a.can_admin ? [["settings", "⚙️"]] : []);
+  const L = h.lists || {};
+  const badge = (n) => (n ? ` <b>${n}</b>` : "");
+  const head = `<div class="card rc-head"><h2>🧑‍💼 კადრების აყვანა${can ? "" : ` <span class="cnt">ნახვა</span>`}</h2>
+    ${a.setup_needed ? `<div class="rc-warn">⚠️ პასუხისმგებელი ჯერ არ არის მითითებული${a.can_admin ? " — ⚙️-ში აირჩიეთ" : " (ადმინმა უნდა მიუთითოს)"}.</div>` : `<div class="muted" style="font-size:12px">პასუხისმგებელი: ${esc((h.responsible || a.responsible_list || []).map((x) => x.name).join(", ") || "—")}${h.enabled === false ? " · ⏸ ავტომატური შეხსენებები გამორთულია" : ""}</div>`}
+    <div class="hub-row" style="margin-top:8px">${tabs.map(([k, l]) => `<button class="hub-chip ${r.view === k ? "on" : ""}" data-rc-view="${k}">${l}${k === "today" ? badge((L.to_confirm || []).length + (L.new || []).length) : ""}</button>`).join("")}</div>
+    ${can ? `<div class="hub-row" style="margin-top:6px"><button class="btn" id="rcAdd">＋ ახალი კანდიდატი</button><button class="btn secondary" id="rcImport">🔄 ცხრილიდან განახლება</button></div>` : ""}</div>`;
+  let body = "";
+  if (r.view === "today") {
+    const sec = (title, arr, hint) => (arr && arr.length ? `<div class="card"><h2>${title} <span class="cnt">${arr.length}</span></h2>${hint ? `<div class="muted" style="font-size:12px;margin:-6px 0 8px">${hint}</div>` : ""}${arr.map((x) => recCard(x, can)).join("")}</div>` : "");
+    body = sec("🆕 ახალი — დასარეკია", L.new, "დაუკავშირდით, დაადასტურეთ გასაუბრების დრო")
+      + sec("📞 ხვალინდელი გასაუბრება — დასადასტურებელია", L.to_confirm, "ერთი დღით ადრე დარეკეთ და ჩაწერეთ: მოდის / არ მოდის")
+      + sec("🗓 დღეს გასაუბრება", L.today) + sec("✍️ ჩაწერეთ: მოვიდა თუ არა", L.need_result)
+      + sec("🧭 გადაწყვეტილება არ არის", L.decisions, "გასაუბრების შემდეგ: მიღებულია / განიხილება / უარყოფილია")
+      + sec("🎓 ხვალ ტრენინგია", L.training_tomorrow) + sec("🗓 ხვალინდელი გასაუბრებები (ყველა)", L.tomorrow);
+    if (!body) body = `<div class="card"><div class="empty">✅ დღეს დასარეკი/გასაკეთებელი არაფერია</div></div>`;
+  } else if (r.view === "all") {
+    const stages = h.stages || {};
+    body = `<div class="card hub-form"><input id="rcQ" placeholder="🔎 სახელი ან ტელეფონი" value="${esc(r.q)}" style="width:100%;margin-bottom:8px">
+      <div class="hub-row" style="flex-wrap:wrap"><button class="hub-chip ${r.stage === "" ? "on" : ""}" data-rc-stage="">ყველა</button>${Object.keys(stages).map((k) => `<button class="hub-chip ${r.stage === k ? "on" : ""}" data-rc-stage="${k}">${esc(stages[k])}</button>`).join("")}</div></div>
+      <div id="rcList">${recListHtml(can)}</div>`;
+  } else if (r.view === "stats") {
+    body = recStatsHtml(r.stats);
+  } else if (r.view === "settings") {
+    body = recSettingsHtml(h);
+  }
+  content.innerHTML = head + body;
+  recBind(content);
+  if (r.view === "all" && !r.list) recLoadList(true);
+  if (r.view === "stats" && !r.stats) recLoadStats();
+}
+function recListHtml(can) {
+  const r = state.rec;
+  if (!r.list) return `<div class="card"><div class="empty">იტვირთება…</div></div>`;
+  if (!r.list.items.length) return `<div class="card"><div class="empty">ვერაფერი მოიძებნა</div></div>`;
+  return r.list.items.map((x) => recCard(x, can)).join("") + (r.list.total > r.list.items.length ? `<button class="btn secondary" id="rcMore" style="width:100%">მეტის ჩატვირთვა (${r.list.items.length}/${r.list.total})</button>` : "");
+}
+function recPaintList() {   /* მხოლოდ სია იხატება — საძიებო ველი ფოკუსს არ კარგავს */
+  const box = document.getElementById("rcList");
+  if (!box) { recDraw(); return; }
+  box.innerHTML = recListHtml(!!(state.recAccess || {}).can_edit);
+  recBind(box);
+}
+function recStatsHtml(s) {
+  if (!s) return `<div class="card"><div class="empty">იტვირთება…</div></div>`;
+  const stages = (state.rec.home || {}).stages || {};
+  const max = Math.max(1, ...Object.values(s.by_stage || {}));
+  const bars = Object.keys(stages).map((k) => `<div class="rc-bar"><span>${esc(stages[k])}</span><i><u style="width:${Math.round(((s.by_stage || {})[k] || 0) / max * 100)}%"></u></i><b>${(s.by_stage || {})[k] || 0}</b></div>`).join("");
+  const c = s.conv || {};
+  return `<div class="card"><h2>📊 ბოლო ${s.days} დღე <span class="cnt">${s.total}</span></h2>
+    <div class="grid3"><div class="stat"><div class="num">${s.booked}</div><div class="lbl">გასაუბრება დაინიშნა (${c.booked}%)</div></div><div class="stat"><div class="num">${s.interviewed}</div><div class="lbl">გასაუბრებაზე იყო (${c.interviewed}%)</div></div><div class="stat"><div class="num">${s.staffed}</div><div class="lbl">ჩაშტატდა (${c.staffed}%)</div></div></div>
+    <div class="grid2" style="margin-top:8px"><div class="stat"><div class="num">${s.median_first_contact_h == null ? "—" : s.median_first_contact_h + " სთ"}</div><div class="lbl">პირველ კონტაქტამდე (შუა მნიშვნელობა)</div></div><div class="stat"><div class="num">${s.avg_test == null ? "—" : s.avg_test}</div><div class="lbl">ტესტის საშუალო</div></div></div></div>
+    <div class="card"><h2>🪜 ეტაპები</h2>${bars}</div>
+    ${(s.left_reasons || []).length ? `<div class="card"><h2>🚪 წასვლის მიზეზები</h2>${s.left_reasons.map((x) => `<div class="hub-kv"><span>${esc(x.reason)}</span><b>${x.count}</b></div>`).join("")}</div>` : ""}
+    <div class="card hub-form"><h2>🕒 დღის სლოტები</h2><input type="date" id="rcDay" value="${esc(state.rec.day || new Date().toISOString().slice(0, 10))}" style="margin-bottom:8px"><div id="rcSlots" class="muted">აირჩიეთ დღე</div></div>`;
+}
+function recSettingsHtml(h) {
+  const resp = new Set(((h.responsible) || []).map((x) => x.agent_id)), agents = h.agents || [];
+  return `<div class="card hub-form"><h2>⚙️ პარამეტრები</h2>
+    <div class="k" style="color:var(--hint);font-size:12px;margin-bottom:4px">პასუხისმგებელი (ერთი ან ორი — თუ ერთი ვერ ასწრებს, მეორე ანაცვლებს)</div>
+    <div class="rc-agents">${agents.map((a) => `<label><input type="checkbox" class="rcResp" value="${esc(a.agent_id)}" ${resp.has(a.agent_id) ? "checked" : ""} style="width:auto"> ${esc(a.name)}${a.role === "team_lead" ? " 👔" : ""}</label>`).join("") || `<div class="muted">აგენტების სია ცარიელია</div>`}</div>
+    <label style="display:block;margin-top:10px">ხვალინდელი გასაუბრებების დასადასტურებელი სია (საათი)<select id="rcHour">${[8, 9, 10, 11, 12, 13, 14, 15, 16].map((x) => `<option value="${x}" ${x === h.remind_hour ? "selected" : ""}>${x}:00</option>`).join("")}</select></label>
+    <div class="muted" style="font-size:12px;margin:8px 0">ავტომატური შეხსენებები Telegram-ში: <b>${h.enabled ? "ჩართულია" : "გამორთულია (Railway: RECRUIT_ENABLED=1)"}</b></div>
+    <button class="btn" id="rcSaveSettings">💾 შენახვა</button> <a class="btn secondary" id="rcExport" style="display:inline-block;text-decoration:none">⬇️ CSV</a>
+    <div class="k" style="margin-top:14px;color:var(--hint);font-size:12px">შეტყობინების ტექსტები (კანდიდატისთვის გასაგზავნად; {name} {date} {time})</div><div id="rcTpl" class="muted">იტვირთება…</div></div>`;
+}
+async function recLoadList(reset) {
+  const r = state.rec;
+  if (reset) { r.page = 1; }
+  try {
+    const d = await api(`/api/recruit/list?page=${r.page}&stage=${encodeURIComponent(r.stage)}&q=${encodeURIComponent(r.q)}`);
+    r.list = reset || !r.list ? d : { items: r.list.items.concat(d.items), total: d.total, page: d.page };
+  } catch (e) { toast(e.message || "შეცდომა"); r.list = { items: [], total: 0 }; }
+  if (state.rec.view === "all") recPaintList();
+}
+async function recLoadStats() {
+  try { state.rec.stats = await api("/api/recruit/stats?days=90"); } catch (e) { toast(e.message || "შეცდომა"); state.rec.stats = { days: 90, total: 0, by_stage: {}, conv: {}, booked: 0, interviewed: 0, staffed: 0 }; }
+  if (state.rec.view === "stats") recDraw();
+}
+async function recLoadSlots(day) {
+  const box = document.getElementById("rcSlots");
+  if (!box) return;
+  try {
+    const d = await api("/api/recruit/slots?day=" + encodeURIComponent(day));
+    box.innerHTML = d.slots.length ? d.slots.map((b) => `<div class="rc-slot"><b>${esc(b.time)}</b><span>სულ ${b.total}${b.confirmed ? ` · ✅ ${b.confirmed}` : ""}${b.declined ? ` · ❌ ${b.declined}` : ""}${b.repeat ? ` · 🔁 ${b.repeat}` : ""}${b.no_contact ? ` · 📵 ${b.no_contact}` : ""}${b.pending ? ` · ⏳ ${b.pending}` : ""}</span><small class="muted">${b.names.map((n) => esc(n.name)).join(", ")}</small></div>`).join("") : "ამ დღეს გასაუბრება არ არის";
+  } catch (e) { box.textContent = e.message || "შეცდომა"; }
+}
+async function recDoCall(id, status) {
+  hubHaptic();
+  try {
+    await api("/api/recruit/" + encodeURIComponent(id), { method: "POST", body: JSON.stringify({ changes: { call_status: status } }) });
+    toast({ confirmed: "✅ მოდის", declined: "❌ არ მოდის", no_contact: "📵 ვერ დაუკავშირდით", repeat: "🔁 განმეორებითი ზარი" }[status] || "შენახულია");
+    state.rec.list = null; await recLoadHome(); recDraw();
+  } catch (e) { toast(e.message || "შეცდომა"); }
+}
+function recBind(root) {
+  const r = state.rec;
+  root.querySelectorAll("[data-rc-view]").forEach((b) => { b.onclick = () => { r.view = b.dataset.rcView; if (r.view === "all") r.list = null; if (r.view === "stats") r.stats = null; hubHaptic(); recDraw(); }; });
+  root.querySelectorAll("[data-rc-stage]").forEach((b) => { b.onclick = () => { r.stage = b.dataset.rcStage; r.list = null; recDraw(); }; });
+  root.querySelectorAll("[data-rc-open]").forEach((c) => { c.onclick = (e) => { if (e.target.closest("[data-rc-stop]")) return; recOpen(c.dataset.rcOpen); }; });
+  root.querySelectorAll("[data-rc-call]").forEach((b) => { b.onclick = (e) => { e.stopPropagation(); recDoCall(b.dataset.id, b.dataset.rcCall); }; });
+  const q = document.getElementById("rcQ"); if (q) { let t; q.oninput = () => { clearTimeout(t); t = setTimeout(() => { r.q = q.value.trim(); r.list = null; recLoadList(true); }, 350); }; }
+  const more = document.getElementById("rcMore"); if (more) more.onclick = () => { r.page += 1; recLoadList(false); };
+  const add = document.getElementById("rcAdd"); if (add) add.onclick = recAddForm;
+  const imp = document.getElementById("rcImport");
+  if (imp) imp.onclick = async () => {
+    imp.disabled = true; imp.textContent = "⏳ იტვირთება…";
+    try { const d = await api("/api/recruit/import", { method: "POST", body: "{}" }); toast(d.added ? `✅ დაემატა ${d.added} ახალი კანდიდატი` : "ახალი არაფერია"); r.list = null; await recLoadHome(); recDraw(); }
+    catch (e) { toast(e.message || "შეცდომა"); imp.disabled = false; imp.textContent = "🔄 ცხრილიდან განახლება"; }
+  };
+  const day = document.getElementById("rcDay"); if (day) { day.onchange = () => { r.day = day.value; recLoadSlots(day.value); }; recLoadSlots(day.value); }
+  const sv = document.getElementById("rcSaveSettings");
+  if (sv) {
+    recLoadTemplates();
+    sv.onclick = async () => {
+      const ids = Array.from(root.querySelectorAll(".rcResp:checked")).map((x) => x.value);
+      const body = { responsible_ids: ids, remind_hour: Number(document.getElementById("rcHour").value) };
+      root.querySelectorAll("[data-rc-tpl]").forEach((t) => { body["tpl_" + t.dataset.rcTpl] = t.value; });
+      sv.disabled = true;
+      try { const d = await api("/api/recruit/settings", { method: "POST", body: JSON.stringify(body) }); toast("✅ შენახულია"); state.recAccess = Object.assign({}, state.recAccess, { responsible_list: d.responsible, setup_needed: !d.responsible.length }); await recLoadHome(); recDraw(); }
+      catch (e) { toast(e.message || "შეცდომა"); sv.disabled = false; }
+    };
+    const ex = document.getElementById("rcExport"); if (ex) ex.onclick = async () => { try { const res = await fetch("/api/recruit/export.csv", { headers: { "X-Telegram-Init-Data": tg ? tg.initData : "" } }); const t = await res.text(); if (window.shCopy) window.shCopy(t, "📋 CSV დაკოპირდა (ჩასვით Sheets-ში)"); else toast("CSV მზადაა"); } catch (e) { toast("ვერ ჩამოიტვირთა"); } };
+  }
+}
+async function recLoadTemplates() {
+  const box = document.getElementById("rcTpl"); if (!box) return;
+  try {
+    const d = await api("/api/recruit/templates");
+    box.innerHTML = Object.keys(d.templates).map((k) => `<label style="display:block;margin:6px 0"><span style="font-size:12px">${esc(d.labels[k] || k)}</span><textarea data-rc-tpl="${k}" rows="3" style="width:100%">${esc(d.templates[k])}</textarea></label>`).join("");
+  } catch (e) { box.textContent = e.message || "შეცდომა"; }
+}
+function recAddForm() {
+  const box = hubAsk("＋ ახალი კანდიდატი", `<input id="rcaName" placeholder="სახელი გვარი *"><input id="rcaPhone" inputmode="tel" placeholder="ტელეფონი"><input id="rcaAge" inputmode="numeric" placeholder="ასაკი">
+    <label style="font-size:12px;color:var(--hint)">გასაუბრების დრო<input id="rcaIv" type="datetime-local"></label><textarea id="rcaNote" placeholder="კომენტარი"></textarea>`, "დამატება", async (b) => {
+    const g = (id) => b.querySelector("#" + id).value.trim();
+    if (!g("rcaName")) throw new Error("სახელი სავალდებულოა");
+    const fields = { name: g("rcaName"), phone: g("rcaPhone"), age: g("rcaAge"), interview_at: recDtOut(g("rcaIv")), comment: g("rcaNote") };
+    await api("/api/recruit", { method: "POST", body: JSON.stringify({ fields }) });
+    closeDetail(); toast("✅ დაემატა"); state.rec.list = null; await recLoadHome(); recDraw();
+  });
+  return box;
+}
+async function recOpen(id) {
+  const backdrop = document.getElementById("modalBackdrop"), box = document.getElementById("modalBox");
+  let d;
+  try { d = await api("/api/recruit/" + encodeURIComponent(id)); } catch (e) { toast(e.message || "შეცდომა"); return; }
+  const it = d.item, can = d.can_edit, stages = (state.rec.home || {}).stages || {}, calls = (state.rec.home || {}).call_status || {};
+  const ro = can ? "" : "disabled";
+  const sel = (idn, opts, cur) => `<select id="${idn}" ${ro}>${opts.map(([v, l]) => `<option value="${esc(v)}" ${v === cur ? "selected" : ""}>${esc(l)}</option>`).join("")}</select>`;
+  const yn = (idn, cur) => sel(idn, REC_YN, cur || "");
+  const row = (label, html) => `<label class="rc-f"><span>${label}</span>${html}</label>`;
+  const digits = (it.phone || "").replace(/\D/g, "");
+  const msgBtns = Object.keys(d.templates).map((k) => `<div class="rc-msg"><b>${esc(d.template_labels[k] || k)}</b><div class="rc-msgtxt">${esc(d.templates[k])}</div>
+    <div class="hub-row"><button class="btn secondary" data-rc-copy="${k}">📋</button>${digits ? `<button class="btn secondary" data-rc-wa="${k}">WhatsApp</button><a class="btn secondary" style="text-decoration:none" href="sms:${esc(it.phone)}?&body=${encodeURIComponent(d.templates[k])}">SMS</a>` : ""}</div></div>`).join("");
+  box.innerHTML = `<h3>${esc(it.name)}<button class="close" id="modalClose">✕</button></h3>
+    <div class="rc-line">${recChips(it)}</div>
+    <div class="field"><div class="k">ტელეფონი</div><div class="v">${esc(it.phone_pretty || it.phone_raw || "—")}</div></div>
+    ${it.phone ? `<div class="hub-row"><a class="btn" style="text-decoration:none" href="tel:${esc(it.phone)}">📞 დარეკვა</a></div>` : ""}
+    ${it.motivation ? `<div class="field"><div class="k">რატომ დაინტერესდა</div><div class="v">${esc(it.motivation)}</div></div>` : ""}
+    ${it.experience ? `<div class="field"><div class="k">გამოცდილება</div><div class="v">${esc(it.experience)}</div></div>` : ""}
+    <div class="field"><div class="k">შემოვიდა</div><div class="v">${esc(it.created_at || "—")}</div></div>
+    <div class="rc-form hub-form">
+      ${can ? `<div class="k" style="font-size:12px;color:var(--hint)">ზარის შედეგი</div><div class="hub-row">${Object.keys(calls).filter((k) => k).map((k) => `<button class="hub-chip ${it.call_status === k ? "on" : ""}" data-rc-setcall="${k}">${esc(calls[k])}</button>`).join("")}</div>` : ""}
+      ${row("ეტაპი", sel("rc_stage", Object.keys(stages).map((k) => [k, stages[k]]), it.stage))}
+      ${row("გასაუბრების დრო", `<input type="datetime-local" id="rc_interview_at" value="${esc(recDtVal(it.interview_at))}" ${ro}>`)}
+      ${row("გასაუბრებაზე იყო", yn("rc_attended", it.attended))}
+      ${row("გადაწყვეტილება", sel("rc_decision", [["", "—"], ["accepted", "მიღებულია"], ["considering", "განიხილება"], ["rejected", "უარყოფილია"]], it.decision))}
+      ${row("ტრენინგის დრო", `<input type="datetime-local" id="rc_training_at" value="${esc(recDtVal(it.training_at))}" ${ro}>`)}
+      ${row("ტრენინგზე მოდის", yn("rc_training_ok", it.training_ok))}
+      ${row("ტესტი (ქულა)", `<input id="rc_test_score" inputmode="numeric" value="${esc(it.test_score)}" ${ro}>`)}
+      ${row("სტაჟირების დაწყება", `<input type="date" id="rc_internship_at" value="${esc(it.internship_at)}" ${ro}>`)}
+      ${row("ჩავიყვანთ (აგვყავს)", yn("rc_hire", it.hire))}
+      ${row("ჩაშტატების თარიღი", `<input type="date" id="rc_staffed_at" value="${esc(it.staffed_at)}" ${ro}>`)}
+      ${row("წასვლის თარიღი", `<input type="date" id="rc_left_at" value="${esc(it.left_at)}" ${ro}>`)}
+      ${row("წასვლის/უარის მიზეზი", `<input id="rc_left_reason" value="${esc(it.left_reason)}" ${ro}>`)}
+      ${row("შენიშვნა", `<textarea id="rc_comment" rows="2" ${ro}>${esc(it.comment)}</textarea>`)}
+      ${can ? `<div class="hub-row" style="margin-top:6px"><button class="btn" id="rcSave">💾 შენახვა</button></div>` : `<div class="muted">ნახვის რეჟიმი — რედაქტირება შეუძლია ადმინს და პასუხისმგებელს</div>`}
+    </div>
+    <div class="rc-sec">💬 შეტყობინების ტექსტები კანდიდატისთვის</div>${msgBtns}
+    <div class="rc-sec">🕘 ისტორია</div><div class="rc-log">${(d.log || []).map((l) => `<div><small class="muted">${esc(l.at)} · ${esc(l.by_name)}</small><br>${esc(l.text)}</div>`).join("") || `<div class="muted">ცარიელია</div>`}</div>`;
+  backdrop.hidden = false;
+  document.getElementById("modalClose").onclick = closeDetail;
+  backdrop.onclick = (e) => { if (e.target === backdrop) closeDetail(); };
+  box.querySelectorAll("[data-rc-copy]").forEach((b) => { b.onclick = () => (window.shCopy ? window.shCopy(d.templates[b.dataset.rcCopy], "📋 ტექსტი დაკოპირდა") : toast(d.templates[b.dataset.rcCopy])); });
+  box.querySelectorAll("[data-rc-wa]").forEach((b) => { b.onclick = () => hubOpenLink(`https://wa.me/${digits}?text=${encodeURIComponent(d.templates[b.dataset.rcWa])}`); });
+  box.querySelectorAll("[data-rc-setcall]").forEach((b) => { b.onclick = async () => {
+    try { await api("/api/recruit/" + encodeURIComponent(id), { method: "POST", body: JSON.stringify({ changes: { call_status: b.dataset.rcSetcall } }) }); toast("✅ შენახულია"); state.rec.list = null; await recLoadHome(); recDraw(); recOpen(id); }
+    catch (e) { toast(e.message || "შეცდომა"); } }; });
+  const save = document.getElementById("rcSave");
+  if (save) save.onclick = async () => {
+    const g = (f) => document.getElementById("rc_" + f).value;
+    const ch = { stage: g("stage"), interview_at: recDtOut(g("interview_at")), attended: g("attended"), decision: g("decision"), training_at: recDtOut(g("training_at")), training_ok: g("training_ok"),
+      test_score: g("test_score"), internship_at: g("internship_at"), hire: g("hire"), staffed_at: g("staffed_at"), left_at: g("left_at"), left_reason: g("left_reason"), comment: g("comment") };
+    const changes = {};
+    Object.keys(ch).forEach((k) => { if (String(ch[k] || "") !== String(k === "interview_at" || k === "training_at" ? (it[k] || "") : (it[k] || ""))) changes[k] = ch[k]; });
+    if (!Object.keys(changes).length) { toast("ცვლილება არ არის"); return; }
+    save.disabled = true;
+    try { await api("/api/recruit/" + encodeURIComponent(id), { method: "POST", body: JSON.stringify({ changes }) }); hubHaptic("ok"); toast("✅ შენახულია"); closeDetail(); state.rec.list = null; await recLoadHome(); recDraw(); }
+    catch (e) { toast(e.message || "შეცდომა"); save.disabled = false; }
+  };
 }
 
 /* ================================================ SAIRO — Safe Home AI (შიდა ასისტენტი) ==========================
@@ -6299,6 +6552,7 @@ async function renderContent() {
     if (tab !== "system" && state.sysTimer) { clearTimeout(state.sysTimer); state.sysTimer = null; }
     if (tab === "finance") { await renderFinance(content); return; }
     if (tab === "hub") { await renderHub(content); return; }
+    if (tab === "recruit") { await renderRecruit(content); return; }
     if (tab === "system") { await renderSystem(content); return; }
     if (tab === "ai") { await renderAi(content); return; }
     if (LAZY_ENDPOINTS[tab]) {
@@ -6432,6 +6686,7 @@ async function load() {
     renderContent();
     finLoadAccess();
     aiLoadAccess();
+    recLoadAccess();
   } catch (e) {
     document.getElementById("content").innerHTML =
       `<div class="card"><div class="empty">⚠️ ${esc(e.message)}</div></div>`;

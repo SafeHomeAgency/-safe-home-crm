@@ -150,6 +150,8 @@ RATE_LIMITS = {
     "ai_read": (120, 60),          # Safe Home AI: ისტორია/ცოდნის ბაზა/დაშბორდი (წაკითხვა)
     "ai_write": (40, 60),          # Safe Home AI: უკუკავშირი, ცოდნის ბაზის რედაქტირება/დამტკიცება
     "leadguard_read": (60, 60),    # SAIRO Lead Protection: რისკების ანგარიში/წინასწარი ნახვა (წაკითხვა)
+    "recruit_read": (120, 60),     # კადრების აყვანა: სიები/სტატისტიკა (წაკითხვა)
+    "recruit_write": (60, 60),     # კადრების აყვანა: რედაქტირება/იმპორტი/პარამეტრები
 }
 RATE_LIMIT_ENABLED = os.environ.get("RATE_LIMIT_ENABLED", "1").strip().lower() not in ("0", "false", "no")
 
@@ -319,6 +321,16 @@ AI_KB_RESTRICTED_CATEGORIES = {
 }
 AI_KB_TEAMLEAD_CAN_PUBLISH = _flag("AI_KB_TEAMLEAD_CAN_PUBLISH", "1")
 AI_CANDIDATE_LOOKBACK_DAYS = int(os.environ.get("AI_CANDIDATE_LOOKBACK_DAYS", "60"))   # მენეჯერის პასუხები კანდიდატად ამ პერიოდიდან
+
+
+# --- კადრების აყვანა (Recruitment): Meta რეკლამა -> Google Form-ის ცხრილი -> ჩვენი სისტემა (იმპორტი, ეტაპები, შეხსენებები) ----------------------
+# RECRUIT_ENABLED=0 (ნაგულისხმევი) — ცხრილიდან ავტომატური იმპორტი და Telegram შეხსენებები გამორთულია (განყოფილება აპში მაინც მუშაობს, იმპორტი ღილაკით).
+RECRUIT_ENABLED = _flag("RECRUIT_ENABLED", "0")
+RECRUIT_SHEET_ID = os.environ.get("RECRUIT_SHEET_ID", "10IGmB9WHwrhDGv_BNS5OaiZczSUo-rnEind37mOE_zc").strip()   # Google Form-ის პასუხების ცხრილი (არა საიდუმლო; Viewer-ზე გაზიარებული უნდა იყოს)
+RECRUIT_SHEET_TAB = os.environ.get("RECRUIT_SHEET_TAB", "Form Responses 2").strip()
+RECRUIT_IMPORT_MINUTES = int(os.environ.get("RECRUIT_IMPORT_MINUTES", "10"))
+RECRUIT_REMIND_HOUR = int(os.environ.get("RECRUIT_REMIND_HOUR", "12"))                       # ხვალინდელი გასაუბრებების დასადასტურებელი სია (თბილისი); აპიდანაც იცვლება
+RECRUIT_RESPONSIBLE_IDS = {x.strip() for x in os.environ.get("RECRUIT_RESPONSIBLE_IDS", "").split(",") if x.strip()}   # საწყისი პასუხისმგებელი agent_id-ები (აპის პარამეტრი უფრო მაღლა დგას)
 
 
 # --- SAIRO: Lead Protection Engine + AI მოქმედებები + ბიუჯეტის დამცავი ----------------------------------------
