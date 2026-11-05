@@ -94,22 +94,47 @@ def _log(recruit_id: str, kind: str, text: str, by: dict | None) -> None:
 
 
 # ---------------------------------------------------------------------------------------------- იმპორტი
+FILL_FIELDS = ["phone", "phone_raw", "age", "motivation", "experience", "pref_text", "pref_date", "pref_time", "interview_at", "call_status", "attended", "decision", "training_at",
+               "training_ok", "attended_t1", "attended_t2", "inter_lasha", "inter_owner", "inter_client", "inter_lasha_at", "inter_owner_at", "inter_client_at", "inter_note",
+               "test_score", "internship_at", "hire", "staffed_at", "left_at", "comment"]
+
+
 def import_rows(parsed: list[dict], bootstrap: bool = False) -> dict:
-    """parsed — map_row-ის შედეგები. უკვე არსებულ src_key-ს არ ვეხებთ (ჩვენი რედაქტირება არ იკარგება). bootstrap=True: ძველი ისტორიის
-    პირველადი ჩატვირთვა — `silent`, რომ ძველ კანდიდატებზე შეტყობინებები არ წავიდეს. დუბლიკატი ტელეფონით აქტიურ ჩანაწერთან — მიეთითება კომენტარში."""
+    """parsed — map_row-ის შედეგები. ახალი src_key — ემატება; უკვე არსებულზე **მხოლოდ ცარიელ ველებს ვავსებთ** ცხრილის მონაცემით (ჩვენი რედაქტირება
+    არასდროს იწერება თავზე; ცხრილში ხელით შევსებული ახალი მონაცემიც არ იკარგება). bootstrap=True: ძველი ისტორიის პირველადი ჩატვირთვა — `silent`,
+    რომ ძველ კანდიდატებზე შეტყობინებები არ წავიდეს. დუბლიკატი ტელეფონით აქტიურ ჩანაწერთან — მიეთითება კომენტარში."""
     now = now_dt()
     with _lock:
         existing = all_rows(fresh=True)
-        have = {_s(r.get("src_key")) for r in existing if _s(r.get("src_key"))}
+        by_key = {_s(r.get("src_key")): r for r in existing if _s(r.get("src_key"))}
         phones = {_s(r.get("phone")): _s(r.get("name")) for r in existing if _s(r.get("phone")) and _s(r.get("closed")) != "yes"}
         added = skipped = dups = 0
         batch = []
+        fills: dict[str, dict] = {}
         taken = {_s(r.get("recruit_id")) for r in existing}
+        order = list(m.STAGES)
         for rec in parsed:
-            if rec["src_key"] in have:
+            old = by_key.get(rec["src_key"])
+            if old is not None:
+                ch = {k: _s(rec.get(k), 700) for k in FILL_FIELDS if _s(rec.get(k)) and not _s(old.get(k))}
+                for k in ("inter_lasha", "inter_owner", "inter_client"):          # ძველი ვერსიის მნიშვნელობა „yes“ (გაიარა) -> ახალი სტატუსი
+                    if _s(old.get(k)) == "yes":
+                        ch[k] = "passed"
+                if ch:
+                    merged = dict(old, **ch)
+                    cur = _s(old.get("stage")) or "new"
+                    if _s(old.get("closed")) != "yes" and cur != "archive":
+                        auto = m.infer_stage(merged)
+                        if auto != cur and (order.index(auto) > order.index(cur) or auto in m.CLOSED_STAGES):
+                            ch["stage"] = auto
+                            ch["closed"] = "yes" if auto in m.CLOSED_STAGES else ""
+                    ch["updated_at"], ch["updated_by"] = now_str(), "ცხრილიდან შევსება"
+                    fills[_s(old.get("recruit_id"))] = ch
                 skipped += 1
                 continue
-            rid = "R" + rec["src_key"]
+            rid = "R" + rec["src_key"].lstrip("A")
+            if rec["src_key"].startswith("A"):
+                rid = "A" + rec["src_key"][1:]
             if rid in taken:
                 skipped += 1
                 continue
@@ -125,27 +150,48 @@ def import_rows(parsed: list[dict], bootstrap: bool = False) -> dict:
             if rec.get("phone"):
                 phones[rec["phone"]] = rec["name"]
             batch.append(rec)
-            have.add(rec["src_key"])
+            by_key[rec["src_key"]] = rec
             added += 1
         # ჯგუფური ჩაწერა: ერთი მოთხოვნა 300 სტრიქონზე (სტრიქონ-სტრიქონ ჩაწერა Sheets-ის „Write requests per minute“ ლიმიტს ცდებოდა — 429)
+        at = now_str()
+        log_rows = []
         if batch:
             _backend.append_many(m.RECRUITS, m.HEADERS, batch)
-            at, by = now_str(), "სისტემა"
-            _backend.append_many(m.RECRUIT_LOG, m.LOG_HEADERS, [{
-                "log_id": uuid.uuid4().hex[:10], "recruit_id": rec["recruit_id"], "at": at, "by_name": by, "by_id": "", "kind": "import",
-                "text": "ძველი ცხრილიდან გადმოტანილია" if rec.get("silent") else "ფორმიდან შემოვიდა"} for rec in batch])
-        return {"added": added, "skipped": skipped, "duplicates": dups, "bootstrap": bootstrap}
+            log_rows += [{"log_id": uuid.uuid4().hex[:10], "recruit_id": rec["recruit_id"], "at": at, "by_name": "სისტემა", "by_id": "", "kind": "import",
+                          "text": ("არქივიდან გადმოტანილია" if rec.get("source") == "archive" else "ძველი ცხრილიდან გადმოტანილია") if rec.get("silent") else "ფორმიდან შემოვიდა"} for rec in batch]
+        filled = 0
+        if fills:
+            filled = _backend.update_many(m.RECRUITS, m.HEADERS, fills)
+            log_rows += [{"log_id": uuid.uuid4().hex[:10], "recruit_id": rid, "at": at, "by_name": "სისტემა", "by_id": "", "kind": "import",
+                          "text": "ცხრილიდან შეივსო: " + ", ".join(k for k in ch if k not in ("updated_at", "updated_by", "closed"))[:200]} for rid, ch in fills.items()]
+        if log_rows:
+            _backend.append_many(m.RECRUIT_LOG, m.LOG_HEADERS, log_rows)
+        return {"added": added, "skipped": skipped, "duplicates": dups, "bootstrap": bootstrap, "filled": filled}
 
 
-def sync(fetch=None, sheet_id: str = "", tab: str = "") -> dict:
-    """Google Form-ის ცხრილიდან ახალი სტრიქონების გადმოტანა. ჩვენი ცხრილი ცარიელია => ბოოტსტრაპი (ძველი ისტორია, უხმოდ)."""
+def sync(fetch=None, sheet_id: str = "", tab: str = "", archive_tabs=None) -> dict:
+    """Google Form-ის ცხრილიდან ახალი სტრიქონების გადმოტანა + ცარიელი ველების შევსება. ჩვენი ცხრილი ცარიელია => ბოოტსტრაპი (ძველი ისტორია, უხმოდ).
+    ძველი ფორმის გვერდები (RECRUIT_ARCHIVE_TABS, მაგ. Sheet3) — ეტაპით „არქივი“ (შედეგი უცნობია), რომ არავინ დაიკარგოს."""
     fetch = fetch or m.fetch_sheet_rows
-    header, rows = fetch(sheet_id or config.RECRUIT_SHEET_ID, tab or config.RECRUIT_SHEET_TAB)
+    sid = sheet_id or config.RECRUIT_SHEET_ID
+    header, rows = fetch(sid, tab or config.RECRUIT_SHEET_TAB)
     parsed = [p for p in (m.map_row(header, r) for r in rows) if p]
     with _lock:
-        bootstrap = not all_rows(fresh=True)
+        bootstrap = not [r for r in all_rows(fresh=True) if _s(r.get("source")) != "archive"]
     out = import_rows(parsed, bootstrap=bootstrap)
     out["source_rows"] = len(rows)
+    tabs = config.RECRUIT_ARCHIVE_TABS if archive_tabs is None else archive_tabs
+    arch = {"added": 0, "tabs": 0}
+    for t in tabs:
+        try:
+            ah, ar = fetch(sid, t)
+            res = import_rows([p for p in (m.map_archive_row(ah, r) for r in ar) if p], bootstrap=True)
+            arch["added"] += res["added"]
+            arch["tabs"] += 1
+        except Exception as e:  # noqa: BLE001
+            log.warning("Recruit: არქივის გვერდი ვერ ჩაიტვირთა (%s): %s", t, e)
+            arch["error"] = f"{t}: {e}"
+    out["archive"] = arch
     return out
 
 
@@ -227,6 +273,8 @@ def public(r: dict, now: datetime.datetime | None = None) -> dict:
         out["interview_time"] = iv.strftime("%H:%M") if iv.strftime("%H:%M") != "00:00" else ""
     fc = _dt(r, "created_at")
     out["age_hours"] = round((now - fc).total_seconds() / 3600, 1) if fc else None
+    out["flags"] = flags_of(r, now)
+    out["train"] = m.train_info(r)
     return out
 
 
@@ -278,7 +326,35 @@ def stats(now: datetime.datetime | None = None, days: int = 90) -> dict:
     for r in rows:
         if _s(r.get("left_reason")):
             reasons[_s(r.get("left_reason"))] = reasons.get(_s(r.get("left_reason")), 0) + 1
-    return {"days": days, "total": total, "by_stage": cnt, "booked": booked, "interviewed": interviewed, "trained": trained, "staffed": staffed, "no_show": noshow,
+    # ტრენინგი: რამდენი მოდის, ქირის / ყიდვის ტრენინგი რამდენს ჩაუტარდა, რამდენი გადავიდა ყიდვაზე (ორივე)
+    ti = [(r, m.train_info(r)) for r in rows]
+    by_day: dict[str, dict] = {}
+    for r, t_ in ti:
+        td = _dt(r, "training_at")
+        if td:
+            d = by_day.setdefault(td.strftime("%Y-%m-%d"), {"date": td.strftime("%Y-%m-%d"), "scheduled": 0, "coming": 0, "rent": 0, "sale": 0, "both": 0})
+            d["scheduled"] += 1
+            d["coming"] += 1 if _s(r.get("training_ok")) == "yes" else 0
+            d["rent"] += 1 if t_["rent"] else 0
+            d["sale"] += 1 if t_["sale"] else 0
+            d["both"] += 1 if t_["both"] else 0
+    training = {
+        "scheduled": sum(1 for r in rows if _s(r.get("training_at"))), "coming": sum(1 for r in rows if _s(r.get("training_ok")) == "yes"),
+        "declined": sum(1 for r in rows if _s(r.get("training_ok")) in ("no", "changed")), "no_answer": sum(1 for r in rows if _s(r.get("training_ok")) == "no_answer"),
+        "rent": sum(1 for _r, t_ in ti if t_["rent"]), "sale": sum(1 for _r, t_ in ti if t_["sale"]), "rent_then_sale": sum(1 for _r, t_ in ti if t_["both"]),
+        "rent_only": sum(1 for _r, t_ in ti if t_["rent"] and not t_["sale"]), "sale_only": sum(1 for _r, t_ in ti if t_["sale"] and not t_["rent"]),
+        "absent": sum(1 for _r, t_ in ti if t_["absent"]), "by_day": [by_day[k] for k in sorted(by_day, reverse=True)][:14],
+    }
+    inter = {}
+    for key, label in (("inter_lasha", "ლაშასთან"), ("inter_owner", "მეპატრონესთან"), ("inter_client", "კლიენტთან")):
+        c = {k: sum(1 for r in rows if _s(r.get(key)) == k) for k in ("scheduled", "held", "passed", "failed", "changed")}
+        c["label"] = label
+        c["conducted"] = c["held"] + c["passed"] + c["failed"]
+        inter[key] = c
+    outcome = {"internship": sum(1 for r in rows if _s(r.get("internship_at"))), "hire_yes": sum(1 for r in rows if _s(r.get("hire")) == "yes"),
+               "hire_changed": sum(1 for r in rows if _s(r.get("hire")) in ("changed", "no")), "staffed": staffed, "left": sum(1 for r in rows if _s(r.get("left_at"))),
+               "tested": len(scores)}
+    return {"days": days, "training": training, "interactions": inter, "outcome": outcome, "total": total, "by_stage": cnt, "booked": booked, "interviewed": interviewed, "trained": trained, "staffed": staffed, "no_show": noshow,
             "conv": {"booked": pct(booked, total), "interviewed": pct(interviewed, booked), "trained": pct(trained, interviewed), "staffed": pct(staffed, total)},
             "median_first_contact_h": round(first[len(first) // 2], 1) if first else None, "avg_test": round(sum(scores) / len(scores), 1) if scores else None,
             "left_reasons": sorted(({"reason": k, "count": v} for k, v in reasons.items()), key=lambda x: -x["count"])[:8],
@@ -304,25 +380,164 @@ def slots(day: str) -> dict:
     return {"day": m.fmt_date(d0), "slots": [by[k] for k in sorted(by)], "total": sum(b["total"] for b in by.values())}
 
 
-def query(f: dict, now: datetime.datetime | None = None) -> dict:
-    now = now or now_dt()
+FLAG_LABELS = {"uncontacted": "🆕 დაუკავშირებელი (3 სთ+)", "result_missing": "✍️ გასაუბრების შედეგი ჩაუწერელია", "postponed": "⏭ გადაიდო — ახალი დრო დაუნიშნეთ",
+               "stalled": "🧊 3 დღეზე მეტია უმოქმედოა", "no_phone": "📵 ტელეფონი არ არის", "duplicate": "👯 დუბლიკატი"}
+_IN_PROGRESS = ("new", "invited", "confirmed", "interviewed", "considering", "training", "internship")
+
+
+def flags_of(r: dict, now: datetime.datetime) -> list[str]:
+    """„ყურადღების“ ნიშნები (აქტიურ ჩანაწერზე): რომ არცერთი კანდიდატი არ დაიკარგოს. ძველი (silent) ისტორია ხმაურს არ ქმნის."""
+    if not _active(r):
+        return []
+    out = []
+    stage = _s(r.get("stage")) or "new"
+    silent = bool(_s(r.get("silent")))
+    created = _dt(r, "created_at")
+    last = _dt(r, "last_contact_at") or created
+    if stage == "new" and not _s(r.get("last_contact_at")) and not silent and created and now - created >= datetime.timedelta(hours=3):
+        out.append("uncontacted")
+    iv = _dt(r, "interview_at")
+    if iv and datetime.timedelta(minutes=60) <= now - iv < datetime.timedelta(days=14) and stage in ("new", "invited", "confirmed") and not _s(r.get("attended")):
+        out.append("result_missing")
+    if not silent and stage in _IN_PROGRESS and last and now - last >= datetime.timedelta(days=3):
+        out.append("stalled")
+    if _s(r.get("attended")) == "postponed" and stage in ("new", "invited", "confirmed"):
+        out.append("postponed")
+    if not _s(r.get("phone")):
+        out.append("no_phone")
+    if "იგივე ნომერი" in _s(r.get("comment")):
+        out.append("duplicate")
+    return out
+
+
+def _passes(r: dict, f: dict, now: datetime.datetime, skip: tuple = ()) -> bool:
     q = _s(f.get("q"), 60).lower()
-    qd = "".join(ch for ch in q if ch.isdigit())
-    rows = []
-    for r in all_rows():
-        if f.get("stage") and _s(r.get("stage")) != f["stage"]:
-            continue
-        if f.get("active") and not _active(r):
-            continue
-        if f.get("responsible") and _s(r.get("responsible_id")) != f["responsible"]:
-            continue
-        if q and q not in _s(r.get("name")).lower() and not (len(qd) >= 3 and qd in "".join(ch for ch in _s(r.get("phone_raw")) + _s(r.get("phone")) if ch.isdigit())):
-            continue
-        rows.append(r)
-    rows.sort(key=lambda r: _s(r.get("created_at")), reverse=True)
+    if q and "q" not in skip:
+        qd = "".join(ch for ch in q if ch.isdigit())
+        digits = "".join(ch for ch in _s(r.get("phone_raw")) + _s(r.get("phone")) if ch.isdigit())
+        if q not in _s(r.get("name")).lower() and q not in _s(r.get("comment")).lower() and not (len(qd) >= 3 and qd in digits):
+            return False
+    stage = _s(f.get("stage"))
+    state = _s(f.get("state")) or "active"
+    if stage in m.CLOSED_STAGES and state == "active":
+        state = "all"                                           # დახურული ეტაპი არჩეულია — აქტიურებზე შეზღუდვა აზრს კარგავს
+    if "state" not in skip:
+        if state == "active" and not _active(r):
+            return False
+        if state == "closed" and _active(r):
+            return False
+    if stage and "stage" not in skip and _s(r.get("stage")) != stage:
+        return False
+    call = _s(f.get("call"))
+    if call and "call" not in skip:
+        cs = _s(r.get("call_status"))
+        if (call == "todo" and cs) or (call != "todo" and cs != call):
+            return False
+    iv = _dt(r, "interview_at")
+    p = _s(f.get("iv"))
+    if p and "iv" not in skip:
+        today = now.date()
+        if p == "none":
+            ok = iv is None
+        elif iv is None:
+            ok = False
+        elif p == "today":
+            ok = iv.date() == today
+        elif p == "tomorrow":
+            ok = iv.date() == today + datetime.timedelta(days=1)
+        elif p == "week":
+            ok = today <= iv.date() <= today + datetime.timedelta(days=7)
+        elif p == "past":
+            ok = iv.date() < today
+        elif p == "date":
+            d = m.parse_dt(_s(f.get("iv_date")))
+            ok = bool(d) and iv.date() == d.date()
+        else:
+            ok = True
+        if not ok:
+            return False
+    added = _s(f.get("added"))
+    if added and "added" not in skip:
+        c = _dt(r, "created_at")
+        if not c:
+            return False
+        if added == "today" and c.date() != now.date():
+            return False
+        if added in ("7", "30") and now - c > datetime.timedelta(days=int(added)):
+            return False
+    age = _s(r.get("age"))
+    for key, cmp in (("age_min", lambda a, v: a >= v), ("age_max", lambda a, v: a <= v)):
+        if _s(f.get(key)) and "age" not in skip:
+            try:
+                if not age or not cmp(int(age), int(f[key])):
+                    return False
+            except ValueError:
+                return False
+    exp = _s(f.get("exp"))
+    if exp and "exp" not in skip:
+        e = _s(r.get("experience")).lower()
+        has = e.startswith(("დიახ", "კი", "yes"))
+        if (exp == "yes" and not has) or (exp == "no" and (has or not e)):
+            return False
+    if _s(f.get("source")) and "source" not in skip and _s(r.get("source")) != _s(f.get("source")):
+        return False
+    tr = _s(f.get("train"))
+    if tr and "train" not in skip:
+        ti = m.train_info(r)
+        ok = {"coming": _s(r.get("training_ok")) == "yes", "rent": ti["rent"], "sale": ti["sale"], "both": ti["both"], "absent": ti["absent"] or _s(r.get("training_ok")) in ("no", "changed", "no_answer"),
+              "none": bool(_s(r.get("training_at"))) and not ti["any"]}.get(tr, True)
+        if not ok:
+            return False
+    ia = _s(f.get("inter"))
+    if ia and "inter" not in skip:
+        if ia == "none":
+            if any(_s(r.get(k)) for k in ("inter_lasha", "inter_owner", "inter_client")):
+                return False
+        elif not any(_s(r.get(k)) == ia for k in ("inter_lasha", "inter_owner", "inter_client")):
+            return False
+    if f.get("responsible") and _s(r.get("responsible_id")) != _s(f["responsible"]):
+        return False
+    flag = _s(f.get("flag"))
+    if flag and "flag" not in skip and flag not in flags_of(r, now):
+        return False
+    return True
+
+
+def query(f: dict, now: datetime.datetime | None = None) -> dict:
+    """ძიება + ფილტრები + დახარისხება. პასუხში `facets` — რამდენი ჩანაწერი ერგება თითოეულ ვარიანტს (დანარჩენი ფილტრების გათვალისწინებით),
+    რომ ეკრანზე ყოველი ღილაკის გვერდით რიცხვი ჩანდეს და „ცარიელ“ ფილტრში არავინ მოხვდეს."""
+    now = now or now_dt()
+    rows_all = all_rows()
+    rows = [r for r in rows_all if _passes(r, f, now)]
+    sort = _s(f.get("sort")) or "new"
+    if sort == "interview":
+        rows.sort(key=lambda r: (not _s(r.get("interview_at")), _s(r.get("interview_at"))))
+    elif sort == "name":
+        rows.sort(key=lambda r: _s(r.get("name")).lower())
+    elif sort == "activity":
+        rows.sort(key=lambda r: _s(r.get("last_contact_at")) or _s(r.get("created_at")), reverse=True)
+    else:
+        rows.sort(key=lambda r: _s(r.get("created_at")), reverse=True)
     per = max(1, min(int(f.get("per_page") or 30), 100))
     page = max(1, int(f.get("page") or 1))
-    return {"items": [public(x, now) for x in rows[(page - 1) * per: page * per]], "total": len(rows), "page": page, "per_page": per}
+
+    def cnt(skip, key_fn):
+        out: dict[str, int] = {}
+        for r in rows_all:
+            if _passes(r, f, now, skip):
+                for k in key_fn(r):
+                    out[k] = out.get(k, 0) + 1
+        return out
+
+    facets = {
+        "stage": cnt(("stage",), lambda r: [_s(r.get("stage")) or "new"]),
+        "state": cnt(("state", "stage"), lambda r: ["active" if _active(r) else "closed"]),
+        "flag": cnt(("flag",), lambda r: flags_of(r, now)),
+        "call": cnt(("call",), lambda r: [_s(r.get("call_status")) or "todo"]),
+    }
+    facets["state"]["all"] = sum(facets["state"].values())
+    return {"items": [public(x, now) for x in rows[(page - 1) * per: page * per]], "total": len(rows), "page": page, "per_page": per, "facets": facets,
+            "flag_labels": FLAG_LABELS}
 
 
 # ---------------------------------------------------------------------------------------------- შეტყობინებების დედუპლიკაცია
@@ -342,3 +557,50 @@ def release_alert(key: str) -> None:
 
 def alert_keys() -> set:
     return {_s(r.get("alert_key")) for r in _backend.read(m.RECRUIT_ALERTS) if _s(r.get("kind")) != "released"}
+
+
+# ---------------------------------------------------------------------------------------------- კალენდარი
+WEEKDAYS = ["ორშ", "სამ", "ოთხ", "ხუთ", "პარ", "შაბ", "კვი"]
+
+
+def calendar(start: str = "", days: int = 14, now: datetime.datetime | None = None) -> dict:
+    """დღეების ზოლი კალენდრისთვის: ყოველ დღეს — გასაუბრებები (სულ/დადასტურებული/დასადასტურებელი), ტრენინგები, სტაჟირების დაწყება, ჩაშტატება, წასვლა."""
+    now = now or now_dt()
+    d0 = m.parse_dt(start)
+    d0 = d0.date() if d0 else now.date()
+    days = max(1, min(int(days or 14), 62))
+    out = {}
+    for i in range(days):
+        d = d0 + datetime.timedelta(days=i)
+        out[d.strftime("%Y-%m-%d")] = {"date": d.strftime("%Y-%m-%d"), "weekday": WEEKDAYS[d.weekday()], "day": d.day, "today": d == now.date(),
+                                       "interviews": {"total": 0, "confirmed": 0, "declined": 0, "pending": 0}, "trainings": {"total": 0, "coming": 0}, "internship": 0, "staffed": 0, "left": 0}
+    for r in all_rows():
+        iv = _dt(r, "interview_at")
+        if iv and iv.strftime("%Y-%m-%d") in out and _s(r.get("stage")) != "archive":
+            b = out[iv.strftime("%Y-%m-%d")]["interviews"]
+            b["total"] += 1
+            cs = _s(r.get("call_status"))
+            b["confirmed" if cs == "confirmed" else "declined" if cs == "declined" else "pending"] += 1
+        tr = _dt(r, "training_at")
+        if tr and tr.strftime("%Y-%m-%d") in out:
+            b = out[tr.strftime("%Y-%m-%d")]["trainings"]
+            b["total"] += 1
+            b["coming"] += 1 if _s(r.get("training_ok")) == "yes" else 0
+        for key, field in (("internship", "internship_at"), ("staffed", "staffed_at"), ("left", "left_at")):
+            dd = m.parse_dt(r.get(field))
+            if dd and dd.strftime("%Y-%m-%d") in out:
+                out[dd.strftime("%Y-%m-%d")][key] += 1
+    return {"from": d0.strftime("%Y-%m-%d"), "days": list(out.values())}
+
+
+def day_view(day: str, now: datetime.datetime | None = None) -> dict:
+    """ერთი დღის სრული სია: გასაუბრებები დროის მიხედვით, ტრენინგები, სტაჟირების დაწყება, ჩაშტატება, წასვლა."""
+    now = now or now_dt()
+    d0 = m.parse_dt(day)
+    if not d0:
+        raise RecruitError("თარიღი არასწორია")
+    key = d0.strftime("%Y-%m-%d")
+    pick = lambda field, time_key: sorted([r for r in all_rows() if (d := m.parse_dt(r.get(field))) and d.strftime("%Y-%m-%d") == key and _s(r.get("stage")) != "archive"],  # noqa: E731
+                                          key=lambda r: _s(r.get(time_key or field)))
+    return {"day": key, "interviews": [public(x, now) for x in pick("interview_at", "interview_at")], "trainings": [public(x, now) for x in pick("training_at", "training_at")],
+            "internship": [public(x, now) for x in pick("internship_at", "name")], "staffed": [public(x, now) for x in pick("staffed_at", "name")], "left": [public(x, now) for x in pick("left_at", "name")]}

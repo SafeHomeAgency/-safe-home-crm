@@ -5890,7 +5890,8 @@ function renderTabbar() {
 const REC_TAB = { id: "recruit", label: "კადრები", icon: "🧑‍💼" };
 const REC_CLS = { new: "blue", invited: "blue", confirmed: "green", interviewed: "amber", considering: "amber", training: "green", internship: "green", staffed: "gold", left: "gray", rejected: "red", dropped: "gray" };
 const REC_YN = [["", "—"], ["yes", "კი"], ["no", "არა"], ["changed", "გადაიფიქრა"]];
-if (!state.rec) state.rec = { view: "today", q: "", stage: "", page: 1, list: null, home: null, stats: null, day: "", busy: false };
+const REC_F0 = { q: "", stage: "", state: "active", call: "", iv: "", iv_date: "", added: "", age_min: "", age_max: "", exp: "", source: "", flag: "", train: "", inter: "", sort: "new" };
+if (!state.rec) state.rec = { view: "today", f: Object.assign({}, REC_F0), panel: false, page: 1, list: null, home: null, stats: null, day: "", busy: false };
 
 async function recLoadAccess() {
   try {
@@ -5902,7 +5903,15 @@ async function recLoadAccess() {
 }
 function recDtVal(s) { return String(s || "").replace(" ", "T").slice(0, 16); }
 function recDtOut(s) { return String(s || "").replace("T", " "); }
-function recTel(it) { return it.phone ? `<a class="rc-tel" href="tel:${esc(it.phone)}" data-rc-stop="1">📞 ${esc(it.phone_pretty || it.phone)}</a>` : `<span class="muted">📵 ${esc(it.phone_raw || "ტელეფონი არ არის")}</span>`; }
+/* ზარი: ტელეფონზე tel: ხსნის ზარის ეკრანს; Telegram Desktop/ვებში ზარის აპი არ არის (Telegram-ის შეზღუდვა) — ამიტომ ნომერი კოპირდება და ჩანს. */
+function recIsDesktop() { const p = (tg && tg.platform) || ""; return !p || /^(tdesktop|macos|weba|webk|web|unknown)$/i.test(p); }
+function recDial(phone) {
+  if (!phone) { toast("ტელეფონი არ არის"); return; }
+  if (window.shCopy) window.shCopy(phone, recIsDesktop() ? "📋 " + phone + " დაკოპირდა — ჩასვით ტელეფონის აპში" : "📋 ნომერი დაკოპირდა"); else toast(phone);
+  if (!recIsDesktop()) { try { window.location.href = "tel:" + phone; } catch (e) { /* ნომერი უკვე დაკოპირებულია */ } }
+}
+function recTel(it) { return it.phone ? `<a class="rc-tel" href="tel:${esc(it.phone)}" data-rc-dial="${esc(it.phone)}" data-rc-stop="1">📞 ${esc(it.phone_pretty || it.phone)}</a>` : `<span class="muted">📵 ${esc(it.phone_raw || "ტელეფონი არ არის")}</span>`; }
+function recFlags(it) { return (it.flags || []).map((f) => `<span class="rc-flag f-${esc(f)}">${esc(({ uncontacted: "🆕 დაუკავშირებელია", result_missing: "✍️ შედეგი ჩაუწერელია", stalled: "🧊 უმოქმედოა 3+ დღე", no_phone: "📵 ტელეფონის გარეშე", duplicate: "👯 დუბლიკატი" })[f] || f)}</span>`).join(""); }
 function recChips(it) {
   const iv = it.interview_day ? `<span class="rc-iv">🗓 ${esc(it.interview_day)}${it.interview_time ? " " + esc(it.interview_time) : ""}</span>` : "";
   const cs = it.call_label && it.call_status ? `<span class="rc-call c-${esc(it.call_status)}">${esc(it.call_label)}</span>` : (it.stage === "new" || it.stage === "invited" ? `<span class="rc-call c-todo">📞 დასარეკია</span>` : "");
@@ -5914,7 +5923,7 @@ function recCard(it, can) {
     <button class="rc-q" data-rc-call="no_contact" data-id="${esc(it.recruit_id)}">📵 ვერ</button><button class="rc-q" data-rc-call="repeat" data-id="${esc(it.recruit_id)}">🔁</button></div>` : "";
   return `<div class="card rc-card" data-rc-open="${esc(it.recruit_id)}">
     <div class="rc-top"><b>${esc(it.name)}</b>${it.age ? `<small> · ${esc(it.age)} წ.</small>` : ""}</div>
-    <div class="rc-line">${recTel(it)}</div><div class="rc-line">${recChips(it)}</div>
+    <div class="rc-line">${recTel(it)}</div><div class="rc-line">${recChips(it)}${recFlags(it)}</div>
     ${it.comment ? `<div class="rc-note">💬 ${esc(it.comment.slice(0, 110))}</div>` : ""}${quick}</div>`;
 }
 async function recLoadHome() {
@@ -5931,7 +5940,7 @@ async function renderRecruit(content) {
 function recDraw(content) {
   content = content || document.getElementById("content");
   const r = state.rec, a = state.recAccess || {}, h = r.home || {}, can = !!a.can_edit;
-  const tabs = [["today", "📞 დღეს"], ["all", "👥 ყველა"], ["stats", "📊 ვორონკა"]].concat(a.can_admin ? [["settings", "⚙️"]] : []);
+  const tabs = [["today", "📞 დღეს"], ["cal", "📅 კალენდარი"], ["all", "👥 ყველა"], ["stats", "📊 ვორონკა"]].concat(a.can_admin ? [["settings", "⚙️"]] : []);
   const L = h.lists || {};
   const badge = (n) => (n ? ` <b>${n}</b>` : "");
   const head = `<div class="card rc-head"><h2>🧑‍💼 კადრების აყვანა${can ? "" : ` <span class="cnt">ნახვა</span>`}</h2>
@@ -5948,10 +5957,10 @@ function recDraw(content) {
       + sec("🎓 ხვალ ტრენინგია", L.training_tomorrow) + sec("🗓 ხვალინდელი გასაუბრებები (ყველა)", L.tomorrow);
     if (!body) body = `<div class="card"><div class="empty">✅ დღეს დასარეკი/გასაკეთებელი არაფერია</div></div>`;
   } else if (r.view === "all") {
-    const stages = h.stages || {};
-    body = `<div class="card hub-form"><input id="rcQ" placeholder="🔎 სახელი ან ტელეფონი" value="${esc(r.q)}" style="width:100%;margin-bottom:8px">
-      <div class="hub-row" style="flex-wrap:wrap"><button class="hub-chip ${r.stage === "" ? "on" : ""}" data-rc-stage="">ყველა</button>${Object.keys(stages).map((k) => `<button class="hub-chip ${r.stage === k ? "on" : ""}" data-rc-stage="${k}">${esc(stages[k])}</button>`).join("")}</div></div>
-      <div id="rcList">${recListHtml(can)}</div>`;
+    body = `<div class="card hub-form"><input id="rcQ" placeholder="🔎 სახელი, ტელეფონი ან შენიშვნა" value="${esc(r.f.q)}" style="width:100%">
+      <div id="rcFilters">${recFiltersHtml()}</div></div><div id="rcList">${recListHtml(can)}</div>`;
+  } else if (r.view === "cal") {
+    body = recCalHtml();
   } else if (r.view === "stats") {
     body = recStatsHtml(r.stats);
   } else if (r.view === "settings") {
@@ -5961,18 +5970,81 @@ function recDraw(content) {
   recBind(content);
   if (r.view === "all" && !r.list) recLoadList(true);
   if (r.view === "stats" && !r.stats) recLoadStats();
+  if (r.view === "cal" && (!r.cal || !r.cal.days.length)) recLoadCal();
+}
+/* ---- კალენდარი: დღეების ზოლი (გასაუბრებები / ტრენინგები / სტაჟირება) + არჩეული დღის სია ---- */
+async function recLoadCal() {
+  const r = state.rec;
+  r.cal = r.cal || { from: "", days: [], sel: "", day: null };
+  const c = r.cal;
+  if (!c.from) { const t = new Date(); t.setDate(t.getDate() - 1); c.from = hubIso(t); }
+  if (!c.sel) c.sel = hubIso(new Date());
+  try { c.days = (await api("/api/recruit/calendar?from=" + c.from + "&days=14")).days; } catch (e) { toast(e.message || "შეცდომა"); c.days = []; }
+  await recLoadDay(c.sel);
+}
+async function recLoadDay(day) {
+  const c = state.rec.cal;
+  c.sel = day;
+  try { c.day = await api("/api/recruit/day?date=" + encodeURIComponent(day)); } catch (e) { toast(e.message || "შეცდომა"); c.day = null; }
+  if (state.rec.view === "cal") recDraw();
+}
+function recCalHtml() {
+  const c = state.rec.cal, can = !!(state.recAccess || {}).can_edit;
+  if (!c || !c.days.length) return `<div class="card"><div class="empty">იტვირთება…</div></div>`;
+  const strip = c.days.map((d) => `<button class="rc-day ${d.date === c.sel ? "on" : ""} ${d.today ? "today" : ""}" data-rc-day="${d.date}"><small>${esc(d.weekday)}</small><b>${d.day}</b>${d.interviews.total ? `<i class="iv">🗓${d.interviews.total}</i>` : ""}${d.trainings.total ? `<i class="tr">🎓${d.trainings.total}</i>` : ""}${d.internship || d.staffed || d.left ? `<i class="ot">•</i>` : ""}</button>`).join("");
+  const dv = c.day, sec = (title, arr) => (arr && arr.length ? `<div class="card"><h2>${title} <span class="cnt">${arr.length}</span></h2>${arr.map((x) => recCard(x, can)).join("")}</div>` : "");
+  const iv = dv ? dv.interviews : [], conf = iv.filter((x) => x.call_status === "confirmed").length;
+  const day = dv ? `${sec(`🗓 გასაუბრება — ${esc(c.sel)}${iv.length ? ` · ✅ ${conf} / ⏳ ${iv.length - conf}` : ""}`, iv)}${sec("🎓 ტრენინგი", dv.trainings)}${sec("🧪 სტაჟირება იწყება", dv.internship)}${sec("🏢 ჩაშტატდა", dv.staffed)}${sec("🚪 წავიდა", dv.left)}`
+    + (!iv.length && !dv.trainings.length && !dv.internship.length && !dv.staffed.length && !dv.left.length ? `<div class="card"><div class="empty">ამ დღეს არაფერია დაგეგმილი</div></div>` : "") : `<div class="card"><div class="empty">იტვირთება…</div></div>`;
+  return `<div class="card hub-form"><div class="rc-calnav"><button class="btn secondary" id="rcCalPrev">◀ კვირა</button><button class="btn secondary" id="rcCalToday">დღეს</button><button class="btn secondary" id="rcCalNext">კვირა ▶</button></div>
+    <label style="display:flex;flex-direction:column;gap:3px;font-size:12px;color:var(--hint);margin:8px 0 6px">გადასვლა თარიღზე<input type="date" id="rcCalJump" value="${esc(c.sel)}"></label>
+    <div class="rc-strip">${strip}</div><div class="muted" style="font-size:11.5px">🗓 გასაუბრება · 🎓 ტრენინგი · • სტაჟირება/ჩაშტატება/წასვლა</div></div>${day}`;
+}
+function recActiveFilters() { const r = state.rec; return Object.keys(REC_F0).filter((k) => k !== "state" && k !== "sort" && k !== "q" && k !== "iv_date" && r.f[k] !== REC_F0[k]).length + (r.f.state !== "active" ? 1 : 0) + (r.f.sort !== "new" ? 1 : 0); }
+function recFiltersHtml() {
+  const r = state.rec, f = r.f, fx = (r.list && r.list.facets) || { stage: {}, state: {}, flag: {}, call: {} }, stages = (r.home || {}).stages || {}, calls = (r.home || {}).call_status || {};
+  const lbl = (r.list && r.list.flag_labels) || {};
+  const n = (obj, k) => (obj && obj[k]) || 0;
+  const sel = (id, opts, cur) => `<select id="${id}">${opts.map(([v, l]) => `<option value="${esc(v)}" ${v === cur ? "selected" : ""}>${esc(l)}</option>`).join("")}</select>`;
+  const cLbl = (v, l) => [v, `${l}${r.list ? " (" + n(fx.call, v) + ")" : ""}`];
+  const callOpts = [["", "ყველა"], cLbl("todo", "დასარეკია")].concat(Object.keys(calls).filter((k) => k).map((k) => cLbl(k, calls[k])));
+  const flagChips = Object.keys(lbl).map((k) => `<button class="hub-chip rc-flagchip ${f.flag === k ? "on" : ""} ${n(fx.flag, k) ? "warn" : ""}" data-rc-flag="${k}">${esc(lbl[k])} <b>${n(fx.flag, k)}</b></button>`).join("");
+  const stageChips = `<button class="hub-chip ${f.stage === "" ? "on" : ""}" data-rc-stage="">ყველა ეტაპი</button>` + Object.keys(stages).filter((k) => f.stage === k || n(fx.stage, k) || !r.list).map((k) => `<button class="hub-chip ${f.stage === k ? "on" : ""}" data-rc-stage="${k}">${esc(stages[k])}${r.list ? ` <b>${n(fx.stage, k)}</b>` : ""}</button>`).join("");
+  const act = recActiveFilters();
+  return `<div class="hub-row" style="margin-top:8px"><button class="hub-chip ${f.state === "active" ? "on" : ""}" data-rc-state="active">აქტიური ${r.list ? `<b>${n(fx.state, "active")}</b>` : ""}</button><button class="hub-chip ${f.state === "closed" ? "on" : ""}" data-rc-state="closed">დახურული ${r.list ? `<b>${n(fx.state, "closed")}</b>` : ""}</button><button class="hub-chip ${f.state === "all" ? "on" : ""}" data-rc-state="all">ყველა ${r.list ? `<b>${n(fx.state, "all")}</b>` : ""}</button></div>
+    <div class="rc-k">⚠️ ყურადღება — რომ არავინ დაიკარგოს</div><div class="hub-row" style="flex-wrap:wrap">${flagChips}</div>
+    <div class="rc-k">ეტაპი</div><div class="hub-row" style="flex-wrap:wrap">${stageChips}</div>
+    <div class="hub-row" style="margin-top:8px"><button class="btn secondary" id="rcPanelBtn">🎛 მეტი ფილტრი${act ? ` · ${act}` : ""} ${r.panel ? "▴" : "▾"}</button>${act ? `<button class="btn secondary" id="rcClear">✖ გასუფთავება</button>` : ""}</div>
+    ${r.panel ? `<div class="rc-panel hub-form">
+      <label>ზარის სტატუსი${sel("rcfCall", callOpts, f.call)}</label>
+      <label>გასაუბრების დრო${sel("rcfIv", [["", "ყველა"], ["today", "დღეს"], ["tomorrow", "ხვალ"], ["week", "მომდევნო 7 დღე"], ["past", "გასული"], ["none", "დანიშნული არ არის"], ["date", "კონკრეტული თარიღი…"]], f.iv)}</label>
+      ${f.iv === "date" ? `<input type="date" id="rcfIvDate" value="${esc(f.iv_date)}">` : ""}
+      <label>როდის შემოვიდა${sel("rcfAdded", [["", "ყველა"], ["today", "დღეს"], ["7", "ბოლო 7 დღე"], ["30", "ბოლო 30 დღე"]], f.added)}</label>
+      <div class="grid2"><label>ასაკი დან<input id="rcfAgeMin" inputmode="numeric" value="${esc(f.age_min)}" placeholder="18"></label><label>ასაკი მდე<input id="rcfAgeMax" inputmode="numeric" value="${esc(f.age_max)}" placeholder="60"></label></div>
+      <label>გამოცდილება${sel("rcfExp", [["", "ყველა"], ["yes", "აქვს"], ["no", "არ აქვს"]], f.exp)}</label>
+      <label>🎓 ტრენინგი${sel("rcfTrain", [["", "ყველა"], ["coming", "მოდის ტრენინგზე"], ["rent", "ქირის ტრენინგი ჩაუტარდა"], ["sale", "ყიდვის ტრენინგი ჩაუტარდა"], ["both", "ორივე ჩაუტარდა (ქირიდან ყიდვაზე გადავიდა)"], ["absent", "ტრენინგზე არ მოდის / გადაიფიქრა"], ["none", "დანიშნულია, ჯერ არ ჩაუტარებია"]], f.train)}</label>
+      <label>🤝 ინტერაქცია (ლაშა/მეპატრონე/კლიენტი)${sel("rcfInter", [["", "ყველა"], ["scheduled", "დანიშნულია"], ["held", "ჩატარდა"], ["passed", "გაიარა"], ["failed", "ვერ გაიარა"], ["changed", "გადაიფიქრა"], ["none", "ჯერ არ აქვს"]], f.inter)}</label>
+      <label>წყარო${sel("rcfSource", [["", "ყველა"], ["form", "ფორმა (რეკლამა)"], ["manual", "ხელით დამატებული"]], f.source)}</label>
+      <label>დახარისხება${sel("rcfSort", [["new", "უახლესი ზემოთ"], ["interview", "გასაუბრების დროით"], ["activity", "ბოლო აქტივობით"], ["name", "სახელით (ა-ჰ)"]], f.sort)}</label></div>` : ""}
+    <div class="muted" id="rcCount" style="font-size:12.5px;margin-top:8px">${r.list ? `ნაპოვნია: <b>${r.list.total}</b>` : "იტვირთება…"}</div>`;
 }
 function recListHtml(can) {
   const r = state.rec;
   if (!r.list) return `<div class="card"><div class="empty">იტვირთება…</div></div>`;
-  if (!r.list.items.length) return `<div class="card"><div class="empty">ვერაფერი მოიძებნა</div></div>`;
+  if (!r.list.items.length) return `<div class="card"><div class="empty">ვერაფერი მოიძებნა${recActiveFilters() || r.f.q ? ` — სცადეთ ფილტრების გასუფთავება` : ""}</div></div>`;
   return r.list.items.map((x) => recCard(x, can)).join("") + (r.list.total > r.list.items.length ? `<button class="btn secondary" id="rcMore" style="width:100%">მეტის ჩატვირთვა (${r.list.items.length}/${r.list.total})</button>` : "");
 }
-function recPaintList() {   /* მხოლოდ სია იხატება — საძიებო ველი ფოკუსს არ კარგავს */
+function recPaintList() {   /* სია და ფილტრების ჩიპები იხატება; საძიებო ველი ფოკუსს არ კარგავს */
   const box = document.getElementById("rcList");
   if (!box) { recDraw(); return; }
+  const fb = document.getElementById("rcFilters"); if (fb) { fb.innerHTML = recFiltersHtml(); recBind(fb); }
   box.innerHTML = recListHtml(!!(state.recAccess || {}).can_edit);
   recBind(box);
+}
+function recQS(page) {
+  const f = state.rec.f, p = ["page=" + page];
+  Object.keys(f).forEach((k) => { if (f[k] !== "" && f[k] != null) p.push(k + "=" + encodeURIComponent(f[k])); });
+  return p.join("&");
 }
 function recStatsHtml(s) {
   if (!s) return `<div class="card"><div class="empty">იტვირთება…</div></div>`;
@@ -5983,9 +6055,22 @@ function recStatsHtml(s) {
   return `<div class="card"><h2>📊 ბოლო ${s.days} დღე <span class="cnt">${s.total}</span></h2>
     <div class="grid3"><div class="stat"><div class="num">${s.booked}</div><div class="lbl">გასაუბრება დაინიშნა (${c.booked}%)</div></div><div class="stat"><div class="num">${s.interviewed}</div><div class="lbl">გასაუბრებაზე იყო (${c.interviewed}%)</div></div><div class="stat"><div class="num">${s.staffed}</div><div class="lbl">ჩაშტატდა (${c.staffed}%)</div></div></div>
     <div class="grid2" style="margin-top:8px"><div class="stat"><div class="num">${s.median_first_contact_h == null ? "—" : s.median_first_contact_h + " სთ"}</div><div class="lbl">პირველ კონტაქტამდე (შუა მნიშვნელობა)</div></div><div class="stat"><div class="num">${s.avg_test == null ? "—" : s.avg_test}</div><div class="lbl">ტესტის საშუალო</div></div></div></div>
+    ${recTrainingHtml(s)}
     <div class="card"><h2>🪜 ეტაპები</h2>${bars}</div>
     ${(s.left_reasons || []).length ? `<div class="card"><h2>🚪 წასვლის მიზეზები</h2>${s.left_reasons.map((x) => `<div class="hub-kv"><span>${esc(x.reason)}</span><b>${x.count}</b></div>`).join("")}</div>` : ""}
     <div class="card hub-form"><h2>🕒 დღის სლოტები</h2><input type="date" id="rcDay" value="${esc(state.rec.day || new Date().toISOString().slice(0, 10))}" style="margin-bottom:8px"><div id="rcSlots" class="muted">აირჩიეთ დღე</div></div>`;
+}
+function recTrainingHtml(s) {
+  if (!s.training) return "";
+  const t = s.training, o = s.outcome || {}, kv = (k, v) => `<div class="hub-kv"><span>${k}</span><b>${v}</b></div>`;
+  const inter = Object.values(s.interactions || {}).map((x) => `<div class="rc-ia"><b>${esc(x.label)}</b><span>დანიშნულია ${x.scheduled}</span><span>ჩატარდა ${x.conducted}</span><span class="ok">გაიარა ${x.passed}</span><span class="bad">ვერ გაიარა ${x.failed}</span><span>გადაიფიქრა ${x.changed}</span></div>`).join("");
+  const days = (t.by_day || []).map((d) => `<div class="rc-slot"><b>${esc(d.date)}</b><span>დანიშნულია ${d.scheduled} · მოდის ${d.coming} · ქირა ✓ ${d.rent} · ყიდვა ✓ ${d.sale} · ორივე ${d.both}</span></div>`).join("");
+  return `<div class="card"><h2>🎓 ტრენინგი</h2>
+    ${kv("ტრენინგი დაენიშნა", t.scheduled)}${kv("მოდის ტრენინგზე", t.coming)}${kv("ქირის ტრენინგი ჩაუტარდა", t.rent)}${kv("გაყიდვის (ყიდვა) ტრენინგი ჩაუტარდა", t.sale)}${kv("ქირიდან ყიდვაზე გადავიდა (ორივე ჩაუტარდა)", t.rent_then_sale)}
+    ${kv("მხოლოდ ქირა", t.rent_only)}${kv("მხოლოდ ყიდვა", t.sale_only)}${kv("არ მოდის / გადაიფიქრა", t.declined)}${kv("არ გვიპასუხა", t.no_answer)}
+    ${days ? `<div class="rc-sec">ტრენინგის დღეების მიხედვით</div>${days}` : ""}</div>
+    <div class="card"><h2>🤝 ინტერაქციები</h2>${inter}</div>
+    <div class="card"><h2>🏁 შედეგი</h2>${kv("ტესტი ჩაიარა", o.tested || 0)}${kv("სტაჟირება დაიწყო", o.internship || 0)}${kv("აგვყავს", o.hire_yes || 0)}${kv("გადაიფიქრა", o.hire_changed || 0)}${kv("ჩაშტატდა", o.staffed || 0)}${kv("წავიდა", o.left || 0)}</div>`;
 }
 function recSettingsHtml(h) {
   const resp = new Set(((h.responsible) || []).map((x) => x.agent_id)), agents = h.agents || [];
@@ -6001,8 +6086,8 @@ async function recLoadList(reset) {
   const r = state.rec;
   if (reset) { r.page = 1; }
   try {
-    const d = await api(`/api/recruit/list?page=${r.page}&stage=${encodeURIComponent(r.stage)}&q=${encodeURIComponent(r.q)}`);
-    r.list = reset || !r.list ? d : { items: r.list.items.concat(d.items), total: d.total, page: d.page };
+    const d = await api("/api/recruit/list?" + recQS(r.page));
+    r.list = reset || !r.list ? d : Object.assign({}, d, { items: r.list.items.concat(d.items) });
   } catch (e) { toast(e.message || "შეცდომა"); r.list = { items: [], total: 0 }; }
   if (state.rec.view === "all") recPaintList();
 }
@@ -6023,16 +6108,31 @@ async function recDoCall(id, status) {
   try {
     await api("/api/recruit/" + encodeURIComponent(id), { method: "POST", body: JSON.stringify({ changes: { call_status: status } }) });
     toast({ confirmed: "✅ მოდის", declined: "❌ არ მოდის", no_contact: "📵 ვერ დაუკავშირდით", repeat: "🔁 განმეორებითი ზარი" }[status] || "შენახულია");
-    state.rec.list = null; await recLoadHome(); recDraw();
+    state.rec.list = null; state.rec.cal = null; state.rec.stats = null; await recLoadHome(); recDraw();
   } catch (e) { toast(e.message || "შეცდომა"); }
 }
 function recBind(root) {
   const r = state.rec;
   root.querySelectorAll("[data-rc-view]").forEach((b) => { b.onclick = () => { r.view = b.dataset.rcView; if (r.view === "all") r.list = null; if (r.view === "stats") r.stats = null; hubHaptic(); recDraw(); }; });
-  root.querySelectorAll("[data-rc-stage]").forEach((b) => { b.onclick = () => { r.stage = b.dataset.rcStage; r.list = null; recDraw(); }; });
+  const setF = (k, v) => { r.f[k] = v; if (k === "stage" && ["left", "rejected", "dropped"].includes(v)) r.f.state = "all"; recLoadList(true); };
+  root.querySelectorAll("[data-rc-stage]").forEach((b) => { b.onclick = () => setF("stage", r.f.stage === b.dataset.rcStage ? "" : b.dataset.rcStage); });
+  root.querySelectorAll("[data-rc-state]").forEach((b) => { b.onclick = () => setF("state", b.dataset.rcState); });
+  root.querySelectorAll("[data-rc-flag]").forEach((b) => { b.onclick = () => setF("flag", r.f.flag === b.dataset.rcFlag ? "" : b.dataset.rcFlag); });
+  root.querySelectorAll("[data-rc-dial]").forEach((a) => { a.onclick = (e) => { e.preventDefault(); e.stopPropagation(); recDial(a.dataset.rcDial); }; });
+  root.querySelectorAll("[data-rc-day]").forEach((b) => { b.onclick = () => { hubHaptic(); recLoadDay(b.dataset.rcDay); }; });
+  const shift = (days) => { const c = r.cal, d = new Date(c.from + "T00:00:00"); d.setDate(d.getDate() + days); c.from = hubIso(d); c.sel = hubIso(new Date(d.getTime() + 86400000)); recLoadCal(); };
+  const cp = root.querySelector("#rcCalPrev"); if (cp) cp.onclick = () => shift(-7);
+  const cn = root.querySelector("#rcCalNext"); if (cn) cn.onclick = () => shift(7);
+  const ct = root.querySelector("#rcCalToday"); if (ct) ct.onclick = () => { r.cal.from = ""; r.cal.sel = ""; recLoadCal(); };
+  const cj = root.querySelector("#rcCalJump"); if (cj) cj.onchange = () => { if (!cj.value) return; const d = new Date(cj.value + "T00:00:00"); d.setDate(d.getDate() - 1); r.cal.from = hubIso(d); r.cal.sel = cj.value; recLoadCal(); };
+  const pb = root.querySelector("#rcPanelBtn"); if (pb) pb.onclick = () => { r.panel = !r.panel; recPaintList(); };
+  const cl = root.querySelector("#rcClear"); if (cl) cl.onclick = () => { const q = r.f.q; r.f = Object.assign({}, REC_F0, { q }); recLoadList(true); };
+  [["rcfCall", "call"], ["rcfIv", "iv"], ["rcfAdded", "added"], ["rcfExp", "exp"], ["rcfTrain", "train"], ["rcfInter", "inter"], ["rcfSource", "source"], ["rcfSort", "sort"]].forEach(([id, k]) => { const e = root.querySelector("#" + id); if (e) e.onchange = () => setF(k, e.value); });
+  [["rcfAgeMin", "age_min"], ["rcfAgeMax", "age_max"]].forEach(([id, k]) => { const e = root.querySelector("#" + id); if (e) e.onchange = () => setF(k, e.value.replace(/\D/g, "").slice(0, 2)); });
+  const dd = root.querySelector("#rcfIvDate"); if (dd) dd.onchange = () => setF("iv_date", dd.value);
   root.querySelectorAll("[data-rc-open]").forEach((c) => { c.onclick = (e) => { if (e.target.closest("[data-rc-stop]")) return; recOpen(c.dataset.rcOpen); }; });
   root.querySelectorAll("[data-rc-call]").forEach((b) => { b.onclick = (e) => { e.stopPropagation(); recDoCall(b.dataset.id, b.dataset.rcCall); }; });
-  const q = document.getElementById("rcQ"); if (q) { let t; q.oninput = () => { clearTimeout(t); t = setTimeout(() => { r.q = q.value.trim(); r.list = null; recLoadList(true); }, 350); }; }
+  const q = document.getElementById("rcQ"); if (q) { let t; q.oninput = () => { clearTimeout(t); t = setTimeout(() => { r.f.q = q.value.trim(); recLoadList(true); }, 350); }; }
   const more = document.getElementById("rcMore"); if (more) more.onclick = () => { r.page += 1; recLoadList(false); };
   const add = document.getElementById("rcAdd"); if (add) add.onclick = recAddForm;
   const imp = document.getElementById("rcImport");
@@ -6070,7 +6170,7 @@ function recAddForm() {
     if (!g("rcaName")) throw new Error("სახელი სავალდებულოა");
     const fields = { name: g("rcaName"), phone: g("rcaPhone"), age: g("rcaAge"), interview_at: recDtOut(g("rcaIv")), comment: g("rcaNote") };
     await api("/api/recruit", { method: "POST", body: JSON.stringify({ fields }) });
-    closeDetail(); toast("✅ დაემატა"); state.rec.list = null; await recLoadHome(); recDraw();
+    closeDetail(); toast("✅ დაემატა"); state.rec.list = null; state.rec.cal = null; state.rec.stats = null; await recLoadHome(); recDraw();
   });
   return box;
 }
@@ -6083,30 +6183,46 @@ async function recOpen(id) {
   const sel = (idn, opts, cur) => `<select id="${idn}" ${ro}>${opts.map(([v, l]) => `<option value="${esc(v)}" ${v === cur ? "selected" : ""}>${esc(l)}</option>`).join("")}</select>`;
   const yn = (idn, cur) => sel(idn, REC_YN, cur || "");
   const row = (label, html) => `<label class="rc-f"><span>${label}</span>${html}</label>`;
+  const O = (state.rec.home || {}).options || {};
+  const optList = (obj) => Object.keys(obj).map((k) => [k, obj[k]]);
+  const sessions = (cur) => { const base = (O.sessions || ["", "ქირა", "ყიდვა", "არ მოდის/ქირა", "არ მოდის/ყიდვა", "არ გვპასუხობს", "გადაიფიქრა"]).slice(); if (cur && !base.includes(cur)) base.push(cur); return base.map((v) => [v, v || "—"]); };
+  /* თარიღის არჩევა კალენდრით + სწრაფი ღილაკები (დღეს / ხვალ / +7 დღე / გასუფთავება) */
+  const dateRow = (label, idn, type, val) => row(label, `<div class="rc-dt"><input type="${type}" id="${idn}" value="${esc(val)}" ${ro}>${can ? `<span class="rc-qd" data-qd="${idn}" data-type="${type}"><button type="button" data-d="0">დღეს</button><button type="button" data-d="1">ხვალ</button><button type="button" data-d="7">+7</button><button type="button" data-d="x">✕</button></span>` : ""}</div>`);
   const digits = (it.phone || "").replace(/\D/g, "");
   const msgBtns = Object.keys(d.templates).map((k) => `<div class="rc-msg"><b>${esc(d.template_labels[k] || k)}</b><div class="rc-msgtxt">${esc(d.templates[k])}</div>
     <div class="hub-row"><button class="btn secondary" data-rc-copy="${k}">📋</button>${digits ? `<button class="btn secondary" data-rc-wa="${k}">WhatsApp</button><a class="btn secondary" style="text-decoration:none" href="sms:${esc(it.phone)}?&body=${encodeURIComponent(d.templates[k])}">SMS</a>` : ""}</div></div>`).join("");
   box.innerHTML = `<h3>${esc(it.name)}<button class="close" id="modalClose">✕</button></h3>
     <div class="rc-line">${recChips(it)}</div>
     <div class="field"><div class="k">ტელეფონი</div><div class="v">${esc(it.phone_pretty || it.phone_raw || "—")}</div></div>
-    ${it.phone ? `<div class="hub-row"><a class="btn" style="text-decoration:none" href="tel:${esc(it.phone)}">📞 დარეკვა</a></div>` : ""}
+    ${it.phone ? `<div class="hub-row"><a class="btn" style="text-decoration:none" href="tel:${esc(it.phone)}" data-rc-dial="${esc(it.phone)}">📞 დარეკვა</a><button class="btn secondary" data-rc-copyphone="${esc(it.phone)}">📋 ნომერი</button><button class="btn secondary" data-rc-tgchat="${esc(it.phone)}">✈️ Telegram</button></div>${recIsDesktop() ? `<div class="muted" style="font-size:11.5px;margin:2px 0 6px">💻 Telegram Desktop-ში ზარის აპი არ არის — „📞“ ნომერს აკოპირებს; ტელეფონზე პირდაპირ დარეკავს.</div>` : ""}` : ""}
     ${it.motivation ? `<div class="field"><div class="k">რატომ დაინტერესდა</div><div class="v">${esc(it.motivation)}</div></div>` : ""}
     ${it.experience ? `<div class="field"><div class="k">გამოცდილება</div><div class="v">${esc(it.experience)}</div></div>` : ""}
     <div class="field"><div class="k">შემოვიდა</div><div class="v">${esc(it.created_at || "—")}</div></div>
     <div class="rc-form hub-form">
       ${can ? `<div class="k" style="font-size:12px;color:var(--hint)">ზარის შედეგი</div><div class="hub-row">${Object.keys(calls).filter((k) => k).map((k) => `<button class="hub-chip ${it.call_status === k ? "on" : ""}" data-rc-setcall="${k}">${esc(calls[k])}</button>`).join("")}</div>` : ""}
-      ${row("ეტაპი", sel("rc_stage", Object.keys(stages).map((k) => [k, stages[k]]), it.stage))}
-      ${row("გასაუბრების დრო", `<input type="datetime-local" id="rc_interview_at" value="${esc(recDtVal(it.interview_at))}" ${ro}>`)}
-      ${row("გასაუბრებაზე იყო", yn("rc_attended", it.attended))}
+      <div class="rc-sec">🗓 გასაუბრება</div>
+      ${(it.pref_date || it.pref_time || it.pref_text) ? `<div class="muted" style="font-size:12px;margin-bottom:4px">კანდიდატმა აირჩია: ${esc([it.pref_date, it.pref_time].filter(Boolean).join(" "))}${it.pref_text ? ` · კონკრეტული თარიღი: ${esc(it.pref_text)}` : ""}</div>` : ""}
+      ${dateRow("გასაუბრების დრო", "rc_interview_at", "datetime-local", recDtVal(it.interview_at))}
+      ${row("გასაუბრებაზე იყო", sel("rc_attended", optList(O.attended || { "": "—", yes: "კი", no: "არა", changed: "გადაიფიქრა", postponed: "გადადო" }), it.attended))}
       ${row("გადაწყვეტილება", sel("rc_decision", [["", "—"], ["accepted", "მიღებულია"], ["considering", "განიხილება"], ["rejected", "უარყოფილია"]], it.decision))}
-      ${row("ტრენინგის დრო", `<input type="datetime-local" id="rc_training_at" value="${esc(recDtVal(it.training_at))}" ${ro}>`)}
-      ${row("ტრენინგზე მოდის", yn("rc_training_ok", it.training_ok))}
+      <div class="rc-sec">🎓 ტრენინგი ${it.train && it.train.rent ? `<span class="rc-st green">ქირა ✓</span>` : ""}${it.train && it.train.sale ? `<span class="rc-st gold">ყიდვა ✓</span>` : ""}</div>
+      ${dateRow("ტრენინგის დაწყება (თარიღი/საათი)", "rc_training_at", "datetime-local", recDtVal(it.training_at))}
+      ${row("ტრენინგზე მოდის", sel("rc_training_ok", optList(O.train_ok || { "": "—", yes: "მოდის", no: "არ მოდის", changed: "გადაიფიქრა", no_answer: "არ გვიპასუხა" }), it.training_ok))}
+      ${row("იმყოფებოდა ტრენინგზე 1/2", sel("rc_attended_t1", sessions(it.attended_t1), it.attended_t1))}
+      ${row("იმყოფებოდა ტრენინგზე 2/2", sel("rc_attended_t2", sessions(it.attended_t2), it.attended_t2))}
+      <div class="rc-sec">🤝 ინტერაქციები</div>
+      ${[["inter_lasha", "ლაშასთან"], ["inter_owner", "მეპატრონესთან"], ["inter_client", "კლიენტთან"]].map(([k, l]) => `<div class="rc-ia2">${row("ინტერაქცია " + l, sel("rc_" + k, optList(O.interaction || { "": "—", scheduled: "დანიშნულია", held: "ჩატარდა", passed: "გაიარა", failed: "ვერ გაიარა", changed: "გადაიფიქრა" }), it[k]))}${dateRow("თარიღი", "rc_" + k + "_at", "date", it[k + "_at"])}</div>`).join("")}
+      ${row("ინტერაქციის შენიშვნა", `<textarea id="rc_inter_note" rows="2" ${ro}>${esc(it.inter_note)}</textarea>`)}
+      <div class="rc-sec">🧪 ტესტი და სტაჟირება</div>
       ${row("ტესტი (ქულა)", `<input id="rc_test_score" inputmode="numeric" value="${esc(it.test_score)}" ${ro}>`)}
-      ${row("სტაჟირების დაწყება", `<input type="date" id="rc_internship_at" value="${esc(it.internship_at)}" ${ro}>`)}
-      ${row("ჩავიყვანთ (აგვყავს)", yn("rc_hire", it.hire))}
-      ${row("ჩაშტატების თარიღი", `<input type="date" id="rc_staffed_at" value="${esc(it.staffed_at)}" ${ro}>`)}
-      ${row("წასვლის თარიღი", `<input type="date" id="rc_left_at" value="${esc(it.left_at)}" ${ro}>`)}
+      ${dateRow("სტაჟირების დაწყება", "rc_internship_at", "date", it.internship_at)}
+      ${row("აგვყავს", sel("rc_hire", REC_YN.map(([v, l]) => [v, l]), it.hire))}
+      <div class="rc-sec">🏢 ჩაშტატება და წასვლა</div>
+      ${dateRow("ჩაშტატების თარიღი", "rc_staffed_at", "date", it.staffed_at)}
+      ${dateRow("წასვლის თარიღი", "rc_left_at", "date", it.left_at)}
       ${row("წასვლის/უარის მიზეზი", `<input id="rc_left_reason" value="${esc(it.left_reason)}" ${ro}>`)}
+      <div class="rc-sec">📌 ეტაპი და შენიშვნა</div>
+      ${row("ეტაპი", sel("rc_stage", Object.keys(stages).map((k) => [k, stages[k]]), it.stage))}
       ${row("შენიშვნა", `<textarea id="rc_comment" rows="2" ${ro}>${esc(it.comment)}</textarea>`)}
       ${can ? `<div class="hub-row" style="margin-top:6px"><button class="btn" id="rcSave">💾 შენახვა</button></div>` : `<div class="muted">ნახვის რეჟიმი — რედაქტირება შეუძლია ადმინს და პასუხისმგებელს</div>`}
     </div>
@@ -6115,21 +6231,33 @@ async function recOpen(id) {
   backdrop.hidden = false;
   document.getElementById("modalClose").onclick = closeDetail;
   backdrop.onclick = (e) => { if (e.target === backdrop) closeDetail(); };
+  box.querySelectorAll("[data-rc-dial]").forEach((a) => { a.onclick = (e) => { e.preventDefault(); recDial(a.dataset.rcDial); }; });
+  box.querySelectorAll("[data-rc-copyphone]").forEach((b) => { b.onclick = () => (window.shCopy ? window.shCopy(b.dataset.rcCopyphone, "📋 ნომერი დაკოპირდა") : toast(b.dataset.rcCopyphone)); });
+  box.querySelectorAll("[data-rc-tgchat]").forEach((b) => { b.onclick = () => hubOpenLink("https://t.me/" + b.dataset.rcTgchat); });
   box.querySelectorAll("[data-rc-copy]").forEach((b) => { b.onclick = () => (window.shCopy ? window.shCopy(d.templates[b.dataset.rcCopy], "📋 ტექსტი დაკოპირდა") : toast(d.templates[b.dataset.rcCopy])); });
   box.querySelectorAll("[data-rc-wa]").forEach((b) => { b.onclick = () => hubOpenLink(`https://wa.me/${digits}?text=${encodeURIComponent(d.templates[b.dataset.rcWa])}`); });
   box.querySelectorAll("[data-rc-setcall]").forEach((b) => { b.onclick = async () => {
-    try { await api("/api/recruit/" + encodeURIComponent(id), { method: "POST", body: JSON.stringify({ changes: { call_status: b.dataset.rcSetcall } }) }); toast("✅ შენახულია"); state.rec.list = null; await recLoadHome(); recDraw(); recOpen(id); }
+    try { await api("/api/recruit/" + encodeURIComponent(id), { method: "POST", body: JSON.stringify({ changes: { call_status: b.dataset.rcSetcall } }) }); toast("✅ შენახულია"); state.rec.list = null; state.rec.cal = null; state.rec.stats = null; await recLoadHome(); recDraw(); recOpen(id); }
     catch (e) { toast(e.message || "შეცდომა"); } }; });
+  box.querySelectorAll(".rc-qd button").forEach((b) => { b.onclick = (e) => {
+    e.preventDefault();
+    const wrap = b.parentNode, inp = document.getElementById(wrap.dataset.qd), isDt = wrap.dataset.type === "datetime-local";
+    if (b.dataset.d === "x") { inp.value = ""; return; }
+    const d = new Date(); d.setDate(d.getDate() + Number(b.dataset.d));
+    inp.value = hubIso(d) + (isDt ? "T" + ((inp.value || "").slice(11, 16) || "17:00") : "");
+  }; });
   const save = document.getElementById("rcSave");
   if (save) save.onclick = async () => {
     const g = (f) => document.getElementById("rc_" + f).value;
     const ch = { stage: g("stage"), interview_at: recDtOut(g("interview_at")), attended: g("attended"), decision: g("decision"), training_at: recDtOut(g("training_at")), training_ok: g("training_ok"),
+      attended_t1: g("attended_t1"), attended_t2: g("attended_t2"), inter_lasha: g("inter_lasha"), inter_owner: g("inter_owner"), inter_client: g("inter_client"),
+      inter_lasha_at: g("inter_lasha_at"), inter_owner_at: g("inter_owner_at"), inter_client_at: g("inter_client_at"), inter_note: g("inter_note"),
       test_score: g("test_score"), internship_at: g("internship_at"), hire: g("hire"), staffed_at: g("staffed_at"), left_at: g("left_at"), left_reason: g("left_reason"), comment: g("comment") };
     const changes = {};
     Object.keys(ch).forEach((k) => { if (String(ch[k] || "") !== String(k === "interview_at" || k === "training_at" ? (it[k] || "") : (it[k] || ""))) changes[k] = ch[k]; });
     if (!Object.keys(changes).length) { toast("ცვლილება არ არის"); return; }
     save.disabled = true;
-    try { await api("/api/recruit/" + encodeURIComponent(id), { method: "POST", body: JSON.stringify({ changes }) }); hubHaptic("ok"); toast("✅ შენახულია"); closeDetail(); state.rec.list = null; await recLoadHome(); recDraw(); }
+    try { await api("/api/recruit/" + encodeURIComponent(id), { method: "POST", body: JSON.stringify({ changes }) }); hubHaptic("ok"); toast("✅ შენახულია"); closeDetail(); state.rec.list = null; state.rec.cal = null; state.rec.stats = null; await recLoadHome(); recDraw(); }
     catch (e) { toast(e.message || "შეცდომა"); save.disabled = false; }
   };
 }

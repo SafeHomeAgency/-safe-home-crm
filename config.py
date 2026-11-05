@@ -330,6 +330,7 @@ RECRUIT_SHEET_ID = os.environ.get("RECRUIT_SHEET_ID", "10IGmB9WHwrhDGv_BNS5OaiZc
 RECRUIT_SHEET_TAB = os.environ.get("RECRUIT_SHEET_TAB", "Form Responses 2").strip()
 RECRUIT_IMPORT_MINUTES = int(os.environ.get("RECRUIT_IMPORT_MINUTES", "10"))
 RECRUIT_REMIND_HOUR = int(os.environ.get("RECRUIT_REMIND_HOUR", "12"))                       # ხვალინდელი გასაუბრებების დასადასტურებელი სია (თბილისი); აპიდანაც იცვლება
+RECRUIT_ARCHIVE_TABS = [x.strip() for x in os.environ.get("RECRUIT_ARCHIVE_TABS", "Sheet3").split(",") if x.strip()]   # ძველი ფორმის გვერდები: ეტაპით „არქივი“ გადმოდის (არავინ იკარგება)
 RECRUIT_RESPONSIBLE_IDS = {x.strip() for x in os.environ.get("RECRUIT_RESPONSIBLE_IDS", "").split(",") if x.strip()}   # საწყისი პასუხისმგებელი agent_id-ები (აპის პარამეტრი უფრო მაღლა დგას)
 
 

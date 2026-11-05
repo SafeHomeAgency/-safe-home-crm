@@ -101,6 +101,7 @@ def register(app, *, authed, audit, rate_limited, get_agents) -> None:
                   if str(a.get("active", "yes")).strip().lower() not in ("no", "false", "0")] if p["admin"] else []
         return jsonify(perm={k: p[k] for k in ("view", "edit", "admin", "responsible")}, lists=st.lists(), stats=st.stats(days=30),
                        responsible=_names(s["responsible_ids"]), remind_hour=s["remind_hour"], stages=m.STAGES, call_status=m.CALL_STATUS,
+                       options={"attended": m.ATTENDED, "train_ok": m.TRAIN_OK, "interaction": m.INTERACTION, "sessions": m.TRAIN_SESSIONS},
                        enabled=bool(config.RECRUIT_ENABLED), agents=agents)
 
     @app.get("/api/recruit/list")
@@ -115,7 +116,21 @@ def register(app, *, authed, audit, rate_limited, get_agents) -> None:
         stage = g("stage") or ""
         if stage and stage not in m.STAGES:
             return jsonify(error="ეტაპი არასწორია"), 400
-        return jsonify(st.query({"stage": stage, "q": g("q") or "", "active": g("active") in ("1", "true"), "page": page, "responsible": g("responsible") or ""}))
+
+        def pick(key, allowed):
+            v = (g(key) or "").strip()
+            return v if v in allowed else ""
+        f = {
+            "stage": stage, "q": (g("q") or "")[:60], "page": page, "responsible": (g("responsible") or "")[:40],
+            "state": pick("state", ("active", "closed", "all")) or "active",
+            "call": pick("call", ("todo", "confirmed", "declined", "no_contact", "repeat")),
+            "iv": pick("iv", ("today", "tomorrow", "week", "past", "none", "date")), "iv_date": (g("iv_date") or "")[:10],
+            "added": pick("added", ("today", "7", "30")), "exp": pick("exp", ("yes", "no")), "source": pick("source", ("form", "manual")),
+            "flag": pick("flag", tuple(st.FLAG_LABELS)), "sort": pick("sort", ("new", "interview", "name", "activity")) or "new",
+            "train": pick("train", ("coming", "rent", "sale", "both", "absent", "none")), "inter": pick("inter", ("none", "scheduled", "held", "passed", "failed", "changed")),
+            "age_min": "".join(ch for ch in (g("age_min") or "") if ch.isdigit())[:2], "age_max": "".join(ch for ch in (g("age_max") or "") if ch.isdigit())[:2],
+        }
+        return jsonify(st.query(f))
 
     @app.get("/api/recruit/stats")
     @rate_limited("recruit_read")
@@ -126,6 +141,22 @@ def register(app, *, authed, audit, rate_limited, get_agents) -> None:
         except ValueError:
             days = 90
         return jsonify(st.stats(days=days))
+
+    @app.get("/api/recruit/calendar")
+    @rate_limited("recruit_read")
+    @_guard("view")
+    def recruit_calendar(agent, admin, p):
+        try:
+            days = int(request.args.get("days") or 14)
+        except ValueError:
+            days = 14
+        return jsonify(st.calendar(request.args.get("from") or "", days))
+
+    @app.get("/api/recruit/day")
+    @rate_limited("recruit_read")
+    @_guard("view")
+    def recruit_day(agent, admin, p):
+        return jsonify(st.day_view(request.args.get("date") or st.now_dt().strftime("%Y-%m-%d")))
 
     @app.get("/api/recruit/slots")
     @rate_limited("recruit_read")
