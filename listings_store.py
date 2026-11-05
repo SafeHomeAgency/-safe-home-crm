@@ -397,7 +397,7 @@ def set_active(listing_id: str, viewer: dict, active: bool) -> dict:
         return {"listing_id": _s(r.get("listing_id")), "active": "yes" if active else "no"}
 
 
-def map_points(f: dict, viewer: dict, now: datetime.datetime | None = None, limit: int = 1500) -> dict:
+def map_points(f: dict, viewer: dict, now: datetime.datetime | None = None, limit: int = 5000) -> dict:
     """რუკისთვის: ფილტრებს დაქვემდებარებული განცხადებები **რეალური კოორდინატებით** (გამოგონილ წერტილს არ ვხატავთ). მხოლოდ საჯარო ველები."""
     now = now or now_dt()
     th = m.thresholds()
@@ -417,8 +417,12 @@ def map_points(f: dict, viewer: dict, now: datetime.datetime | None = None, limi
         pts.append({"id": _s(r.get("listing_id")), "lat": lat, "lng": lng, "price": m.num(r.get("price_usd")), "deal": _s(r.get("deal_type")),
                     "rooms": _s(r.get("rooms")), "area": m.num(r.get("area")), "fr": fr, "photo": ph[0] if ph else "",
                     "floor": _s(r.get("floor")), "floors": _s(r.get("floors")), "addr": _s(r.get("address")), "b": m.building_key(r),
-                    "district": _s(r.get("district")), "mine": bool(viewer.get("agent_id") and _s(r.get("agent_id")) == _s(viewer.get("agent_id")))})
-    pts.sort(key=lambda p: p["id"])
+                    "district": _s(r.get("district")), "mine": bool(viewer.get("agent_id") and _s(r.get("agent_id")) == _s(viewer.get("agent_id"))),
+                    "_c": _s(r.get("created_at"))})
+    # ლიმიტზე მეტისას ჯერ უახლესები რჩება (ადრე ID-ით დალაგებისას ახალი, მაგ. ბათუმის, განცხადებები იჭრებოდა)
+    pts.sort(key=lambda p: (p["_c"], p["id"]), reverse=True)
+    for p in pts:
+        p.pop("_c", None)
     return {"points": pts[:limit], "total": len(pts), "no_coords": nocoord, "truncated": len(pts) > limit}
 
 

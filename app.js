@@ -5160,23 +5160,81 @@ async function hubMapRefresh() {
   if (seq !== h.mapSeq || h.view !== "map") return;
   if (!h.map || !h.map.map || !document.getElementById("hubMapCanvas")) {
     box.innerHTML = `<div id="hubMapCanvas"></div>
-      <div class="hub-map-top"><div class="hub-row" style="margin:0">${Object.keys(HUB_CITIES).map((c) => `<button class="hub-chip" data-hub-city="${c}">${c}</button>`).join("")}</div></div>
-      <div class="hub-map-legend"><span class="fr-green"><i></i>ახალი</span><span class="fr-orange"><i></i>საშუალო</span><span class="fr-red"><i></i>ძველი</span></div>`;
+      <div class="hub-map-top"><div class="hub-row" style="margin:0">${Object.keys(HUB_CITIES).map((c) => `<button class="hub-chip" data-hub-city="${c}">${c}</button>`).join("")}<button class="hub-chip" id="hubMapLocate" title="ჩემი მდებარეობა">📍</button></div></div>
+      <div class="hub-map-legend"><span class="fr-green"><i></i>ახალი</span><span class="fr-orange"><i></i>საშუალო</span><span class="fr-red"><i></i>ძველი</span></div>
+      <div class="hub-mprev" id="hubMapPrev" hidden></div>`;
     const map = L.map("hubMapCanvas", { zoomControl: true, attributionControl: true, preferCanvas: true }).setView([41.7151, 44.8271], 12);
     L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", { maxZoom: 19, attribution: "© OpenStreetMap" }).addTo(map);   /* მუქი სტილი CSS ფილტრით (.hub-mapbox .leaflet-tile-pane) */
     const layer = L.layerGroup().addTo(map);
-    h.map = { map, layer, fitted: false, points: [] };
+    h.map = { map, layer, fitted: false, points: [], me: null };
     map.on("zoomend moveend", () => hubMapDraw());
-    box.querySelectorAll("[data-hub-city]").forEach((b) => { b.onclick = () => { hubHaptic(); const c = HUB_CITIES[b.dataset.hubCity]; map.flyTo([c[0], c[1]], c[2], { duration: 0.8 }); }; });
+    map.on("click", () => hubMapPreview(null));
+    box.querySelectorAll("[data-hub-city]").forEach((b) => { b.onclick = () => { hubHaptic(); hubMapPreview(null); const c = HUB_CITIES[b.dataset.hubCity]; map.flyTo([c[0], c[1]], c[2], { duration: 0.8 }); }; });
+    document.getElementById("hubMapLocate").onclick = () => hubMapLocate();
     setTimeout(() => map.invalidateSize(), 60);
   }
   h.map.points = data.points;
-  if (info) info.textContent = `🗺 ${data.total} განცხადება რუკაზე${data.no_coords ? ` · ${data.no_coords} კოორდინატის გარეშე (სიაში ჩანს)` : ""}${data.truncated ? " · ნაწილი" : ""}`;
+  const byCity = hubMapCityCounts(data.points);
+  box.querySelectorAll("[data-hub-city]").forEach((b) => { const n = byCity[b.dataset.hubCity] || 0; b.innerHTML = `${esc(b.dataset.hubCity)}${n ? ` <b>${n}</b>` : ""}`; });
+  if (info) info.textContent = `🗺 ${data.total} განცხადება რუკაზე${data.no_coords ? ` · ${data.no_coords} კოორდინატის გარეშე (სიაში ჩანს)` : ""}${data.truncated ? " · ნაწილი (დააზუსტეთ ფილტრი)" : ""}`;
   if (data.points.length && !h.map.fitted) {
     h.map.fitted = true;
-    try { h.map.map.fitBounds(data.points.map((p) => [p.lat, p.lng]), { padding: [40, 40], maxZoom: 15 }); } catch (e) { /* ignore */ }
+    // საწყისი ხედი — ქალაქი, სადაც ყველაზე მეტი განცხადებაა (თბილისი+ბათუმი ერთად ძალიან შორიდან ჩანდა)
+    const top = Object.keys(byCity).sort((a, b) => byCity[b] - byCity[a])[0];
+    const pts = data.points.filter((p) => hubMapCityOf(p) === top);
+    try { h.map.map.fitBounds((pts.length ? pts : data.points).map((p) => [p.lat, p.lng]), { padding: [40, 40], maxZoom: 15 }); } catch (e) { /* ignore */ }
   }
   hubMapDraw();
+}
+/* წერტილის ქალაქი — უახლოესი ცენტრი HUB_CITIES-დან */
+function hubMapCityOf(p) {
+  let best = null, bd = Infinity;
+  Object.keys(HUB_CITIES).forEach((c) => { const d = (p.lat - HUB_CITIES[c][0]) ** 2 + (p.lng - HUB_CITIES[c][1]) ** 2; if (d < bd) { bd = d; best = c; } });
+  return best;
+}
+function hubMapCityCounts(points) {
+  const out = {};
+  points.forEach((p) => { const c = hubMapCityOf(p); out[c] = (out[c] || 0) + 1; });
+  return out;
+}
+function hubMapLocate() {
+  const m = state.hub.map;
+  if (!m || !navigator.geolocation) { toast("მდებარეობა მიუწვდომელია"); return; }
+  hubHaptic();
+  navigator.geolocation.getCurrentPosition((pos) => {
+    const ll = [pos.coords.latitude, pos.coords.longitude];
+    if (m.me) m.me.remove();
+    m.me = L.circleMarker(ll, { radius: 8, color: "#fff", weight: 3, fillColor: "#3b82f6", fillOpacity: 1 }).addTo(m.map);
+    m.map.flyTo(ll, 15, { duration: 0.8 });
+  }, () => toast("მდებარეობის ნებართვა არ არის"), { enableHighAccuracy: true, timeout: 10000 });
+}
+/* ერთი განცხადების მოკლე ბარათი რუკის ქვემოთ (p = null — დახურვა) */
+function hubMapPreview(p) {
+  const el = document.getElementById("hubMapPrev");
+  if (!el) return;
+  if (!p) { el.hidden = true; el.innerHTML = ""; return; }
+  const rent = /ქირ/.test(p.deal || "");
+  el.innerHTML = `${p.photo ? `<img referrerpolicy="no-referrer" src="${esc(p.photo)}" alt="" onerror="this.style.display='none'">` : `<div class="hub-mprev-noph">🏠</div>`}
+    <div class="hub-mprev-body"><b>${hubMoney(p.price)}${rent ? "<small>/თვე</small>" : ""}</b>
+      <div class="muted">${esc([p.rooms ? p.rooms + " ოთ." : "", p.area ? Math.round(p.area) + " მ²" : "", p.district].filter(Boolean).join(" · "))}</div></div>
+    <button class="btn" id="hubMapPrevOpen">გახსნა</button><button class="hub-mprev-x" id="hubMapPrevX">✕</button>`;
+  el.hidden = false;
+  document.getElementById("hubMapPrevOpen").onclick = (e) => { e.stopPropagation(); hubOpenDetail(p.id); };
+  document.getElementById("hubMapPrevX").onclick = (e) => { e.stopPropagation(); hubMapPreview(null); };
+}
+/* ერთ შენობაში რამდენიმე განცხადება — მიახლოებით ვერ დაიშლება, ამიტომ სიას ვაჩვენებთ */
+function hubMapGroupList(g) {
+  const backdrop = document.getElementById("modalBackdrop"), box = document.getElementById("modalBox");
+  const items = g.items.slice().sort((a, b) => (a.price || 0) - (b.price || 0));
+  box.innerHTML = `<h3>${items.length} განცხადება ამ ადგილას<button class="close" id="modalClose">✕</button></h3>
+    <div class="hub-mlist">${items.map((p) => `<button class="hub-mlist-row" data-hub-open="${esc(p.id)}">
+      ${p.photo ? `<img referrerpolicy="no-referrer" src="${esc(p.photo)}" alt="" onerror="this.style.display='none'">` : `<span class="hub-mprev-noph">🏠</span>`}
+      <span><b>${hubMoney(p.price)}${/ქირ/.test(p.deal || "") ? "/თვე" : ""}</b><small class="muted">${esc([p.rooms ? p.rooms + " ოთ." : "", p.area ? Math.round(p.area) + " მ²" : "", p.district].filter(Boolean).join(" · "))}</small></span>
+      <i class="hub-fr fr-${esc(p.fr)}"><i></i></i></button>`).join("")}</div>`;
+  backdrop.hidden = false;
+  document.getElementById("modalClose").onclick = closeDetail;
+  backdrop.onclick = (e) => { if (e.target === backdrop) closeDetail(); };
+  box.querySelectorAll("[data-hub-open]").forEach((b) => { b.onclick = () => hubOpenDetail(b.dataset.hubOpen); });
 }
 function hubMapDraw() {
   const h = state.hub, m = h.map;
@@ -5192,7 +5250,10 @@ function hubMapDraw() {
     const mk = L.marker([g.lat, g.lng], { icon: L.divIcon({ className: "hub-pin", html: hubPill(g), iconSize: null }) }).addTo(m.layer);
     mk.on("click", () => {
       hubHaptic();
-      if (g.n === 1) hubOpenDetail(g.items[0].id);
+      if (g.n === 1) { hubMapPreview(g.items[0]); return; }
+      const lats = g.items.map((p) => p.lat), lngs = g.items.map((p) => p.lng);
+      const tight = Math.max(...lats) - Math.min(...lats) < 0.0005 && Math.max(...lngs) - Math.min(...lngs) < 0.0005;
+      if (tight || m.map.getZoom() >= 17) hubMapGroupList(g);
       else m.map.fitBounds(g.items.map((p) => [p.lat, p.lng]), { padding: [60, 60], maxZoom: 18 });
     });
   });
