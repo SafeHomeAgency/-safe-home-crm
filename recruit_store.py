@@ -39,7 +39,8 @@ def ensure_tabs() -> None:
 
 
 def now_dt() -> datetime.datetime:
-    return crm_time.local_now()
+    """ადგილობრივი (თბილისის) დრო **tzinfo-ს გარეშე** — ჩვენი თარიღები ცხრილში ასეთია; aware/naive შედარება 500-ს იძლეოდა."""
+    return crm_time.local_now().replace(tzinfo=None)
 
 
 def now_str() -> str:
@@ -96,6 +97,7 @@ def _log(recruit_id: str, kind: str, text: str, by: dict | None) -> None:
 def import_rows(parsed: list[dict], bootstrap: bool = False) -> dict:
     """parsed — map_row-ის შედეგები. უკვე არსებულ src_key-ს არ ვეხებთ (ჩვენი რედაქტირება არ იკარგება). bootstrap=True: ძველი ისტორიის
     პირველადი ჩატვირთვა — `silent`, რომ ძველ კანდიდატებზე შეტყობინებები არ წავიდეს. დუბლიკატი ტელეფონით აქტიურ ჩანაწერთან — მიეთითება კომენტარში."""
+    now = now_dt()
     with _lock:
         existing = all_rows(fresh=True)
         have = {_s(r.get("src_key")) for r in existing if _s(r.get("src_key"))}
@@ -112,10 +114,12 @@ def import_rows(parsed: list[dict], bootstrap: bool = False) -> dict:
                 skipped += 1
                 continue
             taken.add(rid)
-            rec = dict(rec, recruit_id=rid, updated_at=now_str(), updated_by="import", silent="yes" if bootstrap else "")
-            if not bootstrap and rec.get("stage") == "invited" and not rec.get("call_status"):
+            created = m.parse_dt(rec.get("created_at"))
+            historic = bootstrap or created is None or now - created > datetime.timedelta(days=3)       # ძველი განაცხადი: შეტყობინება/„ახალი“ სია არ ეხება (ჩავარდნილი იმპორტის გაგრძელებისასაც)
+            rec = dict(rec, recruit_id=rid, updated_at=now_str(), updated_by="import", silent="yes" if historic else "")
+            if not historic and rec.get("stage") == "invited" and not rec.get("call_status"):
                 rec["stage"] = "new"                                # ახალი განაცხადი = „ახალი, დასარეკი“, სანამ ვინმე არ დაუკავშირდება (სლოტი კანდიდატმა თავად აირჩია)
-            if rec.get("phone") and rec["phone"] in phones and not bootstrap:
+            if rec.get("phone") and rec["phone"] in phones and not historic:
                 rec["comment"] = (f"⚠️ იგივე ნომერი აქვს: {phones[rec['phone']]}. " + _s(rec.get("comment"), 500)).strip()
                 dups += 1
             if rec.get("phone"):
@@ -123,10 +127,13 @@ def import_rows(parsed: list[dict], bootstrap: bool = False) -> dict:
             batch.append(rec)
             have.add(rec["src_key"])
             added += 1
-        for rec in batch:
-            _backend.append(m.RECRUITS, m.HEADERS, rec)
-        for rec in batch:
-            _log(rec["recruit_id"], "import", "ფორმიდან შემოვიდა" if not bootstrap else "ძველი ცხრილიდან გადმოტანილია", None)
+        # ჯგუფური ჩაწერა: ერთი მოთხოვნა 300 სტრიქონზე (სტრიქონ-სტრიქონ ჩაწერა Sheets-ის „Write requests per minute“ ლიმიტს ცდებოდა — 429)
+        if batch:
+            _backend.append_many(m.RECRUITS, m.HEADERS, batch)
+            at, by = now_str(), "სისტემა"
+            _backend.append_many(m.RECRUIT_LOG, m.LOG_HEADERS, [{
+                "log_id": uuid.uuid4().hex[:10], "recruit_id": rec["recruit_id"], "at": at, "by_name": by, "by_id": "", "kind": "import",
+                "text": "ძველი ცხრილიდან გადმოტანილია" if rec.get("silent") else "ფორმიდან შემოვიდა"} for rec in batch])
         return {"added": added, "skipped": skipped, "duplicates": dups, "bootstrap": bootstrap}
 
 
