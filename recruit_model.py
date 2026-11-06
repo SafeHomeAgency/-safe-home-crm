@@ -26,6 +26,7 @@ HEADERS = [
     "comment", "responsible_id", "last_contact_at", "next_action_at", "silent", "updated_at", "updated_by", "closed",
     # ---- დამატებული (ბოლოში): ცხრილის ყველა ველი უკლებლივ
     "pref_date", "pref_time", "inter_lasha_at", "inter_owner_at", "inter_client_at", "inter_note",
+    "msg_at", "msg_channel", "msg_kind", "msg_count",                      # „მივწერე“: ბოლო შეტყობინების დრო/არხი/ტიპი, რამდენჯერ
 ]
 LOG_HEADERS = ["log_id", "recruit_id", "at", "by_name", "by_id", "kind", "text"]
 SETTINGS_HEADERS = ["key", "value"]
@@ -514,3 +515,31 @@ def reason_of(r: dict) -> tuple[str, bool]:
     if explicit:
         return explicit, True
     return derive_reason(r), False
+
+
+# ---- კლასები (დღის/პერიოდის ხედისთვის): ყოველი კანდიდატი ზუსტად ერთ კლასშია — რომ არ აგერიოთ „რამდენს მივწერე / ვინ დამრჩა / ვინ დადასტურდა“
+CLASS_LABELS = {"to_message": "📞 დასარეკი / მისაწერი", "messaged": "✉️ მივწერე — პასუხს ველოდები", "pending": "⏳ დასადასტურებელი", "confirmed": "✅ მოდის",
+                "declined": "❌ არ მოდის", "changed": "🔁 გადაიფიქრა", "postponed": "⏭ გადაიდო", "attended": "🎯 მოვიდა", "noshow": "🚫 არ მოვიდა"}
+CLASS_ORDER = ["to_message", "messaged", "pending", "confirmed", "postponed", "declined", "changed", "attended", "noshow"]
+
+
+def class_of(r: dict) -> str:
+    att = _s(r.get("attended"))
+    if att == "yes":
+        return "attended"
+    if att == "no":
+        return "noshow"
+    if att == "postponed":
+        return "postponed"
+    if att == "changed":
+        return "changed"
+    stage, cs = _s(r.get("stage")), _s(r.get("call_status"))
+    if cs == "declined" or stage in ("rejected", "dropped"):
+        return "changed" if (reason_of(r)[0] or "").lower().startswith("გადაიფიქრა") else "declined"
+    if cs == "confirmed":
+        return "confirmed"
+    if cs in ("pending", "repeat", "no_contact"):
+        return "pending"
+    if _s(r.get("msg_at")):
+        return "messaged"
+    return "to_message"

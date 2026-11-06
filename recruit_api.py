@@ -127,7 +127,7 @@ def register(app, *, authed, audit, rate_limited, get_agents) -> None:
             "iv": pick("iv", ("today", "tomorrow", "week", "past", "none", "date")), "iv_date": (g("iv_date") or "")[:10],
             "added": pick("added", ("today", "7", "30")), "exp": pick("exp", ("yes", "no")), "source": pick("source", ("form", "manual")),
             "flag": pick("flag", tuple(st.FLAG_LABELS)), "sort": pick("sort", ("new", "interview", "name", "activity")) or "new",
-            "train": pick("train", ("coming", "rent", "sale", "both", "absent", "none")), "inter": pick("inter", ("none", "scheduled", "held", "passed", "failed", "changed")),
+            "cls": pick("cls", tuple(m.CLASS_ORDER)), "train": pick("train", ("coming", "rent", "sale", "both", "absent", "none")), "inter": pick("inter", ("none", "scheduled", "held", "passed", "failed", "changed")),
             "age_min": "".join(ch for ch in (g("age_min") or "") if ch.isdigit())[:2], "age_max": "".join(ch for ch in (g("age_max") or "") if ch.isdigit())[:2],
         }
         return jsonify(st.query(f))
@@ -196,6 +196,16 @@ def register(app, *, authed, audit, rate_limited, get_agents) -> None:
         r = st.create(body.get("fields") if isinstance(body.get("fields"), dict) else {}, {"name": p["name"], "agent_id": p["agent_id"]})
         audit(agent, admin, "recruit_create", "recruit", r["recruit_id"])
         return jsonify(item=st.public(r)), 201
+
+    @app.post("/api/recruit/messaged")
+    @rate_limited("recruit_write")
+    @_guard("edit")
+    def recruit_messaged(agent, admin, p):
+        body = request.get_json(silent=True) or {}
+        ids = body.get("ids") if isinstance(body.get("ids"), list) else []
+        res = st.mark_messaged(ids, str(body.get("channel") or ""), str(body.get("kind") or ""), {"name": p["name"], "agent_id": p["agent_id"]})
+        audit(agent, admin, "recruit_messaged", "recruit", "", metadata={"count": res["marked"], "channel": str(body.get("channel") or "")[:12]})
+        return jsonify(res)
 
     @app.post("/api/recruit/import")
     @rate_limited("recruit_write")

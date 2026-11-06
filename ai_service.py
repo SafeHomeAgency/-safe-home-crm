@@ -10,6 +10,7 @@ Safe Home AI — კითხვა-პასუხის ნაკადი.
 
 from __future__ import annotations
 
+import datetime
 import json
 import logging
 import re
@@ -49,6 +50,14 @@ RULES:
 - Use tools only when the question is about the user's own data (or team data, if the tool is available). Tools return only what this user may see. If a tool reports an error or missing data, say so.
 - Do not invent numbers, dates, names or links.
 
+RECRUITMENT, FINANCE, SCREEN CARDS, NAVIGATION (only when the matching tools are in your tool list - otherwise those areas are not available to this user and you must say so, never guess):
+- recruit_* tools read the hiring pipeline ("კადრები"): interviews by day and class, trainings, funnel, reasons. Candidate names appear as [CANDIDATE_n]. Questions like "how many interviews do I have on 11 November" => call recruit_day / recruit_range with a YYYY-MM-DD date derived from <knowledge_base today=...> (current year unless stated). The app draws the candidate cards and charts on the user's screen by itself - your text must be a SHORT summary (numbers + what needs attention), do not list every person.
+- Changing a candidate ("X called and confirmed", "X did not come", "X moved to training on 11 Nov 16:00", test score, staffed, left): find the candidate with recruit_find (if several match or none, ask which one), then call propose_recruit_update with exact values. Map to fields: confirmed call => call_status=confirmed; declined/not coming => call_status=declined; interview result => attended yes/no/postponed/changed (+ decision); training date => training_at "YYYY-MM-DD HH:MM", training attendance => training_ok. When a change would close a candidate (rejected, not coming for good, left, changed mind) you MUST have a reason: ask the user for it and put it in changes.left_reason. Never guess a reason. Nothing is applied until the user confirms the card - say it is PREPARED.
+- Bulk messaging: you cannot send WhatsApp or SMS. recruit_open_queue only prepares a screen queue; the user presses send on every candidate himself. Say so honestly.
+- finance_* tools exist only for the director. Present finance as facts from tools; label your own advice as an estimate. Never reveal finance or hiring data to a user who does not have those tools.
+- open_section adds a button that opens any Mini App section (ids are in <mini_app_map>). Use it when the user asks to open/go to a section, or after answering, when the section is the natural next step. You cannot press buttons or change anything in other sections yet - only read what tools return and propose.
+- If a request needs a capability you have no tool for (e.g. editing attendance, contracts, MyHome postings), say plainly that this cannot be done from chat yet and offer open_section to do it manually.
+
 OUTPUT: reply with ONE JSON object and nothing else:
 {"answer": "<plain text; short paragraphs or lines starting with '- '; no markdown headings>", "answer_type": "policy|system_data|general|unverified", "sources": ["<kb id>", ...], "confidence": "high|medium|low", "needs_manager": true|false}"""
 
@@ -77,14 +86,20 @@ _purge = {"day": None}
 _purge_lock = threading.Lock()
 
 
-def viewer_of(agent, admin: bool, uid: str = "") -> dict:
+def viewer_of(agent, admin: bool, uid: str = "", chat_id=None) -> dict:
     agent = agent or {}
     aid = str(agent.get("agent_id") or "")
+    try:
+        cid = int(chat_id) if chat_id not in (None, "") else 0
+    except (TypeError, ValueError):
+        cid = 0
     return {"agent_id": aid, "uid": aid or uid or "admin", "role": str(agent.get("role") or "").strip() or ("admin" if admin else "agent"),
-            "team": str(agent.get("team") or "").strip(), "admin": bool(admin), "name": str(agent.get("name") or "")}
+            "team": str(agent.get("team") or "").strip(), "admin": bool(admin), "name": str(agent.get("name") or ""), "chat_id": cid}
 
 
-_DATA_INTENT = re.compile(r"kpi|შედეგ|შეხვედრ|დავალებ|კლიენტ|განცხადებ|გუნდ|რისკ|follow|ფოლოუ|შეახსენ|შეტყობინებ|დაგეგმ|გაფრთხილ|შვებულ|გრაფიკ|ცვლა|ცვლის|დასწრებ|ბიუჯეტ|კრიტერიუმ|ბინა|ბინები|იპოვე|მოძებნე|ძებნ|ერგება|"
+_DATA_INTENT = re.compile(r"კადრ|გასაუბრ|ტრენინგ|კანდიდატ|ფინანს|შემოსავ|ხარჯ|მოგებ|გარიგებ|კომისი|გახსენი|გადადი|"
+                          r"собеседован|кандидат|финанс|доход|расход|прибыл|"
+                          r"interview|candidate|recruit|finance|revenue|expense|profit|open |kpi|შედეგ|შეხვედრ|დავალებ|კლიენტ|განცხადებ|გუნდ|რისკ|follow|ფოლოუ|შეახსენ|შეტყობინებ|დაგეგმ|გაფრთხილ|შვებულ|გრაფიკ|ცვლა|ცვლის|დასწრებ|ბიუჯეტ|კრიტერიუმ|ბინა|ბინები|იპოვე|მოძებნე|ძებნ|ერგება|"
                           r"встреч|клиент|задач|объявлен|команд|результат|риск|напомни|сообщени|предупрежд|отпуск|выходн|график|смен|посещаем|бюджет|критери|квартир|найди|подбери|поиск|"
                           r"meeting|client|task|listing|team|result|risk|remind|message|schedule|warning|leave|day off|shift|attendance|budget|criteria|apartment|flat|find|search|match", re.IGNORECASE)
 
@@ -207,9 +222,19 @@ def _history_for_provider(conv_id: str, uid: str) -> list[dict]:
     return out
 
 
+def _weekday(day: str) -> str:
+    try:
+        return ["ორშაბათი", "სამშაბათი", "ოთხშაბათი", "ხუთშაბათი", "პარასკევი", "შაბათი", "კვირა"][datetime.datetime.strptime(day, "%Y-%m-%d").weekday()]
+    except ValueError:
+        return ""
+
+
 def _user_block(entries: list[dict], mode: str, question: str, viewer: dict, lang: str) -> str:
+    import ai_tools_ext as ext
     kb = "\n".join(kn.render_entry(e) for e in entries) or "(დამტკიცებული ჩანაწერი არ არის)"
-    return (f'<knowledge_base mode="{mode}" today="{m.today_str()}">\n{kb}\n</knowledge_base>\n'
+    secs = "; ".join(f"{k}={v[0]}" for k, v in ext.SECTIONS.items() if ext.section_allowed(viewer, k))
+    return (f'<knowledge_base mode="{mode}" today="{m.today_str()}" weekday="{_weekday(m.today_str())}">\n{kb}\n</knowledge_base>\n'
+            f'<mini_app_map>{secs}</mini_app_map>\n'
             f'<asker role="{role_label(viewer)}" language="{lang}"/>\n<question>\n{_esc(question)}\n</question>')
 
 
@@ -303,7 +328,7 @@ def ask(viewer: dict, text: str, conv_id: str = "") -> dict:
             store.review_unanswered(q_red, team, uid_msg + "a", category="")
         except Exception:  # noqa: BLE001 — რიგის ჩაწერა პასუხს არასდროს აფერხებს
             log.exception("AI review queue ჩაწერა ვერ მოხერხდა")
-    return reply(answer, parsed["answer_type"], sources_meta, parsed["confidence"], parsed["needs_manager"], outcome, actions=ctx.actions)
+    return reply(answer, parsed["answer_type"], sources_meta, parsed["confidence"], parsed["needs_manager"], outcome, actions=ctx.actions, widgets=ctx.widgets[:6])
 
 
 # ---------------------------------------------------------------- უკუკავშირი / ესკალაცია

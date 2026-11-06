@@ -35,7 +35,7 @@ def register(app, *, authed, audit, rate_limited, get_agents, get_questions, cre
             try:
                 store.ensure_tabs()
                 ai_actions.ensure_tabs()
-                v = svc.viewer_of(agent, admin, uid=f"tg{chat_id()}")
+                v = svc.viewer_of(agent, admin, uid=f"tg{chat_id()}", chat_id=chat_id())
                 return fn(agent, admin, v, *a, **kw)
             except AiError as e:
                 return jsonify(error=str(e), code=e.code, **e.extra), e.status

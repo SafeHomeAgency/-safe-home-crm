@@ -21,6 +21,7 @@ import ai_knowledge as kn
 import ai_model as m
 import ai_privacy as pv
 import ai_store as store
+import ai_tools_ext as ext
 from ai_model import AiError
 
 log = logging.getLogger("safehome-ai-tools")
@@ -100,10 +101,10 @@ def tools_for(viewer: dict, ranked_kb: bool) -> list[dict]:
         names += ["get_team_kpi", "list_team_agents", "propose_agent_message", "get_team_warnings", "get_team_weak_points"]
     if ranked_kb:
         names.append("search_knowledge")
-    return [TOOL_DEFS[n] for n in names]
+    return [TOOL_DEFS[n] for n in names] + [ext.TOOL_DEFS[n] for n in ext.names_for(viewer)]
 
 
-class ToolContext:
+class ToolContext(ext.ExtTools):
     """ერთი კითხვის ფარგლები: ვინ კითხულობს, პლეისჰოლდერები, რომელი ცოდნის ჩანაწერი ნახა მოდელმა (წყაროების შესამოწმებლად)."""
 
     def __init__(self, viewer: dict, pseudo: pv.Pseudonymizer, kb_rows: list[dict]):
@@ -113,6 +114,7 @@ class ToolContext:
         self.kb_shown: set[str] = set()
         self.used: list[str] = []
         self.actions: list[dict] = []                     # შეთავაზებული მოქმედებების ბარათები (შესრულებას მხოლოდ მომხმარებელი ადასტურებს)
+        self.widgets: list[dict] = []                     # ეკრანზე საჩვენებელი ბარათები/დიაგრამები (მხოლოდ მომხმარებელს მიდის; მოდელს — არა)
 
     # ---- გამოძახება
     def call(self, name: str, args: dict) -> str:

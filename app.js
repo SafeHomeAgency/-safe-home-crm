@@ -5891,7 +5891,7 @@ const REC_TAB = { id: "recruit", label: "კადრები", icon: "🧑‍�
 const REC_CLS = { new: "blue", invited: "blue", confirmed: "green", interviewed: "amber", considering: "amber", training: "green", internship: "green", staffed: "gold", left: "gray", rejected: "red", dropped: "gray" };
 const REC_YN = [["", "—"], ["yes", "კი"], ["no", "არა"], ["changed", "გადაიფიქრა"]];
 const REC_F0 = { q: "", stage: "", state: "active", call: "", iv: "", iv_date: "", added: "", age_min: "", age_max: "", exp: "", source: "", flag: "", train: "", inter: "", sort: "new" };
-if (!state.rec) state.rec = { view: "today", f: Object.assign({}, REC_F0), panel: false, page: 1, list: null, home: null, stats: null, day: "", busy: false };
+if (!state.rec) state.rec = { selMode: false, sel: new Set(), tpls: null, bulkTpl: "confirm", bulkText: "", view: "today", f: Object.assign({}, REC_F0), panel: false, page: 1, list: null, home: null, stats: null, day: "", busy: false };
 
 async function recLoadAccess() {
   try {
@@ -5959,14 +5959,16 @@ function recFlags(it) { return (it.flags || []).map((f) => `<span class="rc-flag
 function recChips(it) {
   const iv = it.interview_day ? `<span class="rc-iv">🗓 ${esc(it.interview_day)}${it.interview_time ? " " + esc(it.interview_time) : ""}</span>` : "";
   const cs = it.call_label && it.call_status ? `<span class="rc-call c-${esc(it.call_status)}">${esc(it.call_label)}</span>` : (it.stage === "new" || it.stage === "invited" ? `<span class="rc-call c-todo">📞 დასარეკია</span>` : "");
-  return `<span class="rc-st ${REC_CLS[it.stage] || "gray"}">${esc(it.stage_label)}</span>${iv}${cs}`;
+  const mg = it.msg_at ? `<span class="rc-call c-msg">✉️ ${esc(String(it.msg_at).slice(5, 16))}${it.msg_count > 1 ? " ×" + esc(it.msg_count) : ""}</span>` : "";
+  return `<span class="rc-st ${REC_CLS[it.stage] || "gray"}">${esc(it.stage_label)}</span>${iv}${cs}${mg}`;
 }
 function recCard(it, can) {
-  const quick = can && ["new", "invited", "confirmed"].includes(it.stage) ? `<div class="rc-quick" data-rc-stop="1">
+  const selOn = state.rec.selMode && can, chosen = selOn && state.rec.sel.has(it.recruit_id);
+  const quick = !selOn && can && ["new", "invited", "confirmed"].includes(it.stage) ? `<div class="rc-quick" data-rc-stop="1">
     <button class="rc-q ok" data-rc-call="confirmed" data-id="${esc(it.recruit_id)}">✅ მოდის</button><button class="rc-q no" data-rc-call="declined" data-id="${esc(it.recruit_id)}">❌ არ მოდის</button>
     <button class="rc-q" data-rc-call="no_contact" data-id="${esc(it.recruit_id)}">📵 ვერ</button><button class="rc-q" data-rc-call="repeat" data-id="${esc(it.recruit_id)}">🔁</button></div>` : "";
-  return `<div class="card rc-card" data-rc-open="${esc(it.recruit_id)}">
-    <div class="rc-top"><b>${esc(it.name)}</b>${it.age ? `<small> · ${esc(it.age)} წ.</small>` : ""}</div>
+  return `<div class="card rc-card ${chosen ? "rc-picked" : ""}" data-rc-open="${esc(it.recruit_id)}">
+    <div class="rc-top">${selOn ? `<span class="rc-chk ${chosen ? "on" : ""}">${chosen ? "☑" : "☐"}</span>` : ""}<b>${esc(it.name)}</b>${it.cls && state.rec.view === "cal" ? ` <span class="rc-cl-mini c-${esc(it.cls)}">${esc(((state.rec.cal && state.rec.cal.day && state.rec.cal.day.class_labels) || {})[it.cls] || "")}</span>` : ""}${it.age ? `<small> · ${esc(it.age)} წ.</small>` : ""}</div>
     <div class="rc-line">${recTel(it)}</div><div class="rc-line">${recChips(it)}${recFlags(it)}</div>
     ${it.comment ? `<div class="rc-note">💬 ${esc(it.comment.slice(0, 110))}</div>` : ""}${it.reason ? `<div class="rc-note">🔒 დახურვის მიზეზი: <b>${esc(it.reason)}</b>${it.reason_auto ? " (ცხრილიდან)" : ""}</div>` : ""}${quick}</div>`;
 }
@@ -5982,6 +5984,7 @@ async function renderRecruit(content) {
   recDraw(content);
 }
 function recDraw(content) {
+  if (!content && state.tab[state.role] !== "recruit") return;      // ჩატის ბარათიდან ჩანაწერის შეცვლისას ჩატის ეკრანს არ ვანგრევთ
   content = content || document.getElementById("content");
   const r = state.rec, a = state.recAccess || {}, h = r.home || {}, can = !!a.can_edit;
   const tabs = [["today", "📞 დღეს"], ["cal", "📅 კალენდარი"], ["all", "👥 ყველა"], ["stats", "📊 ვორონკა"]].concat(a.can_admin ? [["settings", "⚙️"]] : []);
@@ -6023,7 +6026,7 @@ async function recLoadCal() {
   const c = r.cal;
   if (!c.from) { const t = new Date(); t.setDate(t.getDate() - 1); c.from = hubIso(t); }
   if (!c.sel) c.sel = hubIso(new Date());
-  try { c.days = (await api("/api/recruit/calendar?from=" + c.from + "&days=14")).days; } catch (e) { toast(e.message || "შეცდომა"); c.days = []; }
+  try { c.days = (await api("/api/recruit/calendar?from=" + c.from + "&days=" + (c.span || 14))).days; } catch (e) { toast(e.message || "შეცდომა"); c.days = []; }
   await recLoadDay(c.sel);
 }
 async function recLoadDay(day) {
@@ -6033,17 +6036,95 @@ async function recLoadDay(day) {
   if (state.rec.view === "cal") recDraw();
 }
 function recCalHtml() {
-  const c = state.rec.cal, can = !!(state.recAccess || {}).can_edit;
+  const r = state.rec, c = r.cal, can = !!(state.recAccess || {}).can_edit;
   if (!c || !c.days.length) return `<div class="card"><div class="empty">იტვირთება…</div></div>`;
-  const strip = c.days.map((d) => `<button class="rc-day ${d.date === c.sel ? "on" : ""} ${d.today ? "today" : ""}" data-rc-day="${d.date}"><small>${esc(d.weekday)}</small><b>${d.day}</b>${d.interviews.total ? `<i class="iv">🗓${d.interviews.total}</i>` : ""}${d.trainings.total ? `<i class="tr">🎓${d.trainings.total}</i>` : ""}${d.internship || d.staffed || d.left ? `<i class="ot">•</i>` : ""}</button>`).join("");
+  const strip = c.days.map((d) => {
+    const cl = d.classes || {}, todo = (cl.to_message || 0) + (cl.pending || 0);
+    return `<button class="rc-day ${d.date === c.sel ? "on" : ""} ${d.today ? "today" : ""}" data-rc-day="${d.date}"><small>${esc(d.weekday)}</small><b>${d.day}</b>${d.interviews.total ? `<i class="iv">🗓${d.interviews.total}</i>` : ""}${todo ? `<i class="td">⏳${todo}</i>` : ""}${d.trainings.total ? `<i class="tr">🎓${d.trainings.total}</i>` : ""}${d.internship || d.staffed || d.left ? `<i class="ot">•</i>` : ""}</button>`;
+  }).join("");
+  /* პერიოდის შეჯამება კლასებად (ხილული დღეები) */
+  const tot = {}, order = (c.day && c.day.class_order) || ["to_message", "messaged", "pending", "confirmed", "postponed", "declined", "changed", "attended", "noshow"], labels = (c.day && c.day.class_labels) || {};
+  order.forEach((k) => { tot[k] = c.days.reduce((s, d) => s + ((d.classes || {})[k] || 0), 0); });
+  const all = order.reduce((s, k) => s + tot[k], 0);
+  const sum = `<div class="card"><h2>📊 პერიოდი: ${esc(c.days[0].date)} — ${esc(c.days[c.days.length - 1].date)} <span class="cnt">${all}</span></h2>
+    <div class="rc-cls">${order.map((k) => `<span class="rc-cl c-${k}"><b>${tot[k]}</b>${esc(labels[k] || k)}</span>`).join("")}</div></div>`;
   const dv = c.day, sec = (title, arr) => (arr && arr.length ? `<div class="card"><h2>${title} <span class="cnt">${arr.length}</span></h2>${arr.map((x) => recCard(x, can)).join("")}</div>` : "");
-  const iv = dv ? dv.interviews : [], conf = iv.filter((x) => x.call_status === "confirmed").length;
-  const day = dv ? `${sec(`🗓 გასაუბრება — ${esc(c.sel)}${iv.length ? ` · ✅ ${conf} / ⏳ ${iv.length - conf}` : ""}`, iv)}${sec("🎓 ტრენინგი", dv.trainings)}${sec("🧪 სტაჟირება იწყება", dv.internship)}${sec("🏢 ჩაშტატდა", dv.staffed)}${sec("🚪 წავიდა", dv.left)}`
-    + (!iv.length && !dv.trainings.length && !dv.internship.length && !dv.staffed.length && !dv.left.length ? `<div class="card"><div class="empty">ამ დღეს არაფერია დაგეგმილი</div></div>` : "") : `<div class="card"><div class="empty">იტვირთება…</div></div>`;
+  let ivHtml = "";
+  if (dv) {
+    const g = dv.groups || {}, f = c.cls || "";
+    const items = dv.interviews.filter((x) => !f || x.cls === f);
+    const chips = `<button class="hub-chip ${f === "" ? "on" : ""}" data-rc-cls="">ყველა <b>${dv.interviews.length}</b></button>` + order.filter((k) => g[k]).map((k) => `<button class="hub-chip rc-clchip c-${k} ${f === k ? "on" : ""}" data-rc-cls="${k}">${esc(labels[k] || k)} <b>${g[k]}</b></button>`).join("");
+    const bar = can && dv.interviews.length ? `<div class="hub-row" style="margin:8px 0 2px"><button class="btn secondary" id="rcSelToggle">${r.selMode ? "✖ არჩევის გათიშვა" : "☑️ არჩევა / ჯგუფური მესიჯი"}</button></div>` : "";
+    ivHtml = dv.interviews.length ? `<div class="card"><h2>🗓 გასაუბრება — ${esc(c.sel)} <span class="cnt">${items.length}/${dv.interviews.length}</span></h2><div class="hub-row" style="flex-wrap:wrap">${chips}</div>${bar}
+      ${items.map((x) => recCard(x, can)).join("") || `<div class="empty">ამ კლასში არავინაა</div>`}</div>` : "";
+  }
+  const day = dv ? `${ivHtml}${sec("🎓 ტრენინგი", dv.trainings)}${sec("🧪 სტაჟირება იწყება", dv.internship)}${sec("🏢 ჩაშტატდა", dv.staffed)}${sec("🚪 წავიდა", dv.left)}`
+    + (!dv.interviews.length && !dv.trainings.length && !dv.internship.length && !dv.staffed.length && !dv.left.length ? `<div class="card"><div class="empty">ამ დღეს არაფერია დაგეგმილი</div></div>` : "") : `<div class="card"><div class="empty">იტვირთება…</div></div>`;
+  const from0 = c.days[0].date, to0 = c.days[c.days.length - 1].date;
   return `<div class="card hub-form"><div class="rc-calnav"><button class="btn secondary" id="rcCalPrev">◀ კვირა</button><button class="btn secondary" id="rcCalToday">დღეს</button><button class="btn secondary" id="rcCalNext">კვირა ▶</button></div>
-    <label style="display:flex;flex-direction:column;gap:3px;font-size:12px;color:var(--hint);margin:8px 0 6px">გადასვლა თარიღზე<input type="date" id="rcCalJump" value="${esc(c.sel)}"></label>
-    <div class="rc-strip">${strip}</div><div class="muted" style="font-size:11.5px">🗓 გასაუბრება · 🎓 ტრენინგი · • სტაჟირება/ჩაშტატება/წასვლა</div></div>${day}`;
+    <div class="grid2" style="margin-top:8px"><label style="display:flex;flex-direction:column;gap:3px;font-size:12px;color:var(--hint)">პერიოდი — დან<input type="date" id="rcRangeFrom" value="${esc(from0)}"></label><label style="display:flex;flex-direction:column;gap:3px;font-size:12px;color:var(--hint)">მდე<input type="date" id="rcRangeTo" value="${esc(to0)}"></label></div>
+    <label style="display:flex;flex-direction:column;gap:3px;font-size:12px;color:var(--hint);margin:8px 0 6px">არჩეული დღე<input type="date" id="rcCalJump" value="${esc(c.sel)}"></label>
+    <div class="rc-strip">${strip}</div><div class="muted" style="font-size:11.5px">🗓 გასაუბრება · ⏳ მისაწერი/დასადასტურებელი · 🎓 ტრენინგი · • სტაჟირება/ჩაშტატება/წასვლა</div></div>${sum}${day}${recBulkBar()}`;
 }
+/* ---- ჯგუფური მესიჯი: არჩევა -> ტექსტი -> WhatsApp რიგი / SMS / კოპირება; ყველაფერი „მივწერე“-დ აღირიცხება ---- */
+function recSelIds() { return Array.from(state.rec.sel || []); }
+function recTplText(tpl, it) {
+  const first = String(it.name || "").trim().split(/\s+/)[0] || "";
+  const m = /^(\d{4})-(\d{2})-(\d{2})(?: (\d{2}:\d{2}))?/.exec(it.interview_at || "");
+  return String(tpl || "").replace(/\{name\}/g, first).replace(/\{date\}/g, m ? `${m[3]}.${m[2]}` : "—").replace(/\{time\}/g, m && m[4] && m[4] !== "00:00" ? m[4] : "—");
+}
+function recBulkBar() {
+  const r = state.rec;
+  if (!r.selMode) return "";
+  const n = recSelIds().length, tpls = r.tpls || {}, labels = r.tplLabels || {};
+  return `<div class="rc-bulk"><div class="rc-bulk-top"><b>${n}</b> არჩეული <button class="rc-lnk" id="rcSelAll">ყველა</button><button class="rc-lnk" id="rcSelTodo">მხოლოდ მისაწერები</button><button class="rc-lnk" id="rcSelNone">გასუფთავება</button></div>
+    <select id="rcBulkTpl">${Object.keys(tpls).map((k) => `<option value="${k}" ${r.bulkTpl === k ? "selected" : ""}>${esc(labels[k] || k)}</option>`).join("")}<option value="_custom" ${r.bulkTpl === "_custom" ? "selected" : ""}>✏️ საკუთარი ტექსტი…</option></select>
+    ${r.bulkTpl === "_custom" ? `<textarea id="rcBulkText" rows="2" placeholder="ტექსტი ({name} {date} {time})">${esc(r.bulkText || "")}</textarea>` : ""}
+    <div class="hub-row"><button class="btn" id="rcBulkWa" ${n ? "" : "disabled"}>💬 WhatsApp რიგი ▶</button><button class="btn secondary" id="rcBulkSms" ${n ? "" : "disabled"}>✉️ SMS</button></div>
+    <div class="hub-row"><button class="btn secondary" id="rcBulkCopyNums" ${n ? "" : "disabled"}>📋 ნომრები</button><button class="btn secondary" id="rcBulkCopyTxt" ${n ? "" : "disabled"}>📋 ტექსტი</button><button class="btn secondary" id="rcBulkMark" ${n ? "" : "disabled"}>✅ მივწერე ყველას</button></div>
+    <div class="muted" style="font-size:11px">WhatsApp ავტომატურ გაგზავნას არ იძლევა: რიგში ყოველ კანდიდატზე ერთი დაჭერა გჭირდება, „მივწერე“ თავისით აღინიშნება.</div></div>`;
+}
+async function recLoadTpls() {
+  const r = state.rec;
+  if (r.tpls) return;
+  try { const d = await api("/api/recruit/templates"); r.tpls = d.templates; r.tplLabels = d.labels; r.bulkTpl = r.bulkTpl || "confirm"; } catch (e) { r.tpls = {}; r.tplLabels = {}; }
+}
+function recBulkText() { const r = state.rec; return r.bulkTpl === "_custom" ? (r.bulkText || "") : ((r.tpls || {})[r.bulkTpl] || ""); }
+function recSelItems() { const ids = new Set(recSelIds()); return ((state.rec.cal && state.rec.cal.day && state.rec.cal.day.interviews) || []).filter((x) => ids.has(x.recruit_id)); }
+async function recMark(ids, channel, kind) {
+  const d = await api("/api/recruit/messaged", { method: "POST", body: JSON.stringify({ ids, channel, kind }) });
+  return d;
+}
+function recQueueOpen(itemsArg, tplArg, kindArg) {
+  const items = (Array.isArray(itemsArg) ? itemsArg : recSelItems()).filter((x) => x.phone), tpl = typeof tplArg === "string" ? tplArg : recBulkText();
+  const kind = typeof kindArg === "string" && kindArg ? kindArg : (state.rec.bulkTpl === "_custom" ? "custom" : state.rec.bulkTpl);
+  if (!items.length) { toast("არჩეულებს ტელეფონი არ აქვთ"); return; }
+  const backdrop = document.getElementById("modalBackdrop"), box = document.getElementById("modalBox");
+  let i = 0, sent = 0;
+  const draw = () => {
+    const it = items[i];
+    if (!it) { box.innerHTML = `<h3>✅ დასრულდა<button class="close" id="modalClose">✕</button></h3><div class="rc-q-done">მიეწერა: <b>${sent}</b> / ${items.length}</div><div class="hub-row"><button class="btn" id="rcQEnd">დახურვა</button></div>`; document.getElementById("modalClose").onclick = end; document.getElementById("rcQEnd").onclick = end; return; }
+    const text = recTplText(tpl, it);
+    box.innerHTML = `<h3>💬 WhatsApp რიგი <small>${i + 1}/${items.length}</small><button class="close" id="modalClose">✕</button></h3>
+      <div class="rc-q-bar"><u style="width:${Math.round(i / items.length * 100)}%"></u></div>
+      <div class="rc-q-card"><b>${esc(it.name)}</b><div>${esc(it.phone_pretty || it.phone)}</div><div class="rc-msgtxt">${esc(text)}</div></div>
+      <div class="hub-row"><button class="btn" id="rcQGo">💬 გახსნა WhatsApp-ში → მივწერე</button></div>
+      <div class="hub-row"><button class="btn secondary" id="rcQSkip">გამოტოვება</button><button class="btn secondary" id="rcQCopy">📋 ტექსტი</button></div>`;
+    document.getElementById("modalClose").onclick = end;
+    document.getElementById("rcQSkip").onclick = () => { i += 1; draw(); };
+    document.getElementById("rcQCopy").onclick = () => (window.shCopy ? window.shCopy(text, "📋 ტექსტი დაკოპირდა") : toast(text));
+    document.getElementById("rcQGo").onclick = async () => {
+      hubOpenLink(`https://wa.me/${(it.phone || "").replace(/\D/g, "")}?text=${encodeURIComponent(text)}`);
+      try { await recMark([it.recruit_id], "whatsapp", kind); sent += 1; } catch (e) { toast(e.message || "შეცდომა"); }
+      i += 1; draw();
+    };
+  };
+  const end = () => { closeDetail(); state.rec.sel = new Set(); state.rec.selMode = false; recRefreshCal(); };
+  backdrop.hidden = false; backdrop.onclick = (e) => { if (e.target === backdrop) end(); };
+  draw();
+}
+async function recRefreshCal() { const c = state.rec.cal; if (c) { await recLoadCal(); } }
+
 function recActiveFilters() { const r = state.rec; return Object.keys(REC_F0).filter((k) => k !== "state" && k !== "sort" && k !== "q" && k !== "iv_date" && r.f[k] !== REC_F0[k]).length + (r.f.state !== "active" ? 1 : 0) + (r.f.sort !== "new" ? 1 : 0); }
 function recFiltersHtml() {
   const r = state.rec, f = r.f, fx = (r.list && r.list.facets) || { stage: {}, state: {}, flag: {}, call: {} }, stages = (r.home || {}).stages || {}, calls = (r.home || {}).call_status || {};
@@ -6153,7 +6234,7 @@ async function recDoCall(id, status) {
   try {
     await recPost(id, { call_status: status });
     toast({ confirmed: "✅ მოდის", declined: "❌ არ მოდის", no_contact: "📵 ვერ დაუკავშირდით", repeat: "🔁 განმეორებითი ზარი" }[status] || "შენახულია");
-    state.rec.list = null; state.rec.cal = null; state.rec.stats = null; await recLoadHome(); recDraw();
+    state.rec.list = null; state.rec.cal = null; state.rec.stats = null; state.rec.sel = new Set(); state.rec.selMode = false; await recLoadHome(); recDraw();
   } catch (e) { toast(e.message || "შეცდომა"); }
 }
 function recBind(root) {
@@ -6165,17 +6246,44 @@ function recBind(root) {
   root.querySelectorAll("[data-rc-flag]").forEach((b) => { b.onclick = () => setF("flag", r.f.flag === b.dataset.rcFlag ? "" : b.dataset.rcFlag); });
   root.querySelectorAll("[data-rc-dial]").forEach((a) => { a.onclick = (e) => { e.preventDefault(); e.stopPropagation(); recDial(a.dataset.rcDial); }; });
   root.querySelectorAll("[data-rc-day]").forEach((b) => { b.onclick = () => { hubHaptic(); recLoadDay(b.dataset.rcDay); }; });
-  const shift = (days) => { const c = r.cal, d = new Date(c.from + "T00:00:00"); d.setDate(d.getDate() + days); c.from = hubIso(d); c.sel = hubIso(new Date(d.getTime() + 86400000)); recLoadCal(); };
+  const shift = (days) => { const c = r.cal, d = new Date(c.from + "T00:00:00"); c.span = 14; d.setDate(d.getDate() + days); c.from = hubIso(d); c.sel = hubIso(new Date(d.getTime() + 86400000)); recLoadCal(); };
   const cp = root.querySelector("#rcCalPrev"); if (cp) cp.onclick = () => shift(-7);
   const cn = root.querySelector("#rcCalNext"); if (cn) cn.onclick = () => shift(7);
   const ct = root.querySelector("#rcCalToday"); if (ct) ct.onclick = () => { r.cal.from = ""; r.cal.sel = ""; recLoadCal(); };
+  const rf = root.querySelector("#rcRangeFrom"), rt = root.querySelector("#rcRangeTo");
+  const rangeGo = () => { if (!rf.value || !rt.value) return; const a = new Date(rf.value + "T00:00:00"), b = new Date(rt.value + "T00:00:00"); const n = Math.max(1, Math.min(62, Math.round((b - a) / 86400000) + 1)); r.cal.from = rf.value; r.cal.span = n; r.cal.sel = rf.value; recLoadCal(); };
+  if (rf) rf.onchange = rangeGo; if (rt) rt.onchange = rangeGo;
   const cj = root.querySelector("#rcCalJump"); if (cj) cj.onchange = () => { if (!cj.value) return; const d = new Date(cj.value + "T00:00:00"); d.setDate(d.getDate() - 1); r.cal.from = hubIso(d); r.cal.sel = cj.value; recLoadCal(); };
   const pb = root.querySelector("#rcPanelBtn"); if (pb) pb.onclick = () => { r.panel = !r.panel; recPaintList(); };
   const cl = root.querySelector("#rcClear"); if (cl) cl.onclick = () => { const q = r.f.q; r.f = Object.assign({}, REC_F0, { q }); recLoadList(true); };
   [["rcfCall", "call"], ["rcfIv", "iv"], ["rcfAdded", "added"], ["rcfExp", "exp"], ["rcfTrain", "train"], ["rcfInter", "inter"], ["rcfSource", "source"], ["rcfSort", "sort"]].forEach(([id, k]) => { const e = root.querySelector("#" + id); if (e) e.onchange = () => setF(k, e.value); });
   [["rcfAgeMin", "age_min"], ["rcfAgeMax", "age_max"]].forEach(([id, k]) => { const e = root.querySelector("#" + id); if (e) e.onchange = () => setF(k, e.value.replace(/\D/g, "").slice(0, 2)); });
   const dd = root.querySelector("#rcfIvDate"); if (dd) dd.onchange = () => setF("iv_date", dd.value);
-  root.querySelectorAll("[data-rc-open]").forEach((c) => { c.onclick = (e) => { if (e.target.closest("[data-rc-stop]")) return; recOpen(c.dataset.rcOpen); }; });
+  root.querySelectorAll("[data-rc-open]").forEach((c) => { c.onclick = (e) => {
+    if (e.target.closest("[data-rc-stop]")) return;
+    if (r.selMode) { const id = c.dataset.rcOpen; if (r.sel.has(id)) r.sel.delete(id); else r.sel.add(id); hubHaptic(); recDraw(); return; }
+    recOpen(c.dataset.rcOpen);
+  }; });
+  root.querySelectorAll("[data-rc-cls]").forEach((b) => { b.onclick = () => { r.cal.cls = b.dataset.rcCls; recDraw(); }; });
+  const st = root.querySelector("#rcSelToggle"); if (st) st.onclick = async () => { r.selMode = !r.selMode; r.sel = new Set(); if (r.selMode) await recLoadTpls(); recDraw(); };
+  const sa = root.querySelector("#rcSelAll"); if (sa) sa.onclick = () => { const f = r.cal.cls || ""; ((r.cal.day || {}).interviews || []).filter((x) => !f || x.cls === f).forEach((x) => r.sel.add(x.recruit_id)); recDraw(); };
+  const sm = root.querySelector("#rcSelTodo"); if (sm) sm.onclick = () => { r.sel = new Set(((r.cal.day || {}).interviews || []).filter((x) => x.cls === "to_message").map((x) => x.recruit_id)); recDraw(); };
+  const sn = root.querySelector("#rcSelNone"); if (sn) sn.onclick = () => { r.sel = new Set(); recDraw(); };
+  const bt = root.querySelector("#rcBulkTpl"); if (bt) bt.onchange = () => { r.bulkTpl = bt.value; recDraw(); };
+  const bx = root.querySelector("#rcBulkText"); if (bx) bx.oninput = () => { r.bulkText = bx.value; };
+  const bw = root.querySelector("#rcBulkWa"); if (bw) bw.onclick = recQueueOpen;
+  const bs = root.querySelector("#rcBulkSms"); if (bs) bs.onclick = async () => {
+    const its = recSelItems().filter((x) => x.phone); if (!its.length) return;
+    const body = encodeURIComponent(recTplText(recBulkText(), its[0]).replace(its[0].name.split(/\s+/)[0], ""));
+    window.location.href = `sms:${its.map((x) => x.phone).join(",")}?&body=${body}`;
+    if (confirm("მიწერე? „მივწერე“-დ აღვნიშნო ყველა არჩეული?")) { try { await recMark(its.map((x) => x.recruit_id), "sms", r.bulkTpl); toast("✅ მონიშნულია"); r.sel = new Set(); r.selMode = false; recRefreshCal(); } catch (e) { toast(e.message || "შეცდომა"); } }
+  };
+  const bn = root.querySelector("#rcBulkCopyNums"); if (bn) bn.onclick = () => { const t = recSelItems().map((x) => x.phone).filter(Boolean).join("\n"); window.shCopy ? window.shCopy(t, "📋 ნომრები დაკოპირდა (" + t.split("\n").length + ")") : toast(t); };
+  const bc = root.querySelector("#rcBulkCopyTxt"); if (bc) bc.onclick = () => { const its = recSelItems(); const t = recBulkText(); window.shCopy ? window.shCopy(its.length === 1 ? recTplText(t, its[0]) : t, "📋 ტექსტი დაკოპირდა") : toast(t); };
+  const bm = root.querySelector("#rcBulkMark"); if (bm) bm.onclick = async () => {
+    const ids = recSelIds(); if (!ids.length) return;
+    try { const d = await recMark(ids, "other", r.bulkTpl); toast(`✅ მივწერე: ${d.marked}`); r.sel = new Set(); r.selMode = false; recRefreshCal(); } catch (e) { toast(e.message || "შეცდომა"); }
+  };
   root.querySelectorAll("[data-rc-call]").forEach((b) => { b.onclick = (e) => { e.stopPropagation(); recDoCall(b.dataset.id, b.dataset.rcCall); }; });
   const q = document.getElementById("rcQ"); if (q) { let t; q.oninput = () => { clearTimeout(t); t = setTimeout(() => { r.f.q = q.value.trim(); recLoadList(true); }, 350); }; }
   const more = document.getElementById("rcMore"); if (more) more.onclick = () => { r.page += 1; recLoadList(false); };
@@ -6215,7 +6323,7 @@ function recAddForm() {
     if (!g("rcaName")) throw new Error("სახელი სავალდებულოა");
     const fields = { name: g("rcaName"), phone: g("rcaPhone"), age: g("rcaAge"), interview_at: recDtOut(g("rcaIv")), comment: g("rcaNote") };
     await api("/api/recruit", { method: "POST", body: JSON.stringify({ fields }) });
-    closeDetail(); toast("✅ დაემატა"); state.rec.list = null; state.rec.cal = null; state.rec.stats = null; await recLoadHome(); recDraw();
+    closeDetail(); toast("✅ დაემატა"); state.rec.list = null; state.rec.cal = null; state.rec.stats = null; state.rec.sel = new Set(); state.rec.selMode = false; await recLoadHome(); recDraw();
   });
   return box;
 }
@@ -6282,7 +6390,7 @@ async function recOpen(id) {
   box.querySelectorAll("[data-rc-copy]").forEach((b) => { b.onclick = () => (window.shCopy ? window.shCopy(d.templates[b.dataset.rcCopy], "📋 ტექსტი დაკოპირდა") : toast(d.templates[b.dataset.rcCopy])); });
   box.querySelectorAll("[data-rc-wa]").forEach((b) => { b.onclick = () => hubOpenLink(`https://wa.me/${digits}?text=${encodeURIComponent(d.templates[b.dataset.rcWa])}`); });
   box.querySelectorAll("[data-rc-setcall]").forEach((b) => { b.onclick = async () => {
-    try { await recPost(id, { call_status: b.dataset.rcSetcall }); toast("✅ შენახულია"); state.rec.list = null; state.rec.cal = null; state.rec.stats = null; await recLoadHome(); recDraw(); recOpen(id); }
+    try { await recPost(id, { call_status: b.dataset.rcSetcall }); toast("✅ შენახულია"); state.rec.list = null; state.rec.cal = null; state.rec.stats = null; state.rec.sel = new Set(); state.rec.selMode = false; await recLoadHome(); recDraw(); recOpen(id); }
     catch (e) { toast(e.message || "შეცდომა"); } }; });
   box.querySelectorAll(".rc-qd button").forEach((b) => { b.onclick = (e) => {
     e.preventDefault();
@@ -6302,7 +6410,7 @@ async function recOpen(id) {
     Object.keys(ch).forEach((k) => { if (String(ch[k] || "") !== String(k === "interview_at" || k === "training_at" ? (it[k] || "") : (it[k] || ""))) changes[k] = ch[k]; });
     if (!Object.keys(changes).length) { toast("ცვლილება არ არის"); return; }
     save.disabled = true;
-    try { await recPost(id, changes); hubHaptic("ok"); toast("✅ შენახულია"); closeDetail(); state.rec.list = null; state.rec.cal = null; state.rec.stats = null; await recLoadHome(); recDraw(); }
+    try { await recPost(id, changes); hubHaptic("ok"); toast("✅ შენახულია"); closeDetail(); state.rec.list = null; state.rec.cal = null; state.rec.stats = null; state.rec.sel = new Set(); state.rec.selMode = false; await recLoadHome(); recDraw(); }
     catch (e) { toast(e.message || "შეცდომა"); save.disabled = false; }
   };
 }
@@ -6351,6 +6459,7 @@ async function renderAi(content) {
 /* ---------------------------------------------------------------- ჩატი */
 function aiBubble(m, i) {
   if (m.role === "user") return `<div class="ai-msg user">${aiFmt(m.text)}</div>`;
+  if (m.typing) return `<div class="ai-msg bot ai-typing"><span class="ai-dots"><i></i><i></i><i></i></span></div>`;
   const cls = AI_TYPE_CLS[m.answer_type] || "gray";
   const src = (m.sources || []).map((s) => `<span class="ai-src">📎 ${esc(s.title || s.kb_id)}${s.version ? " · v" + esc(s.version) : ""}${s.effective_from ? " · " + esc(s.effective_from) : ""}</span>`).join("");
   const fb = m.fb ? `<span class="muted">${m.fb === "up" ? "👍 მადლობა" : "✅ უკუკავშირი მივიღეთ"}</span>`
@@ -6358,7 +6467,7 @@ function aiBubble(m, i) {
   const esc2 = m.escalated ? `<span class="muted">✅ მენეჯერს გადაეგზავნა</span>` : (m.msg_id ? `<button class="ai-act strong" data-aiesc="${i}">👤 მენეჯერს გადაუგზავნე</button>` : "");
   const reasons = m.askReason ? `<div class="chip-row">${AI_REASONS.map(([k, l]) => `<button class="chip" data-aireason="${i}:${k}">${l}</button>`).join("")}</div>` : "";
   return `<div class="ai-msg bot ${m.error ? "err" : ""}">${m.label ? `<div class="badge ${cls} ai-label">${esc(m.label)}</div>` : ""}<div>${aiFmt(m.text)}</div>
-    ${src ? `<div class="ai-srcs">${src}</div>` : ""}${(m.actions || []).map((a, j) => aiActionCard(a, i, j)).join("")}${m.msg_id ? `<div class="ai-acts">${fb}${esc2}</div>` : ""}${reasons}</div>`;
+    ${(m.widgets || []).map((w, j) => aiWidget(w, i, j)).join("")}${src ? `<div class="ai-srcs">${src}</div>` : ""}${(m.actions || []).map((a, j) => aiActionCard(a, i, j)).join("")}${m.msg_id ? `<div class="ai-acts">${fb}${esc2}</div>` : ""}${reasons}</div>`;
 }
 
 function aiChat(body) {
@@ -6368,28 +6477,29 @@ function aiChat(body) {
     return;
   }
   const draft = (document.getElementById("aiText") || {}).value || "";
-  const msgs = ai.msgs.map(aiBubble).join("") || `<div class="ai-hello">გამარჯობა, მე SAIRO ვარ 🦸 დამისვით კითხვა კომპანიის წესების, პროცედურების, CRM-ის, თქვენი KPI/შეხვედრების/დავალებების ან კლიენტების რისკების შესახებ; შემიძლია follow-up-ის ან გუნდისთვის შეტყობინების მომზადება — შესრულებამდე თქვენი დადასტურება დაგჭირდებათ. ვპასუხობ ქართულად, რუსულად ან ინგლისურად. რასაც დამტკიცებული წყაროთი ვერ დავადასტურებ, პირდაპირ გეტყვით.</div>`;
-  body.innerHTML = `<div class="card ai-chat">
-    <div class="ai-top"><b>🦸 SAIRO</b><span class="muted">${esc(a.used_today || 0)}/${a.daily_limit ? esc(a.daily_limit) : "∞"} დღეს</span><button class="chip" id="aiNew" title="ახალი საუბარი">🆕</button><button class="chip" id="aiHist" title="ჩემი საუბრები">🕘</button></div>
-    <div id="aiHistBox"></div><div class="ai-msgs" id="aiMsgs">${msgs}</div>
+  const msgs = ai.msgs.map(aiBubble).join("") || `<div class="ai-hello">გამარჯობა, მე SAIRO ვარ 🦸 დამისვით კითხვა კომპანიის წესების, პროცედურების, CRM-ის, თქვენი KPI/შეხვედრების/დავალებების ან კლიენტების რისკების შესახებ; შემიძლია follow-up-ის ან გუნდისთვის შეტყობინების მომზადება — შესრულებამდე თქვენი დადასტურება დაგჭირდებათ. ვპასუხობ ქართულად, რუსულად ან ინგლისურად. კადრებზე და (დირექტორს) ფინანსებზეც შემიძლია კითხვაზე პასუხი ბარათებით/დიაგრამებით, ჩანაწერის განახლების მომზადება და ნებისმიერ განყოფილებაზე გადაყვანა. რასაც დამტკიცებული წყაროთი ვერ დავადასტურებ, პირდაპირ გეტყვით.</div>`;
+  body.innerHTML = `<div class="card ai-chat" data-theme="${esc(aiTheme())}">
+    <div class="ai-top"><b>🦸 SAIRO</b><span class="muted">${esc(a.used_today || 0)}/${a.daily_limit ? esc(a.daily_limit) : "∞"} დღეს</span><button class="chip" id="aiTheme" title="თემა">🎨</button><button class="chip" id="aiNew" title="ახალი საუბარი">🆕</button><button class="chip" id="aiHist" title="ჩემი საუბრები">🕘</button></div>
+    <div id="aiHistBox"></div><div class="ai-msgs" id="aiMsgs">${msgs}</div>${ai.msgs.length ? "" : aiSuggest()}
     <div class="ai-input"><textarea id="aiText" rows="2" maxlength="${esc(a.max_question_chars || 1500)}" placeholder="დაწერეთ კითხვა…"></textarea><button class="btn" id="aiSend" ${ai.busy ? "disabled" : ""}>➤</button></div>
     <div class="muted ai-note">პასუხი კომპანიის წესად ითვლება მხოლოდ 📘 ნიშნით და წყაროთი. კლიენტის/მესაკუთრის ტელეფონს ნუ ჩაწერთ.</div></div>`;
   document.getElementById("aiText").value = draft || ai.prefill || "";
   ai.prefill = "";
   aiScroll();
   aiBindActions(body);
+  aiBindWidgets(body);
   aiLoadPending(body);
 
   const send = async () => {
     const ta = document.getElementById("aiText"); const text = (ta.value || "").trim();
     if (!text || ai.busy) return;
     ai.msgs.push({ role: "user", text });
-    ai.msgs.push({ role: "assistant", text: "⏳ ვფიქრობ…" });
+    ai.msgs.push({ role: "assistant", text: "", typing: true });
     ai.busy = true; ta.value = ""; aiChat(body);
     try {
       const r = await api("/api/ai/ask", { method: "POST", body: JSON.stringify({ text, conv_id: ai.conv }) });
       ai.conv = r.conv_id; ai.msgs.pop();
-      ai.msgs.push({ role: "assistant", text: r.answer + (r.error_kind ? `\n\n🔧 ადმინისთვის: ${r.error_kind}${r.error_detail ? " — " + r.error_detail : ""}` : ""), answer_type: r.answer_type, label: r.label, sources: r.sources, msg_id: r.msg_id, q: text, error: !!r.degraded, actions: r.actions || [] });
+      ai.msgs.push({ role: "assistant", text: r.answer + (r.error_kind ? `\n\n🔧 ადმინისთვის: ${r.error_kind}${r.error_detail ? " — " + r.error_detail : ""}` : ""), answer_type: r.answer_type, label: r.label, sources: r.sources, msg_id: r.msg_id, q: text, error: !!r.degraded, actions: r.actions || [], widgets: r.widgets || [] });
       if (state.aiAccess && r.usage) state.aiAccess.used_today = r.usage.used_today;
     } catch (e) {
       ai.msgs.pop();
@@ -6398,6 +6508,11 @@ function aiChat(body) {
     ai.busy = false; aiChat(body);
   };
   document.getElementById("aiSend").onclick = send;
+  body.querySelectorAll("[data-aisugg]").forEach((b) => { b.onclick = () => { document.getElementById("aiText").value = b.dataset.aisugg; send(); }; });
+  document.getElementById("aiTheme").onclick = () => {
+    const ids = AIW_THEMES.map((t) => t[0]), nx = ids[(ids.indexOf(aiTheme()) + 1) % ids.length];
+    aiSetTheme(nx); const c = body.querySelector(".ai-chat"); if (c) c.dataset.theme = nx; toast(AIW_THEMES.find((t) => t[0] === nx)[1]);
+  };
   document.getElementById("aiText").onkeydown = (e) => { if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) send(); };
   document.getElementById("aiNew").onclick = () => { ai.conv = ""; ai.msgs = []; aiChat(body); };
   document.getElementById("aiHist").onclick = async () => {
@@ -6454,16 +6569,16 @@ function aiActionCard(a, i, j) {
   if (a.state === "failed") return `<div class="ai-act-card done err"><b>${esc(a.title)}</b><div>⚠️ ვერ შესრულდა: ${aiFmt(a.stateText || "სცადეთ ხელახლა — სთხოვეთ SAIRO-ს ახალი ბარათი")}</div></div>`;
   if (a.state === "cancelled") return `<div class="ai-act-card done"><b>${esc(a.title)}</b><div class="muted">✖ გაუქმდა</div></div>`;
   if (a.state === "expired") return `<div class="ai-act-card done"><b>${esc(a.title)}</b><div class="muted">⌛ დადასტურების ვადა გავიდა — სთხოვეთ SAIRO-ს ხელახლა</div></div>`;
-  const ed = a.editable || {};
-  const fields = a.type === "followup_create"
+  const ed = a.editable || {}, isRec = a.type === "recruit_update";
+  const fields = isRec ? "" : a.type === "followup_create"
     ? `<label>ვადა<input type="date" data-aiact-f="due_at" value="${esc(ed.due_at || "")}"></label><label>რა უნდა გაკეთდეს<input data-aiact-f="next_action" maxlength="500" value="${esc(ed.next_action || "")}"></label>`
     : `<label>ტექსტი<textarea rows="4" data-aiact-f="text" maxlength="800">${esc(ed.text || "")}</textarea></label>`;
-  return `<div class="ai-act-card" data-aicard="${k}"><div class="ai-act-h"><b>${esc(a.title)}</b>${a.external ? `<span class="badge amber">📤 გარე შეტყობინება</span>` : `<span class="badge gray">ჩანაწერი CRM-ში</span>`}</div>
+  return `<div class="ai-act-card" data-aicard="${k}"><div class="ai-act-h"><b>${esc(a.title)}</b>${a.external ? `<span class="badge amber">📤 გარე შეტყობინება</span>` : `<span class="badge gray">${isRec ? "ჩანაწერი კადრებში" : "ჩანაწერი CRM-ში"}</span>`}</div>
     <div class="ai-act-r"><span class="muted">ვის ეხება:</span> ${esc(a.who)}</div>
-    <div class="ai-act-r"><span class="muted">რას გააკეთებს:</span><br>${aiFmt(a.what)}</div>
+    <div class="ai-act-r"><span class="muted">რას გააკეთებს:</span><br>${isRec ? aiDiffs(a) : aiFmt(a.what)}</div>
     <div class="ai-act-r"><span class="muted">რა მონაცემს იყენებს:</span> ${(a.uses || []).map(esc).join(" · ")}</div>
     <div class="ai-act-r"><span class="muted">რა შედეგს ელოდება:</span> ${esc(a.effect)}</div>
-    <details class="ai-act-edit"><summary>✏️ შეცვლა</summary><div class="ai-form">${fields}<button class="btn secondary" data-aiact="revise:${k}">განახლება (ახალი ბარათი)</button></div></details>
+    ${isRec ? "" : `<details class="ai-act-edit"><summary>✏️ შეცვლა</summary><div class="ai-form">${fields}<button class="btn secondary" data-aiact="revise:${k}">განახლება (ახალი ბარათი)</button></div></details>`}
     <div class="ai-btns"><button class="btn" data-aiact="confirm:${k}">✅ დადასტურება</button><button class="btn danger" data-aiact="cancel:${k}">✖ გაუქმება</button></div>
     <div class="muted ai-note">შესრულდება მხოლოდ თქვენი დადასტურების შემდეგ (ვადა ${esc(String(a.expires_at || "").slice(11, 16))}-მდე).</div></div>`;
 }
@@ -6493,6 +6608,7 @@ function aiBindActions(body) {
           const r = await api(base + "/confirm", { method: "POST", body: JSON.stringify({ hash: a.hash }) });
           a.state = r.status === "executed" ? "done" : "failed"; a.stateText = (r.result && r.result.text) || "";
           if (a.type === "followup_create") delete lazyCache.crm2;
+          if (a.type === "recruit_update") { const rr = state.rec; rr.list = null; rr.cal = null; rr.stats = null; rr.home = null; }
         } else if (act === "cancel") {
           await api(base + "/cancel", { method: "POST", body: "{}" }); a.state = "cancelled";
         } else {
@@ -6521,6 +6637,128 @@ async function aiLoadPending(body) {
       if (state.tab[state.role] === "ai" && ai.sub === "chat") aiChat(body);
     }
   } catch (e) { /* მხოლოდ დამატებითი ინფორმაციაა */ }
+}
+
+/* ---------------------------------------------------------------- SAIRO ვიჯეტები: ბარათები და დიაგრამები პასუხთან ერთად, იმავე დიზაინით (მონაცემი სერვერზე უფლებებით იფილტრება; აქ მხოლოდ ჩვენებაა) */
+const AIW_THEMES = [["gold", "🥇 ოქროსფერი"], ["ocean", "🌊 ოკეანე"], ["forest", "🌲 ტყე"], ["sunset", "🌇 მზის ჩასვლა"], ["violet", "🔮 იისფერი"]];
+function aiTheme() { try { const t = localStorage.getItem("sairoTheme"); return AIW_THEMES.some((x) => x[0] === t) ? t : "gold"; } catch (e) { return "gold"; } }
+function aiSetTheme(t) { try { localStorage.setItem("sairoTheme", t); } catch (e) { /* ignore */ } }
+function aiSuggest() {
+  const r = state.recAccess || {}, f = state.finAccess || {}, list = [];
+  if (r.can_view) list.push("დღეს რამდენი გასაუბრება მაქვს?", "ხვალ ვინ უნდა დავადასტურო?", "კადრების ვორონკა ბოლო 30 დღეში");
+  if (f.allowed) list.push("ამ თვის ფინანსები", "რა ვადები იწურება ხელშეკრულებებზე?");
+  list.push("რა რისკები მაქვს კლიენტებზე?", "როგორია ჩემი KPI?");
+  return `<div class="chip-row ai-sugg">${list.slice(0, 6).map((t) => `<button class="chip" data-aisugg="${esc(t)}">${esc(t)}</button>`).join("")}</div>`;
+}
+/* ნავიგაცია: ნებისმიერ განყოფილებაზე (მხოლოდ იმ ტაბებზე, რომლებიც ამ მომხმარებლის ხედშია) */
+function aiGo(sid, view, date) {
+  const tabs = tabsFor(state.role);
+  if (!tabs.some((t) => t.id === sid)) { toast("ეს განყოფილება თქვენს ხედში არ არის"); return false; }
+  state.tab[state.role] = sid;
+  if (sid === "recruit") {
+    const r = state.rec;
+    r.view = ["today", "cal", "all", "stats"].includes(view) ? view : "today";
+    if (r.view === "cal" && date) { const d = new Date(date + "T00:00:00"); d.setDate(d.getDate() - 1); r.cal = { from: hubIso(d), days: [], sel: date, day: null }; }
+  }
+  hubHaptic();
+  renderContent();
+  return true;
+}
+function aiDiffs(a) {
+  return `<div class="ai-diffs">${(a.diffs || []).map((d) => `<div class="ai-diff"><span>${esc(d.label)}</span><s>${esc(d.old)}</s><i>→</i><b>${esc(d["new"])}</b></div>`).join("")}${a.stage_after ? `<div class="muted">ეტაპი: ${esc(a.stage_after)}</div>` : ""}${a.closing ? `<div class="ai-diff warn">🔒 კანდიდატი დაიხურება</div>` : ""}</div>`;
+}
+function aiwCand(x, labels, field) {
+  const lbl = (labels || {})[x.cls] || "", at = field ? String(x[field] || "").slice(5, 16) : [x.interview_day, x.interview_time].filter(Boolean).join(" ");
+  return `<div class="aiw-cand" data-rc-open="${esc(x.recruit_id)}"><div class="aiw-c1"><b>${esc(x.name)}</b>${x.cls && lbl ? `<span class="rc-cl-mini c-${esc(x.cls)}">${esc(lbl)}</span>` : ""}</div>
+    <div class="aiw-c2">${at ? `<span class="rc-iv">🗓 ${esc(at)}</span>` : ""}${recTel(x)}</div></div>`;
+}
+function aiwTile(label, value, tone) { return `<div class="aiw-tile ${tone ? "t-" + esc(tone) : ""}"><b>${value}</b><span>${esc(label)}</span></div>`; }
+function aiwRecDay(w) {
+  const order = w.class_order || [], L = w.class_labels || {}, g = w.groups || {}, items = w.items || [], total = items.length, can = !!(state.recAccess || {}).can_edit;
+  const shown = items.filter((x) => !w.filter || x.cls === w.filter), todo = items.filter((x) => x.cls === "to_message" || x.cls === "pending");
+  const bar = total ? `<div class="aiw-stack">${order.filter((k) => g[k]).map((k) => `<i class="aiw-seg c-${k}" style="--w:${(g[k] / total * 100).toFixed(1)}%" title="${esc(L[k] || k)}"></i>`).join("")}</div>`
+    + `<div class="rc-cls">${order.filter((k) => g[k]).map((k) => `<span class="rc-cl c-${k}"><b data-aiw-count="${g[k]}">${g[k]}</b>${esc(L[k] || k)}</span>`).join("")}</div>` : `<div class="empty">ამ დღეს გასაუბრება არ არის</div>`;
+  const tr = (w.trainings || []).length ? `<div class="aiw-sub">🎓 ტრენინგი <span class="cnt">${w.trainings.length}</span></div>${w.trainings.slice(0, 8).map((x) => aiwCand(x, null, "training_at")).join("")}` : "";
+  const ot = [["internship", "🧪 სტაჟირება იწყება"], ["staffed", "🏢 ჩაშტატდა"], ["left", "🚪 წავიდა"]].filter(([k]) => (w[k] || []).length).map(([k, l]) => `<div class="aiw-sub">${l} <span class="cnt">${w[k].length}</span></div>${w[k].slice(0, 6).map((x) => aiwCand(x, null, null)).join("")}`).join("");
+  return `<div class="aiw-h"><b>🗓 გასაუბრებები — ${esc(w.date)}</b><span class="aiw-big"><span data-aiw-count="${total}">${total}</span><small> კაცი</small></span></div>${bar}
+    ${shown.slice(0, 12).map((x) => aiwCand(x, L)).join("")}${shown.length > 12 ? `<div class="muted">… კიდევ ${shown.length - 12} — იხილეთ კალენდარში</div>` : ""}${tr}${ot}
+    <div class="aiw-btns"><button class="btn secondary" data-aiw-go="recruit|cal|${esc(w.date)}">📅 კალენდარში</button>${can && todo.length ? `<button class="btn" data-aiw-queue="1">💬 დასაწერები (${todo.length})</button>` : ""}</div>`;
+}
+function aiwRecRange(w) {
+  const days = w.days || [], order = w.class_order || [], L = w.class_labels || {}, tot = w.totals || {}, all = order.reduce((s, k) => s + (tot[k] || 0), 0), max = Math.max(1, ...days.map((d) => d.interviews.total));
+  const cols = days.map((d) => { const t = d.interviews.total; return `<button class="aiw-col" data-aiw-go="recruit|cal|${esc(d.date)}" title="${esc(d.date)}"><b>${t || ""}</b><span class="aiw-colwrap"><span class="aiw-colbar" style="--h:${(t / max * 100).toFixed(1)}%">${order.filter((k) => (d.classes || {})[k]).map((k) => `<i class="aiw-vseg c-${k}" style="flex:${d.classes[k]}"></i>`).join("")}</span></span><small>${d.day}</small><em>${esc(d.weekday)}</em>${d.trainings.total ? `<u>🎓${d.trainings.total}</u>` : ""}</button>`; }).join("");
+  return `<div class="aiw-h"><b>📊 ${esc(w.from)} — ${esc(w.to)}</b><span class="aiw-big"><span data-aiw-count="${all}">${all}</span><small> გასაუბრება</small></span></div>
+    <div class="aiw-cols">${cols}</div><div class="rc-cls" style="margin-top:8px">${order.filter((k) => tot[k]).map((k) => `<span class="rc-cl c-${k}"><b data-aiw-count="${tot[k]}">${tot[k]}</b>${esc(L[k] || k)}</span>`).join("")}</div>
+    <div class="aiw-btns"><button class="btn secondary" data-aiw-go="recruit|cal|${esc(w.from)}">📅 კალენდარში</button></div>`;
+}
+function aiwRecList(w) {
+  const items = w.items || [];
+  return `<div class="aiw-h"><b>${esc(w.title || "👥 კანდიდატები")}</b><span class="aiw-big"><span data-aiw-count="${items.length}">${items.length}</span></span></div>${items.map((x) => aiwCand(x, null, null)).join("") || `<div class="empty">ვერავინ მოიძებნა</div>`}`;
+}
+function aiwRecStats(w) {
+  const s = w.stats || {}, stages = w.stages || {}, by = s.by_stage || {}, max = Math.max(1, ...Object.keys(stages).map((k) => by[k] || 0)), cv = s.conv || {};
+  const rows = Object.keys(stages).filter((k) => by[k]).map((k) => `<div class="aiw-hrow"><span>${esc(stages[k])}</span><div class="aiw-htrack"><i style="--w:${((by[k] / max) * 100).toFixed(1)}%"></i></div><b>${by[k]}</b></div>`).join("");
+  return `<div class="aiw-h"><b>📊 ვორონკა — ბოლო ${esc(s.days || 90)} დღე</b><span class="aiw-big"><span data-aiw-count="${s.total || 0}">${s.total || 0}</span><small> კანდიდატი</small></span></div>
+    <div class="aiw-tiles">${aiwTile("დაინიშნა გასაუბრება", (cv.booked == null ? "—" : cv.booked + "%"))}${aiwTile("მოვიდა", (cv.interviewed == null ? "—" : cv.interviewed + "%"))}${aiwTile("ჩაშტატდა", (cv.staffed == null ? "—" : cv.staffed + "%"), "pos")}</div>
+    <div style="margin-top:8px">${rows}</div><details class="aiw-more"><summary>🎓 ტრენინგი, ინტერაქციები, დახურვის მიზეზები</summary>${recTrainingHtml(s)}</details>`;
+}
+function aiwRecQueue(w) {
+  const items = w.items || [];
+  return `<div class="aiw-h"><b>💬 WhatsApp რიგი</b><span class="aiw-big"><span data-aiw-count="${items.length}">${items.length}</span><small> კანდიდატი</small></span></div>
+    <div class="rc-q-card"><div class="rc-msgtxt">${esc(recTplText(w.template, items[0] || {}))}</div></div><div class="muted">${items.slice(0, 5).map((x) => esc(x.name)).join(", ")}${items.length > 5 ? " …" : ""}</div>
+    <div class="aiw-btns"><button class="btn" data-aiw-queue="1">▶ დაწყება (თითო კანდიდატზე ერთი დაჭერა)</button></div><div class="muted" style="font-size:11px;margin-top:6px">WhatsApp ავტომატურ გაგზავნას არ იძლევა — არაფერი გაგზავნილა. „მივწერე“ თავისით აღინიშნება.</div>`;
+}
+function aiwFinance(w) {
+  const s = w.summary || {}, t = s.totals || {}, ds = s.distribution || {};
+  const agents = (w.top_agents || []).map((r) => ({ name: r.name, deals: r.deals, commission: r.commission || 0 }));
+  return `<div class="aiw-h"><b>💰 ფინანსები ${esc(finMoLabel(s.from))} — ${esc(finMoLabel(s.to))}</b></div>
+    <div class="aiw-tiles">${aiwTile("კომპანიის შემოსავალი", finMoney(t.company_income), "gold")}${aiwTile("ხარჯები", finMoney(t.expenses))}${aiwTile("წმინდა მოგება", finMoney(t.profit), finToneClass(t.profit))}
+      ${aiwTile("გარიგება", t.deals || 0)}${aiwTile("საკომისიო", finMoney(t.commission))}${aiwTile("მარჟა", t.margin_pct == null ? "—" : t.margin_pct + "%", finToneClass(t.profit))}</div>
+    <div class="aiw-sub">📈 შემოსავალი / ხარჯი / მოგება</div>${finChart(s.series || [])}
+    <div class="aiw-sub">🥧 განაწილება</div>${finDonut([{ label: "კომპანია", value: ds.company || 0, color: FIN_C.income }, { label: "აგენტები", value: ds.agents || 0, color: FIN_C.agents }, { label: "თიმლიდერები", value: ds.team_leaders || 0, color: FIN_C.tl }])}
+    ${(s.expenses_by_category || []).length ? `<div class="aiw-sub">💸 ხარჯები კატეგორიებით</div>${finBars(s.expenses_by_category.slice(0, 6), "amount", FIN_C.exp)}` : ""}
+    ${agents.length ? `<div class="aiw-sub">🏆 საუკეთესო აგენტები (საკომისიო)</div>${finBars(agents, "commission")}` : ""}
+    <div class="aiw-btns"><button class="btn secondary" data-aiw-go="finance||">💰 ფინანსების განყოფილება</button></div>`;
+}
+function aiwStats(w) {
+  return `<div class="aiw-h"><b>${esc(w.title || "📊")}</b></div><div class="aiw-tiles">${(w.items || []).map((x) => aiwTile(x.label, `<span data-aiw-count="${Number(x.value) || 0}">${Number(x.value) || 0}</span>`, x.tone)).join("")}</div>`;
+}
+function aiwLink(w) { return `<button class="btn aiw-golink" data-aiw-go="${esc(w.section)}|${esc(w.view || "")}|${esc(w.date || "")}">➡️ გახსენი: ${esc(w.label || w.section)}</button>`; }
+function aiWidget(w, i, j) {
+  let h = "";
+  try { h = ({ recruit_day: aiwRecDay, recruit_range: aiwRecRange, recruit_list: aiwRecList, recruit_stats: aiwRecStats, recruit_queue: aiwRecQueue, finance: aiwFinance, stats: aiwStats, link: aiwLink }[w && w.type] || (() => ""))(w); } catch (e) { h = ""; }
+  return h ? `<div class="aiw aiw-${esc(w.type)}" data-aiw="${i}:${j}" style="--i:${j}">${h}</div>` : "";
+}
+function aiwCountUp(el) {
+  const to = Number(el.dataset.aiwCount) || 0;
+  if (to <= 0) return;
+  const t0 = Date.now(), dur = 750;
+  el.textContent = "0";
+  const timer = setInterval(() => {                       // setInterval (და არა rAF): ფონურ ტაბში/ტესტში შედეგი მაინც საბოლოო რიცხვზე მივა
+    const p = Math.min(1, (Date.now() - t0) / dur);
+    el.textContent = String(p >= 1 ? to : Math.round(to * (1 - Math.pow(1 - p, 3))));
+    if (p >= 1) clearInterval(timer);
+  }, 30);
+}
+function aiBindWidgets(body) {
+  const ai = state.ai;
+  body.querySelectorAll(".aiw[data-aiw]").forEach((el) => {
+    const [i, j] = el.dataset.aiw.split(":").map(Number), msg = ai.msgs[i], w = msg && msg.widgets && msg.widgets[j];
+    if (!w) return;
+    el.querySelectorAll("[data-rc-open]").forEach((c) => { c.onclick = async (e) => { if (e.target.closest("[data-rc-stop]")) return; if (!state.rec.home) { try { await recLoadHome(); } catch (err) { /* არჩევანები ნაგულისხმევით */ } } recOpen(c.dataset.rcOpen); }; });
+    el.querySelectorAll("[data-rc-dial]").forEach((a) => { a.onclick = (e) => { e.preventDefault(); e.stopPropagation(); recDial(a.dataset.rcDial); }; });
+    el.querySelectorAll("[data-aiw-go]").forEach((b) => { b.onclick = () => { const p = b.dataset.aiwGo.split("|"); aiGo(p[0], p[1], p[2]); }; });
+    const qb = el.querySelector("[data-aiw-queue]");
+    if (qb) qb.onclick = async () => {
+      let items = w.items || [], tpl = w.template, kind = w.template_key || "confirm";
+      if (w.type === "recruit_day") { items = items.filter((x) => x.cls === "to_message" || x.cls === "pending"); await recLoadTpls(); tpl = (state.rec.tpls || {}).confirm || ""; kind = "confirm"; }
+      if (!items.length) { toast("დასაწერი არავინაა"); return; }
+      recQueueOpen(items, tpl, kind);
+    };
+    const first = !w._seen; w._seen = true;
+    if (first) { setTimeout(() => { void el.offsetWidth; el.classList.add("on"); }, 20); el.querySelectorAll("[data-aiw-count]").forEach(aiwCountUp); }
+    else el.classList.add("on", "instant");
+  });
 }
 
 /* ---------------------------------------------------------------- 🛡️ კლიენტების დაცვა (Lead Protection) */

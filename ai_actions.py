@@ -39,7 +39,7 @@ _backend = SheetsBackend()
 
 S_PROPOSED, S_EXECUTING, S_EXECUTED, S_FAILED, S_CANCELLED, S_EXPIRED = "proposed", "executing", "executed", "failed", "cancelled", "expired"
 MAX_TEXT, MIN_TEXT = 800, 5
-TITLES = {"followup_create": "📌 Follow-up-ის დაგეგმვა", "agent_message": "💬 შეტყობინება აგენტებს"}
+TITLES = {"followup_create": "📌 Follow-up-ის დაგეგმვა", "agent_message": "💬 შეტყობინება აგენტებს", "recruit_update": "🧑‍💼 კადრები — ჩანაწერის განახლება"}
 
 
 def set_backend(b) -> None:
@@ -136,7 +136,36 @@ def _norm_message(viewer: dict, p: dict, agents: list[dict]) -> tuple[dict, str]
     return payload, f"{len(ids)} აგენტი · {text[:90]}"
 
 
-NORMALIZERS = {"followup_create": _norm_followup, "agent_message": _norm_message}
+def _recruit_perm(viewer: dict) -> None:
+    import ai_tools_ext
+    if not ai_tools_ext.perms(viewer)["recruit_edit"]:
+        raise AiError("კადრების ჩანაწერის შეცვლა მხოლოდ დირექტორს/პასუხისმგებელ მენეჯერს შეუძლია", 403, "forbidden")
+
+
+def _recruit_pre(p: dict) -> dict:
+    import recruit_store as rs
+    try:
+        return rs.preview_update(_s(p.get("candidate_id"), 40), p.get("changes") or {})
+    except rs.RecruitError as e:
+        raise AiError(str(e), e.status, getattr(e, "code", "") or "recruit") from None
+    except ValueError as e:
+        raise AiError(str(e)) from None
+
+
+def _norm_recruit(viewer: dict, p: dict, agents: list[dict]) -> tuple[dict, str]:
+    _recruit_perm(viewer)
+    cid = _s(p.get("candidate_id"), 40)
+    raw = p.get("changes") if isinstance(p.get("changes"), dict) else {}
+    if not cid or not raw:
+        raise AiError("კანდიდატი და შესაცვლელი ველები სავალდებულოა")
+    pre = _recruit_pre({"candidate_id": cid, "changes": raw})
+    if not pre["diffs"]:
+        raise AiError("ამ მნიშვნელობებით ჩანაწერში არაფერი იცვლება")
+    payload = {"candidate_id": cid, "changes": pre["clean"], "note": _s(p.get("note"), 300)}
+    return payload, f"{pre['name']} · " + "; ".join(f"{d['label']}: {d['new']}" for d in pre["diffs"][:4])
+
+
+NORMALIZERS = {"followup_create": _norm_followup, "agent_message": _norm_message, "recruit_update": _norm_recruit}
 
 
 # ====================================================================== ბარათი
@@ -154,6 +183,17 @@ def card(row: dict, agents: list[dict] | None = None) -> dict:
                     uses=["კლიენტის ბარათი (სახელი, სტატუსი)", "თქვენი უფლებები"], editable={"due_at": p["due_at"][:10], "next_action": p["next_action"]},
                     what=f"CRM-ში დაემატება follow-up: „{p['next_action']}“, ვადა {p['due_at'][:10]}.",
                     effect="ვადის გადაცილებისას SAIRO შეგახსენებთ, ხოლო დაგვიანებისას მენეჯერს ეცნობება. კლიენტს არაფერი გაეგზავნება.",
+                    external=False)
+    elif typ == "recruit_update":
+        try:
+            pre = _recruit_pre(p)
+        except AiError:
+            pre = {"name": "კანდიდატი", "diffs": [], "stage_before": "", "stage_after": "", "closing": False}
+        import recruit_model as rm
+        base.update(who=pre["name"], uses=["კანდიდატის ჩანაწერი (კადრები)", "თქვენი უფლებები"], editable={}, diffs=pre["diffs"],
+                    stage_after=rm.STAGES.get(pre["stage_after"], pre["stage_after"]), closing=pre["closing"],
+                    what="ჩანაწერში შეიცვლება: " + ("; ".join(f"{d['label']}: {d['old']} → {d['new']}" for d in pre["diffs"]) or "—") + (f". ეტაპი გახდება: {rm.STAGES.get(pre['stage_after'], pre['stage_after'])}" if pre["stage_after"] != pre["stage_before"] else ""),
+                    effect="ცვლილება ჩაიწერება კადრების ისტორიაში თქვენი სახელით („SAIRO-ს მეშვეობით“)." + (" კანდიდატი დაიხურება." if pre["closing"] else "") + " კანდიდატს არაფერი გაეგზავნება.",
                     external=False)
     else:
         names = [_s(by_id.get(a, {}).get("name")) or a for a in p.get("recipients", [])]
@@ -213,7 +253,7 @@ def revise(viewer: dict, action_id: str, changes: dict, agents: list[dict], now:
         if _s(r.get("status")) != S_PROPOSED:
             raise AiError("შეცვლა შესაძლებელია მხოლოდ დადასტურებამდე", 409, "not_revisable")
         p = json.loads(r.get("payload") or "{}")
-        allowed = {"followup_create": ("due_at", "next_action"), "agent_message": ("text", "recipients")}[_s(r.get("type"))]
+        allowed = {"followup_create": ("due_at", "next_action"), "agent_message": ("text", "recipients"), "recruit_update": ("note",)}[_s(r.get("type"))]
         merged = dict(p, **{k: v for k, v in (changes or {}).items() if k in allowed})
         new = propose(viewer, _s(r.get("type")), merged, agents, now)
         _backend.update_many(SHEET, HEADERS, {r["action_id"]: {"status": S_CANCELLED, "decided_at": (now or m.now_dt()).strftime("%Y-%m-%d %H:%M:%S"), "result": json.dumps({"superseded_by": new["action_id"]})}})
@@ -269,7 +309,23 @@ def _exec_message(viewer: dict, row: dict, p: dict, agents: list[dict], deps: di
             "text": f"{queued} შეტყობინება რიგშია/გაიგზავნა; ჩავარდა/ვერ მიდის: {len(p['recipients']) - queued}. „მიღებულია“ მხოლოდ Telegram-ის პასუხით დადასტურდება."}
 
 
-EXECUTORS = {"followup_create": _exec_followup, "agent_message": _exec_message}
+def _exec_recruit(viewer: dict, row: dict, p: dict, agents: list[dict], deps: dict) -> dict:
+    import recruit_store as rs
+    _recruit_perm(viewer)                                                            # უფლება შესრულებისას ხელახლა
+    by = {"name": _s(viewer.get("name")) or "დირექტორი", "agent_id": _s(viewer.get("agent_id"))}
+    note = ("SAIRO-ს მეშვეობით, დადასტურებით" + (": " + p["note"] if p.get("note") else ""))[:500]
+    try:
+        r = rs.update(p["candidate_id"], p["changes"], by, comment=note)
+    except rs.RecruitError as e:
+        raise AiError(str(e), e.status, getattr(e, "code", "") or "recruit") from None
+    except ValueError as e:
+        raise AiError(str(e)) from None
+    verified = all(_s(r.get(k)) == _s(v) for k, v in p["changes"].items() if k not in ("phone_raw",))
+    return {"candidate_id": p["candidate_id"], "verified": verified, "stage": rs.m.STAGES.get(_s(r.get("stage")), _s(r.get("stage"))),
+            "text": "ჩანაწერი განახლდა" + ("" if verified else " (გადამოწმებისას ზოგი ველი სხვაგვარია — გახსენით კანდიდატის ბარათი)")}
+
+
+EXECUTORS = {"followup_create": _exec_followup, "agent_message": _exec_message, "recruit_update": _exec_recruit}
 
 
 def confirm(viewer: dict, action_id: str, expect_hash: str, agents: list[dict], deps: dict, now: datetime.datetime | None = None) -> dict:

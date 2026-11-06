@@ -210,6 +210,40 @@ NAMES = {"name": "სახელი", "phone": "ტელეფონი", "age
          "hire": "აგვყავს", "staffed_at": "ჩაშტატება", "left_at": "წასვლა", "left_reason": "წასვლის მიზეზი", "comment": "კომენტარი", "responsible_id": "პასუხისმგებელი"}
 
 
+def _plan(r: dict, ch: dict) -> dict:
+    """ცვლილების გეგმა (ჩაწერის გარეშე): ავტომატური ეტაპი, დახურვის დროშა, მიზეზის მოთხოვნა. `ch` — უკვე გასუფთავებული; აბრუნებს გაფართოებულ ასლს."""
+    ch = dict(ch)
+    merged = dict(r, **ch)
+    if "stage" not in ch:
+        auto = m.infer_stage(merged)
+        order = list(m.STAGES)
+        cur = _s(r.get("stage")) or "new"
+        if auto != cur and (order.index(auto) > order.index(cur) or auto in m.CLOSED_STAGES):
+            ch["stage"] = auto                                  # ავტომატურად მხოლოდ წინ (ან დახურვა); უკან — მხოლოდ ხელით
+    stage = ch.get("stage", _s(r.get("stage")))
+    ch["closed"] = "yes" if stage in m.CLOSED_STAGES else ""
+    if ch["closed"] == "yes" and _s(r.get("closed")) != "yes" and stage != "archive" and not _s(merged.get("left_reason")):
+        # დახურვა მიზეზის გარეშე არ შეიძლება: „ყველას მიზეზი უნდა ვიცოდეთ“
+        raise RecruitError("მიუთითეთ მიზეზი — რატომ იხურება კანდიდატი (მაგ. ანაზღაურება, გრაფიკი, გადაიფიქრა…)", 400, "reason_required")
+    return ch
+
+
+def preview_update(recruit_id: str, changes: dict) -> dict:
+    """იგივე ვალიდაცია, რაც `update`-ს, მაგრამ **არაფერს წერს**: რა შეიცვლება (ველი: ძველი → ახალი), რომელ ეტაპზე გადავა, იხურება თუ არა.
+    გამოიყენება SAIRO-ს დასადასტურებელ ბარათზე. ValueError / RecruitError — როგორც `update`-ში."""
+    ch = m.clean_update(changes)
+    r = get(recruit_id, fresh=True)
+    if not r:
+        raise RecruitError("კანდიდატი ვერ მოიძებნა", 404)
+    plan = _plan(r, ch)
+    diffs = [{"field": k, "label": NAMES.get(k, k), "old": _label(k, _s(r.get(k))), "new": _label(k, _s(v))} for k, v in plan.items()
+             if k in NAMES and _s(r.get(k)) != _s(v) and k != "comment"]
+    if "comment" in plan and _s(plan["comment"]) != _s(r.get("comment")):
+        diffs.append({"field": "comment", "label": NAMES["comment"], "old": _label("comment", _s(r.get("comment"))), "new": _s(plan["comment"])})
+    return {"name": _s(r.get("name"), 80), "stage_before": _s(r.get("stage")) or "new", "stage_after": plan.get("stage", _s(r.get("stage")) or "new"),
+            "closing": plan["closed"] == "yes" and _s(r.get("closed")) != "yes", "diffs": diffs, "clean": ch}
+
+
 def update(recruit_id: str, changes: dict, by: dict, comment: str = "") -> dict:
     """ველების განახლება + ისტორიაში ჩაწერა + ავტომატური ეტაპი (თუ ეტაპი პირდაპირ არ არის მითითებული) + დახურვის დროშა."""
     ch = m.clean_update(changes)
@@ -217,18 +251,7 @@ def update(recruit_id: str, changes: dict, by: dict, comment: str = "") -> dict:
         r = get(recruit_id, fresh=True)
         if not r:
             raise RecruitError("კანდიდატი ვერ მოიძებნა", 404)
-        merged = dict(r, **ch)
-        if "stage" not in ch:
-            auto = m.infer_stage(merged)
-            order = list(m.STAGES)
-            cur = _s(r.get("stage")) or "new"
-            if auto != cur and (order.index(auto) > order.index(cur) or auto in m.CLOSED_STAGES):
-                ch["stage"] = auto                                  # ავტომატურად მხოლოდ წინ (ან დახურვა); უკან — მხოლოდ ხელით
-        stage = ch.get("stage", _s(r.get("stage")))
-        ch["closed"] = "yes" if stage in m.CLOSED_STAGES else ""
-        if ch["closed"] == "yes" and _s(r.get("closed")) != "yes" and stage != "archive" and not _s(merged.get("left_reason")):
-            # დახურვა მიზეზის გარეშე არ შეიძლება: „ყველას მიზეზი უნდა ვიცოდეთ“
-            raise RecruitError("მიუთითეთ მიზეზი — რატომ იხურება კანდიდატი (მაგ. ანაზღაურება, გრაფიკი, გადაიფიქრა…)", 400, "reason_required")
+        ch = _plan(r, ch)
         ch["updated_at"], ch["updated_by"] = now_str(), _s((by or {}).get("name"), 80)
         ch["last_contact_at"] = now_str() if any(k in ch for k in ("call_status", "attended", "decision", "comment", "stage", "interview_at")) else _s(r.get("last_contact_at"))
         diffs = [f"{NAMES.get(k, k)}: {_label(k, _s(r.get(k)))} → {_label(k, v)}" for k, v in ch.items()
@@ -278,6 +301,7 @@ def public(r: dict, now: datetime.datetime | None = None) -> dict:
     fc = _dt(r, "created_at")
     out["age_hours"] = round((now - fc).total_seconds() / 3600, 1) if fc else None
     out["flags"] = flags_of(r, now)
+    out["cls"] = m.class_of(r)
     out["train"] = m.train_info(r)
     if not _active(r):
         out["reason"], explicit = m.reason_of(r)
@@ -501,6 +525,8 @@ def _passes(r: dict, f: dict, now: datetime.datetime, skip: tuple = ()) -> bool:
             return False
     if _s(f.get("source")) and "source" not in skip and _s(r.get("source")) != _s(f.get("source")):
         return False
+    if _s(f.get("cls")) and "cls" not in skip and m.class_of(r) != _s(f.get("cls")):
+        return False
     tr = _s(f.get("train"))
     if tr and "train" not in skip:
         ti = m.train_info(r)
@@ -593,7 +619,8 @@ def calendar(start: str = "", days: int = 14, now: datetime.datetime | None = No
     for i in range(days):
         d = d0 + datetime.timedelta(days=i)
         out[d.strftime("%Y-%m-%d")] = {"date": d.strftime("%Y-%m-%d"), "weekday": WEEKDAYS[d.weekday()], "day": d.day, "today": d == now.date(),
-                                       "interviews": {"total": 0, "confirmed": 0, "declined": 0, "pending": 0}, "trainings": {"total": 0, "coming": 0}, "internship": 0, "staffed": 0, "left": 0}
+                                       "interviews": {"total": 0, "confirmed": 0, "declined": 0, "pending": 0}, "classes": {k: 0 for k in m.CLASS_ORDER},
+                                       "trainings": {"total": 0, "coming": 0}, "internship": 0, "staffed": 0, "left": 0}
     for r in all_rows():
         iv = _dt(r, "interview_at")
         if iv and iv.strftime("%Y-%m-%d") in out and _s(r.get("stage")) != "archive":
@@ -601,6 +628,7 @@ def calendar(start: str = "", days: int = 14, now: datetime.datetime | None = No
             b["total"] += 1
             cs = _s(r.get("call_status"))
             b["confirmed" if cs == "confirmed" else "declined" if cs == "declined" else "pending"] += 1
+            out[iv.strftime("%Y-%m-%d")]["classes"][m.class_of(r)] += 1
         tr = _dt(r, "training_at")
         if tr and tr.strftime("%Y-%m-%d") in out:
             b = out[tr.strftime("%Y-%m-%d")]["trainings"]
@@ -622,5 +650,37 @@ def day_view(day: str, now: datetime.datetime | None = None) -> dict:
     key = d0.strftime("%Y-%m-%d")
     pick = lambda field, time_key: sorted([r for r in all_rows() if (d := m.parse_dt(r.get(field))) and d.strftime("%Y-%m-%d") == key and _s(r.get("stage")) != "archive"],  # noqa: E731
                                           key=lambda r: _s(r.get(time_key or field)))
-    return {"day": key, "interviews": [public(x, now) for x in pick("interview_at", "interview_at")], "trainings": [public(x, now) for x in pick("training_at", "training_at")],
+    iv_rows = pick("interview_at", "interview_at")
+    groups = {k: 0 for k in m.CLASS_ORDER}
+    for x in iv_rows:
+        groups[m.class_of(x)] += 1
+    return {"day": key, "groups": groups, "class_labels": m.CLASS_LABELS, "class_order": m.CLASS_ORDER, "interviews": [public(x, now) for x in iv_rows], "trainings": [public(x, now) for x in pick("training_at", "training_at")],
             "internship": [public(x, now) for x in pick("internship_at", "name")], "staffed": [public(x, now) for x in pick("staffed_at", "name")], "left": [public(x, now) for x in pick("left_at", "name")]}
+
+
+# ---------------------------------------------------------------------------------------------- „მივწერე“ (ჯგუფურად)
+CHANNELS = ("whatsapp", "sms", "call", "telegram", "copy", "other")
+
+
+def mark_messaged(ids: list[str], channel: str, kind: str, by: dict) -> dict:
+    """არჩეულ კანდიდატებზე აღინიშნება „მივწერე“ (დრო/არხი/ტიპი/რაოდენობა) + ისტორიაში ჩანაწერი + „ბოლო კონტაქტი“. ერთი წაკითხვა + ერთი batch-ჩაწერა."""
+    ids = [_s(i, 40) for i in (ids or []) if _s(i)][:200]
+    if not ids:
+        raise RecruitError("არჩეული კანდიდატი არ არის")
+    channel = channel if channel in CHANNELS else "other"
+    with _lock:
+        rows = {_s(r.get("recruit_id")): r for r in all_rows(fresh=True)}
+        changes, logs = {}, []
+        at = now_str()
+        for rid in ids:
+            r = rows.get(rid)
+            if not r or _s(r.get("closed")) == "yes":
+                continue
+            changes[rid] = {"msg_at": at, "msg_channel": channel, "msg_kind": _s(kind, 20), "msg_count": str(int(_s(r.get("msg_count")) or 0) + 1),
+                            "last_contact_at": at, "updated_at": at, "updated_by": _s((by or {}).get("name"), 80)}
+            logs.append({"log_id": uuid.uuid4().hex[:10], "recruit_id": rid, "at": at, "by_name": _s((by or {}).get("name") or "სისტემა", 80), "by_id": _s((by or {}).get("agent_id"), 40),
+                         "kind": "message", "text": f"მიეწერა ({channel}{', ' + _s(kind, 20) if kind else ''})"})
+        done = _backend.update_many(m.RECRUITS, m.HEADERS, changes) if changes else 0
+        if logs:
+            _backend.append_many(m.RECRUIT_LOG, m.LOG_HEADERS, logs)
+        return {"marked": done, "skipped": len(ids) - len(changes)}
