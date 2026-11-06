@@ -152,6 +152,8 @@ RATE_LIMITS = {
     "leadguard_read": (60, 60),    # SAIRO Lead Protection: რისკების ანგარიში/წინასწარი ნახვა (წაკითხვა)
     "recruit_read": (120, 60),     # კადრების აყვანა: სიები/სტატისტიკა (წაკითხვა)
     "recruit_write": (60, 60),     # კადრების აყვანა: რედაქტირება/იმპორტი/პარამეტრები
+    "tgnet_read": (60, 60),        # TGNET (Telegram ქსელი): არხების სია
+    "tgnet_write": (30, 60),       # TGNET: არხის მიბმა/შემოწმება/პარამეტრები
 }
 RATE_LIMIT_ENABLED = os.environ.get("RATE_LIMIT_ENABLED", "1").strip().lower() not in ("0", "false", "no")
 
@@ -353,3 +355,16 @@ AI_MODEL_FAST = os.environ.get("AI_MODEL_FAST", "").strip()                     
 AI_ACTION_TTL_MINUTES = int(os.environ.get("AI_ACTION_TTL_MINUTES", "30"))                  # მოქმედების დადასტურების ვადა
 AI_ACTION_MAX_RECIPIENTS = int(os.environ.get("AI_ACTION_MAX_RECIPIENTS", "60"))
 AI_ACTION_MAX_MESSAGES_PER_DAY = int(os.environ.get("AI_ACTION_MAX_MESSAGES_PER_DAY", "5"))             # ჯგუფური გაგზავნა მენეჯერზე დღეში
+
+# --- TGNET: Telegram არხების ქსელი (ეტაპი 2B: მხოლოდ არხების რეესტრი + შემოწმება; პოსტინგი ჯერ არ არსებობს) -------------------------------------
+# TGNET_BOT_TOKEN — საჯარო ბოტის ტოკენი **მხოლოდ Railway-ის ცვლადში** (კოდში/ფაილში/ჩატში არასდროს). ცარიელია -> ტაბი მუშაობს, „შემოწმება“ ამბობს, რომ ტოკენი არ არის.
+# TGNET_ENABLED=0 (ნაგულისხმევი) — მომავალი ავტომატური პოსტინგის მთავარი ჩამრთველი; ამ ვერსიაში არაფერს აკეთებს და არაფერს აქვეყნებს.
+TGNET_ENABLED = _flag("TGNET_ENABLED", "0")
+TGNET_BOT_TOKEN = os.environ.get("TGNET_BOT_TOKEN", "").strip()
+# TGNET_QUEUE_ENABLED=0 (ნაგულისხმევი) — განცხადების ფორმაში „Telegram-ზეც გამოქვეყნება“ თიქი არ ჩანს და ახალი განცხადებები რიგში არ ექცევა (არაფერი იცვლება).
+# =1 -> აგენტი თიქს ნიშნავს; დასრულებულ განცხადებაზე იქმნება რიგის ჩანაწერები (TgPosts) — **გაგზავნის გარეშე** (პოსტინგი ცალკე ეტაპია).
+# TGNET_AUTO_APPROVE=0 (ნაგულისხმევი) — რიგში ჩანაწერს დირექტორი ხელით ამტკიცებს; 1 -> ხარისხის ფილტრგავლილი ავტომატურად დამტკიცებულია.
+# TGNET_MIN_PHOTOS — მინიმუმ რამდენი ფოტო უნდა ჰქონდეს განცხადებას (ნაკლები -> „გასასწორებელია“, არ გადის).
+TGNET_QUEUE_ENABLED = _flag("TGNET_QUEUE_ENABLED", "0")
+TGNET_AUTO_APPROVE = _flag("TGNET_AUTO_APPROVE", "0")
+TGNET_MIN_PHOTOS = int(os.environ.get("TGNET_MIN_PHOTOS", "3") or "3")

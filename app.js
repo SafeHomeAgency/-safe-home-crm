@@ -2529,6 +2529,7 @@ function renderMyHomeJobs(rows, role) {
         <textarea id="mhNotes" placeholder="შეზღუდვები / შენიშვნა — გადავა ბაზაში (არასავალდებულო). ss.ge-ზე დადებისას: თუ განცხადების მისამართს სახლის ნომერი არ აქვს, ჩაიწერება „2“ (სხვა ნომრისთვის დაწერეთ აქ „სახლი: 12“)"></textarea>
         <label style="display:flex;align-items:center;gap:8px"><input id="mhNoPets" type="checkbox" style="width:auto"> 🐾 მესაკუთრე ცხოველებს არ უშვებს</label>
         <label style="display:flex;align-items:center;gap:8px"><input id="mhTurkeys" type="checkbox" style="width:auto"> 🦃 ინდაურები დაიშვება</label>
+        ${state.tgShare ? `<label style="display:flex;align-items:center;gap:8px"><input id="mhTelegram" type="checkbox" style="width:auto"> 📣 Telegram-ის არხებშიც გამოქვეყნდეს</label>` : ""}
         <button class="btn" id="mhSubmit">დამატება</button>
       </div>
     </div>`;
@@ -2610,7 +2611,9 @@ function bindMyHomeJobsActions() {
       const petsLine = "ცხოველები: " + (document.getElementById("mhNoPets").checked ? "არა" : "კი");
       // ინდაურების თიქი: მონიშნულია -> "ინდაურები: კი"; არ არის მონიშნული -> არაფერი იწერება
       const turkeysLine = document.getElementById("mhTurkeys").checked ? "ინდაურები: კი" : "";
-      const notes = [(document.getElementById("mhNotes").value || "").trim(), petsLine, turkeysLine].filter(Boolean).join("\n");
+      // Telegram-ის თიქი (მხოლოდ თუ სერვერმა აჩვენა): მონიშნულია -> შენიშვნის პირველი ხაზი „Telegram: კი“ (პირველი — რომ 500-სიმბოლოიან ზღვარზე არ მოიჭრას); არ არის -> არაფერი
+      const tgEl = document.getElementById("mhTelegram"), tgLine = tgEl && tgEl.checked ? "Telegram: კი" : "";
+      const notes = [tgLine, (document.getElementById("mhNotes").value || "").trim(), petsLine, turkeysLine].filter(Boolean).join("\n");
       const listingSource = (document.getElementById("mhSource") || {}).value || "myhome";
       const publishTarget = (document.getElementById("mhTarget") || {}).value || "myhome";
       if (listingSource === "ssge") {
@@ -5859,6 +5862,8 @@ function tabsFor(role) {
   tabs.splice(tabs.includes(FIN_TAB) ? 2 : 1, 0, HUB_TAB);
   // 🧑‍💼 კადრები (აყვანა): სერვერი ამბობს, ვის შეუძლია ნახვა (ადმინი/თიმლიდერი/პასუხისმგებელი) — /api/recruit/access
   if (state.recAccess && state.recAccess.can_view) tabs.splice(tabs.indexOf(HUB_TAB) + 1, 0, REC_TAB);
+  // 📣 Telegram ქსელი (TGNET): მხოლოდ დირექტორი (სერვერი ამბობს /api/tgnet/access), მხოლოდ ადმინის ხედში
+  if (role === "admin" && state.tgAccess && state.tgAccess.can_view) { tabs = tabs.slice(); tabs.push(TG_TAB); }
   return tabs;
 }
 
@@ -5881,6 +5886,94 @@ function renderTabbar() {
   });
   const more = bar.querySelector("button[data-more]");
   if (more) more.onclick = () => openMoreSheet(rest);
+}
+
+/* ================================================ 📣 Telegram ქსელი (TGNET, ეტაპი 2B) ==================================================
+   მხოლოდ დირექტორი (სერვერი ამოწმებს). 18 საჯარო არხის რეესტრი: chat_id-ის მიბმა, ბოტის უფლებების შემოწმება (მხოლოდ წაკითხვა), სათაურის/აღწერის კოპირება არხის შესაქმნელად.
+   პოსტინგი ამ ვერსიაში არ არსებობს — არაფერი ქვეყნდება. */
+const TG_TAB = { id: "tgnet", label: "Telegram", icon: "📣" };
+const TG_LANG = { ka: "🇬🇪 ქართული", en: "🇬🇧 English", ru: "🇷🇺 Русский" };
+const TG_ST = { planned: "gray", created: "blue", linked: "blue", live: "green", attention: "red", paused: "gray" };
+if (!state.tg) state.tg = { data: null, busy: false };
+
+async function tgLoadShare() {
+  try { const d = await api("/api/tgnet/share-config"); state.tgShare = !!d.share_option; } catch (e) { state.tgShare = false; }     // ვერ ჩაიტვირთა -> თიქი უბრალოდ არ ჩანს
+}
+async function tgLoadAccess() {
+  try {
+    const a = await api("/api/tgnet/access");
+    const changed = JSON.stringify(a) !== JSON.stringify(state.tgAccess || null);
+    state.tgAccess = a;
+    if (changed) renderTabbar();
+  } catch (e) { /* წვდომა არ აქვს — ტაბი არ გამოჩნდება */ }
+}
+function tgCard(c) {
+  const ok = c.status === "live";
+  return `<div class="card tg-card" data-tg-key="${esc(c.channel_key)}">
+    <div class="tg-top"><b>${c.n}. ${esc(c.title)}</b><span class="rc-cl-mini tg-st tg-${TG_ST[c.status] || "gray"}">${esc(c.status_label)}</span></div>
+    <div class="muted" style="font-size:12px">@${esc(c.username)}${c.members ? ` · 👥 ${esc(c.members)}` : ""}${c.last_check_at ? ` · შემოწმდა ${esc(c.last_check_at)}` : ""}</div>
+    ${c.last_error ? `<div class="tg-err">⚠️ ${esc(c.last_error)}</div>` : ""}
+    <div class="tg-row"><input class="tg-chat" inputmode="numeric" placeholder="chat_id (-100…)" value="${esc(c.chat_id)}" data-tg-chat="${esc(c.channel_key)}">
+      <button class="btn secondary" data-tg-bind="${esc(c.channel_key)}">მიბმა</button>
+      <button class="btn secondary" data-tg-check="${esc(c.channel_key)}" ${c.chat_id ? "" : "disabled"}>🔍 შემოწმება</button></div>
+    <div class="tg-row"><button class="btn secondary" data-tg-copy="title" data-k="${esc(c.channel_key)}">📋 სათაური</button>
+      <button class="btn secondary" data-tg-copy="username" data-k="${esc(c.channel_key)}">📋 username</button>
+      <button class="btn secondary" data-tg-copy="description" data-k="${esc(c.channel_key)}">📋 აღწერა</button></div></div>`;
+}
+async function tgRefresh() { state.tg.data = await api("/api/tgnet/channels"); try { state.tg.queue = await api("/api/tgnet/queue"); } catch (e) { state.tg.queue = null; } }
+const TG_QST = { pending: ["ელოდება დამტკიცებას", "blue"], needs_fix: ["გასასწორებელია", "red"], approved: ["დამტკიცებულია", "green"], rejected: ["უარყოფილია", "gray"], skipped: ["არხს არ ეკუთვნის", "gray"] };
+function tgQueueCard(q) {
+  if (!q) return "";
+  const gs = q.groups || [];
+  const items = gs.map((g) => {
+    const st = TG_QST[g.status] || [g.status, "gray"];
+    const can = ["pending", "needs_fix", "approved", "rejected"].includes(g.status);
+    return `<div class="tg-q" data-tg-q="${esc(g.listing_key)}"><div class="tg-top"><b>${esc(g.listing_key)}</b><span class="rc-cl-mini tg-st tg-${st[1]}">${esc(st[0])}</span></div>
+      <div style="font-size:13px">${esc(g.summary || "—")}</div><div class="muted" style="font-size:12px">${esc(g.agent_name || "")} · ${esc(g.created_at || "")} · არხები: ${(g.channels || []).length}</div>
+      ${g.error ? `<div class="tg-err">⚠️ ${esc(g.error)}</div>` : ""}
+      ${can ? `<div class="tg-row">${g.status !== "approved" ? `<button class="btn" data-tg-dec="approve" data-k="${esc(g.listing_key)}">✅ დამტკიცება</button>` : ""}${g.status !== "rejected" ? `<button class="btn secondary" data-tg-dec="reject" data-k="${esc(g.listing_key)}">✖ უარყოფა</button>` : ""}</div>` : ""}</div>`;
+  }).join("");
+  return `<div class="card"><div class="tg-top"><b>📥 გამოსაქვეყნებელი რიგი</b><span class="muted" style="font-size:12px">${gs.length}</span></div>
+    <div class="muted" style="font-size:12px;margin:4px 0 8px">თიქი აგენტის ფორმაში: <b>${q.queue_enabled ? "ჩართულია" : "გამორთულია (Railway: TGNET_QUEUE_ENABLED=1)"}</b> · ავტომატური დამტკიცება: <b>${q.auto_approve ? "კი" : "არა — დირექტორი ამტკიცებს"}</b><br>დამტკიცებული განცხადება ელოდება გამოქვეყნების ეტაპს — <b>ახლა არაფერი იგზავნება</b>.</div>
+    ${items || `<div class="empty">რიგი ცარიელია</div>`}</div>`;
+}
+async function renderTgnet(content) {
+  const root = content || document.getElementById("content");
+  if (!root) return;
+  if (!state.tg.data) root.innerHTML = `<div class="card"><div class="empty">იტვირთება…</div></div>`;
+  try { await tgRefresh(); } catch (e) { root.innerHTML = `<div class="card"><div class="empty">⚠️ ${esc(e.message || "შეცდომა")}</div></div>`; return; }
+  tgDraw(root);
+}
+function tgDraw(root) {
+  const d = state.tg.data;
+  if (!d) return;
+  const s = d.summary || {};
+  const groups = ["ka", "en", "ru"].map((l) => `<h3 class="tg-h">${TG_LANG[l]}</h3>` + d.channels.filter((c) => c.lang === l).map(tgCard).join("")).join("");
+  root.innerHTML = `<div class="card"><div class="tg-top"><b>📣 Telegram ქსელი</b><span class="muted" style="font-size:12px">ეტაპი 2B</span></div>
+    <div class="muted" style="font-size:13px;margin:6px 0">არხები: <b>${s.total || 0}</b> · მიბმული: <b>${s.linked || 0}</b> · მზადაა: <b>${s.live || 0}</b> · ყურადღება: <b>${s.attention || 0}</b></div>
+    <div class="muted" style="font-size:12px">ბოტის ტოკენი: <b>${d.configured ? "დაყენებულია ✅" : "არ არის ⚠️ (Railway: TGNET_BOT_TOKEN)"}</b><br>პოსტინგი ამ ვერსიაში <b>არ არსებობს</b> — არაფერი ქვეყნდება; აქ არხები იმართება და მოწმდება (Telegram-ში მხოლოდ წაკითხვა).</div>
+    <div class="tg-row" style="margin-top:8px"><button class="btn" id="tgCheckAll" ${s.linked ? "" : "disabled"}>🔍 ყველა მიბმულის შემოწმება</button></div></div>${tgQueueCard(state.tg.queue)}${groups}`;
+  root.querySelectorAll("[data-tg-dec]").forEach((b) => {
+    b.onclick = async () => {
+      try { await api("/api/tgnet/queue/" + encodeURIComponent(b.dataset.k), { method: "POST", body: JSON.stringify({ action: b.dataset.tgDec }) }); toast(b.dataset.tgDec === "approve" ? "✅ დამტკიცდა" : "✖ უარყოფილია"); await tgRefresh(); tgDraw(root); } catch (e) { toast(e.message || "შეცდომა"); }
+    };
+  });
+  const copy = (txt, msg) => { if (window.shCopy) window.shCopy(txt, msg); else toast(txt); };
+  root.querySelectorAll("[data-tg-copy]").forEach((b) => { b.onclick = () => { const c = d.channels.find((x) => x.channel_key === b.dataset.k); if (c) copy(c[b.dataset.tgCopy], "📋 დაკოპირდა"); }; });
+  root.querySelectorAll("[data-tg-bind]").forEach((b) => {
+    b.onclick = async () => {
+      const key = b.dataset.tgBind, inp = root.querySelector(`[data-tg-chat="${key}"]`);
+      try { await api("/api/tgnet/channels/" + encodeURIComponent(key), { method: "POST", body: JSON.stringify({ chat_id: (inp.value || "").trim() }) }); toast("✅ შენახულია"); await tgRefresh(); tgDraw(root); } catch (e) { toast(e.message || "შეცდომა"); }
+    };
+  });
+  const runCheck = async (key) => {
+    if (state.tg.busy) return;
+    state.tg.busy = true;
+    try { await api("/api/tgnet/check", { method: "POST", body: JSON.stringify(key ? { key } : {}) }); toast("✅ შემოწმდა"); await tgRefresh(); } catch (e) { toast(e.message || "შეცდომა"); }
+    state.tg.busy = false; tgDraw(root);
+  };
+  root.querySelectorAll("[data-tg-check]").forEach((b) => { b.onclick = () => runCheck(b.dataset.tgCheck); });
+  const all = root.querySelector("#tgCheckAll"); if (all) all.onclick = () => runCheck("");
 }
 
 /* ================================================ 🧑‍💼 კადრები (Recruitment) =========================================
@@ -6964,6 +7057,7 @@ async function renderContent() {
     if (tab === "finance") { await renderFinance(content); return; }
     if (tab === "hub") { await renderHub(content); return; }
     if (tab === "recruit") { await renderRecruit(content); return; }
+    if (tab === "tgnet") { await renderTgnet(content); return; }
     if (tab === "system") { await renderSystem(content); return; }
     if (tab === "ai") { await renderAi(content); return; }
     if (LAZY_ENDPOINTS[tab]) {
@@ -7098,6 +7192,8 @@ async function load() {
     finLoadAccess();
     aiLoadAccess();
     recLoadAccess();
+    tgLoadAccess();
+    tgLoadShare();
     recDeepLink();
   } catch (e) {
     document.getElementById("content").innerHTML =

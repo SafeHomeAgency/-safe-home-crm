@@ -1,5 +1,5 @@
 ატვირთვა GitHub-ზე (Add file -> Upload files), შემდეგ Railway Redeploy.
-ფაილების რაოდენობა: 21  (იხ. MANIFEST.json — sha256).
+ფაილების რაოდენობა: 27  (იხ. MANIFEST.json — sha256).
 MANIFEST.json GitHub-ზე ასატვირთი არ არის (ინფორმაციულია).
 
 არ ატვირთოთ/არ შეცვალოთ რეპოში უკვე არსებული: db, migrate_sheets_to_postgres, sheets, index.html, Procfile.
@@ -26,4 +26,10 @@ MANIFEST.json GitHub-ზე ასატვირთი არ არის (ი
   recruit_model.py
   recruit_store.py
   style.css
+  tgnet_api.py
+  tgnet_channels.json
+  tgnet_client.py
+  tgnet_model.py
+  tgnet_pipeline.py
+  tgnet_store.py
   webserver.py
