@@ -3311,7 +3311,8 @@ except Exception:
 # TGNET (Telegram არხების ქსელი, ეტაპი 2B): /api/tgnet/... — მხოლოდ დირექტორი; არხების რეესტრი + წაკითხვითი შემოწმება, არაფერი ქვეყნდება. ჩავარდნა სერვერს არ აჩერებს.
 try:
     import tgnet_api  # noqa: E402
-    tgnet_api.register(app, authed=_authed_agent, audit=_audit, rate_limited=rate_limited)
+    tgnet_api.register(app, authed=_authed_agent, audit=_audit, rate_limited=rate_limited, notify=lambda chat, text, key=None: notify_async(chat, text, key=key, priority="operational"),
+                       get_agents=lambda: sheets.get_agents())
     import tgnet_pipeline  # noqa: E402
     tgnet_pipeline.register_hook()                    # ახალი განცხადება + აგენტის თიქი -> რიგი (TGNET_QUEUE_ENABLED=1-ზე; გაგზავნის გარეშე)
 except Exception:

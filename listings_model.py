@@ -182,7 +182,15 @@ def freshness(row: dict, now: datetime.datetime, th: dict | None = None) -> dict
 
 
 def photo_list(row: dict) -> list[str]:
-    return [p for p in str(row.get("photos") or "").split(PHOTO_SEP) if p.startswith("http")][:MAX_PHOTOS]
+    urls = [p for p in str(row.get("photos") or "").split(PHOTO_SEP) if p.startswith("http")][:MAX_PHOTOS]
+    try:                                    # BRAND_PHOTOS_PROXY=1 -> ბრენდირებული ბმულები; ნებისმიერი ხარვეზი = ორიგინალი (კატალოგი არასდროს ტყდება)
+        import config as _c
+        if getattr(_c, "BRAND_PHOTOS_PROXY", False):
+            import tgnet_img
+            return [tgnet_img.maybe_proxy(u) for u in urls]
+    except Exception:  # noqa: BLE001
+        pass
+    return urls
 
 
 def portal_links(row: dict) -> dict:

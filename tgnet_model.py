@@ -18,10 +18,13 @@ HEADERS = ["channel_key", "n", "lang", "segment", "deal", "city", "title", "user
 POST_HEADERS = ["post_id", "listing_key", "channel_key", "message_ids", "status", "posted_at", "updated_at", "error", "created_at", "decided_by", "decided_at", "summary", "agent_name"]
 # post_id = "<listing_key>:<channel_key>" (განმეორებითი გაშვება დუბლს ვერ ქმნის). status: pending (ელოდება დამტკიცებას) | approved | rejected | needs_fix (ხარისხის ფილტრი) |
 # skipped (არხს არ ეკუთვნის) | published/failed/removed (მომავალი ეტაპი: პოსტინგი)
-POST_STATUSES = ["pending", "approved", "rejected", "needs_fix", "skipped", "published", "failed", "removed"]
+POST_STATUSES = ["pending", "approved", "rejected", "needs_fix", "skipped", "published", "failed", "removed", "expired"]
 SETTINGS_HEADERS = ["key", "value"]
 LOG_HEADERS = ["log_id", "at", "channel_key", "kind", "text"]
-ALL_TABS = [(TG_CHANNELS, HEADERS, 60), (TG_POSTS, POST_HEADERS, 20000), (TG_SETTINGS, SETTINGS_HEADERS, 50), (TG_LOG, LOG_HEADERS, 5000)]
+TG_LEADS = "TgLeads"
+# kind: view (ბოტი გაიხსნა განცხადებით) | intent (დააჭირა „მინდა დაკავშირება“) | lead (ნომერი დატოვა -> CRM-ში კლიენტი). status: new -> assigned -> closed
+LEAD_HEADERS = ["lead_id", "at", "listing_key", "channel_key", "kind", "tg_user_id", "tg_name", "phone_norm", "client_id", "status", "assigned_agent_id", "assigned_by", "note"]
+ALL_TABS = [(TG_CHANNELS, HEADERS, 60), (TG_POSTS, POST_HEADERS, 20000), (TG_SETTINGS, SETTINGS_HEADERS, 50), (TG_LOG, LOG_HEADERS, 5000), (TG_LEADS, LEAD_HEADERS, 20000)]
 
 # planned = გეგმაშია; created = არხი შექმნილია, chat_id ჯერ არ ვიცით; linked = chat_id მითითებულია, ჯერ არ შემოწმებულა; live = შემოწმდა (ბოტი ადმინია, უფლებები საკმარისია);
 # attention = შემოწმებამ პრობლემა აჩვენა; paused = ხელით შეჩერებულია

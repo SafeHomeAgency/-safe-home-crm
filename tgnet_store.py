@@ -250,3 +250,58 @@ def decide_listing(listing_key: str, action: str, by: str = "") -> int:
         n = _backend.update_many(m.TG_POSTS, m.POST_HEADERS, changes) if changes else 0
         log_event("", "decide", f"{listing_key}: {new} ({n} არხი)")
     return n
+
+def update_posts(changes: dict) -> int:
+    """changes = {post_id: {ველი: მნიშვნელობა}} -> ერთი batch ჩაწერა (Sheets-ის კვოტა)."""
+    if not changes:
+        return 0
+    with _lock:
+        return _backend.update_many(m.TG_POSTS, m.POST_HEADERS, changes)
+
+
+def get_post(post_id: str) -> dict | None:
+    return next((p for p in list_posts(fresh=True) if p["post_id"] == _s(post_id)), None)
+
+# ====================================================================== ლიდები (Telegram-იდან დაინტერესება)
+def add_lead_event(kind: str, listing_key: str, tg_user_id, tg_name: str = "", channel_key: str = "", phone_norm: str = "", client_id: str = "", note: str = "") -> dict:
+    rec = {"lead_id": uuid.uuid4().hex[:10], "at": now_str(), "listing_key": _s(listing_key, 60), "channel_key": _s(channel_key, 60), "kind": kind, "tg_user_id": _s(tg_user_id, 20),
+           "tg_name": _s(tg_name, 80), "phone_norm": _s(phone_norm, 20), "client_id": _s(client_id, 30), "status": "new" if kind == "lead" else "", "assigned_agent_id": "", "assigned_by": "", "note": _s(note, 300)}
+    with _lock:
+        _backend.append(m.TG_LEADS, m.LEAD_HEADERS, rec)
+    return rec
+
+
+def list_lead_rows(fresh: bool = False) -> list[dict]:
+    return [{k: _s(r.get(k), 300) for k in m.LEAD_HEADERS} for r in _backend.read(m.TG_LEADS, fresh=fresh)]
+
+
+def update_lead(lead_id: str, changes: dict) -> dict | None:
+    with _lock:
+        return _backend.update(m.TG_LEADS, m.LEAD_HEADERS, lead_id, changes)
+
+
+def last_intent(tg_user_id, within_min: int = 60) -> dict | None:
+    """ბოლო „მინდა დაკავშირება“ ამ მომხმარებლისგან (ტელეფონის გაზიარებისას ვიცით რომელი განცხადებაა)."""
+    now = datetime.datetime.strptime(now_str(), "%Y-%m-%d %H:%M")
+    for r in reversed(list_lead_rows(fresh=True)):
+        if r["kind"] == "intent" and r["tg_user_id"] == _s(tg_user_id, 20):
+            try:
+                t = datetime.datetime.strptime(r["at"], "%Y-%m-%d %H:%M")
+            except ValueError:
+                return None
+            return r if (now - t).total_seconds() <= within_min * 60 else None
+    return None
+
+
+def interest_stats(limit: int = 20) -> list[dict]:
+    """რომელი განცხადებით არიან კლიენტები ყველაზე დაინტერესებულები: ლიდი = 3 ქულა, „დაკავშირება“ = 2, ნახვა = 1."""
+    agg: dict = {}
+    for r in list_lead_rows(fresh=True):
+        if not r["listing_key"]:
+            continue
+        a = agg.setdefault(r["listing_key"], {"listing_key": r["listing_key"], "views": 0, "intents": 0, "leads": 0, "last_at": ""})
+        a[{"view": "views", "intent": "intents", "lead": "leads"}.get(r["kind"], "views")] += 1
+        a["last_at"] = max(a["last_at"], r["at"])
+    for a in agg.values():
+        a["score"] = a["leads"] * 3 + a["intents"] * 2 + a["views"]
+    return sorted(agg.values(), key=lambda a: (a["score"], a["last_at"]), reverse=True)[:limit]

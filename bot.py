@@ -2607,6 +2607,19 @@ async def check_recruit(context: ContextTypes.DEFAULT_TYPE):
             recruit_jobs.finish(m, ok)
 
 
+async def check_tgnet(context: ContextTypes.DEFAULT_TYPE):
+    """TGNET (2 წთ): დამტკიცებული განცხადებების გამოქვეყნება არხებში + სინქრონიზაცია (გაუქმება/ფასი). TGNET_PUBLISH_ENABLED=0 -> არაფერს აკეთებს."""
+    if not config.TGNET_PUBLISH_ENABLED:
+        return
+    try:
+        import tgnet_publisher
+        rep = await asyncio.to_thread(tgnet_publisher.run_cycle)
+        if any(rep.get(k) for k in ("published", "failed", "removed", "edited", "expired")):
+            log.info("TGNET ციკლი: %s", rep)
+    except Exception:
+        log.exception("TGNET ციკლი ვერ გაეშვა")
+
+
 async def send_lead_guard_digest(context: ContextTypes.DEFAULT_TYPE):
     """SAIRO: ყოველდღიური რისკების ანგარიში — თიმლიდერს თავისი გუნდის, ადმინს სრული (დღეში ერთხელ ადამიანზე)."""
     if not config.LEAD_GUARD_ENABLED:
@@ -3341,6 +3354,7 @@ def main():
         app.job_queue.run_repeating(_tracked(check_hub_meetings, 600), interval=600, first=280)
         app.job_queue.run_repeating(_tracked(check_lead_guard, 900), interval=900, first=340)
         app.job_queue.run_repeating(_tracked(check_recruit, 300), interval=300, first=360)
+        app.job_queue.run_repeating(_tracked(check_tgnet, 120), interval=120, first=400)
         app.job_queue.run_daily(
             _tracked(send_lead_guard_digest, 86400),
             time=datetime.time(hour=config.LEAD_GUARD_REPORT_HOUR, minute=15, tzinfo=ZoneInfo(config.TIMEZONE)),

@@ -154,6 +154,7 @@ RATE_LIMITS = {
     "recruit_write": (60, 60),     # კადრების აყვანა: რედაქტირება/იმპორტი/პარამეტრები
     "tgnet_read": (60, 60),        # TGNET (Telegram ქსელი): არხების სია
     "tgnet_write": (30, 60),       # TGNET: არხის მიბმა/შემოწმება/პარამეტრები
+    "tgnet_webhook": (600, 60),    # TGNET: საჯარო ბოტის webhook (Telegram-იდან)
 }
 RATE_LIMIT_ENABLED = os.environ.get("RATE_LIMIT_ENABLED", "1").strip().lower() not in ("0", "false", "no")
 
@@ -368,3 +369,23 @@ TGNET_BOT_TOKEN = os.environ.get("TGNET_BOT_TOKEN", "").strip()
 TGNET_QUEUE_ENABLED = _flag("TGNET_QUEUE_ENABLED", "0")
 TGNET_AUTO_APPROVE = _flag("TGNET_AUTO_APPROVE", "0")
 TGNET_MIN_PHOTOS = int(os.environ.get("TGNET_MIN_PHOTOS", "3") or "3")
+# TGNET_PUBLISH_ENABLED=0 (ნაგულისხმევი) — ბოტის ფონური გამოქვეყნება სრულად გამორთულია. =1 + მთავარი ჩამრთველი ტაბში + არხის ჩართვა -> იწყება (მხოლოდ დამტკიცებული ჩანაწერები).
+# სამუშაო საათები (თბილისი) „დან-მდე“, ინტერვალი არხზე (წთ), დღიური ლიმიტი არხზე, განცხადების მაქსიმალური ასაკი გამოქვეყნებამდე (დღე), სურათის დაშვებული დომენები.
+TGNET_PUBLISH_ENABLED = _flag("TGNET_PUBLISH_ENABLED", "0")
+TGNET_POST_HOURS = tuple(int(x) for x in (os.environ.get("TGNET_POST_HOURS", "9-22").split("-") + ["22"])[:2])
+TGNET_MIN_GAP_MIN = int(os.environ.get("TGNET_MIN_GAP_MIN", "20") or "20")
+TGNET_MAX_PER_DAY = int(os.environ.get("TGNET_MAX_PER_DAY", "12") or "12")
+TGNET_MAX_AGE_DAYS = int(os.environ.get("TGNET_MAX_AGE_DAYS", "5") or "5")
+TGNET_PHOTO_HOSTS = [x.strip().lower() for x in os.environ.get("TGNET_PHOTO_HOSTS", "my.ge,ss.ge,tnet.ge").split(",") if x.strip()]
+# TGNET_MINIAPP_SHORTNAME — BotFather-ში /newapp-ით შექმნილი Mini App-ის მოკლე სახელი (t.me/SafeHomeGeBot/<სახელი>); ცარიელი -> პოსტის ღილაკი ბოტის /start-ზე მიდის.
+# TGNET_POST_MODE: single (ნაგულისხმევი) = ერთი ყდის ფოტო + ღილაკი „დეტალები/დაკავშირება“; album = 2–10 ფოტოს ალბომი (ღილაკის გარეშე — Telegram ალბომს ღილაკს არ აძლევს).
+TGNET_MINIAPP_SHORTNAME = os.environ.get("TGNET_MINIAPP_SHORTNAME", "").strip()
+TGNET_POST_MODE = os.environ.get("TGNET_POST_MODE", "single").strip().lower()
+# ფოტოს ბრენდირება („SH“ იარლიყი): TGNET_WM_POS bl|br|tl|tr; TGNET_WM_CROP "ზედა,ქვედა,მარცხენა,მარჯვენა" % (წყაროს ლოგოს მოსაცილებლად ჭრა, ≤30%); TGNET_WM_COVER "x0,y0,x1,y1;..." % (ლოგოს დაბუნდოვნება).
+# TGNET_BRAND_REQUIRED=1 (ნაგულისხმევი) — თუ ბრენდირება ვერ ხერხდება (Pillow არ არის/ფოტო დაზიანებულია), დაუბრენდებელ ფოტოს **არ ვაქვეყნებთ**.
+TGNET_WM_POS = os.environ.get("TGNET_WM_POS", "br").strip().lower()
+TGNET_WM_CROP = os.environ.get("TGNET_WM_CROP", "").strip()
+TGNET_WM_COVER = os.environ.get("TGNET_WM_COVER", "").strip()
+TGNET_BRAND_REQUIRED = _flag("TGNET_BRAND_REQUIRED", "1")
+# BRAND_PHOTOS_PROXY=0 (ნაგულისხმევი) — კატალოგში (Property Hub) ფოტოები უცვლელია. =1 -> MyHome/ss.ge-ს ფოტოები ჩვენს სერვერზე გავლით ბრენდირდება („SH“ იარლიყი) — იხ. tgnet_img.py. წინასწარ გადაამოწმეთ TGNET_WM_* პარამეტრები.
+BRAND_PHOTOS_PROXY = _flag("BRAND_PHOTOS_PROXY", "0")

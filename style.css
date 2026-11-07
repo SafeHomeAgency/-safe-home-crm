@@ -1127,3 +1127,7 @@ button.chip { cursor: pointer; font-family: inherit; }
 
 .tg-q{padding:10px 0;border-top:1px solid var(--line,#2a3a4d)}
 .tg-q:first-of-type{border-top:0}
+
+.tg-prev{margin-top:8px;padding:8px;border-radius:10px;background:rgba(150,150,150,.08)}
+.tg-prev pre{white-space:pre-wrap;word-break:break-word;font:12px/1.4 inherit;margin:4px 0 8px}
+.tg-ag{flex:2 1 140px;min-width:0;padding:7px;border-radius:10px;border:1px solid var(--line,#2a3a4d);background:transparent;color:inherit;font-size:13px}
