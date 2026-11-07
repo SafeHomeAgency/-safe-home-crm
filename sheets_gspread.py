@@ -399,6 +399,13 @@ class _CachedSpreadsheet:
             _hdr["at"] = 0.0
         return r
 
+    def worksheet(self, title):
+        """gspread-ის worksheet(title) ყოველ ჯერზე metadata-ს კითხულობს (1 წაკითხვა თითო სახელზე) — აქ უკვე კეშირებული სიიდან ვიღებთ; ვერ ვიპოვეთ -> ჩვეულებრივი ძებნა (იგივე შეცდომით)."""
+        for w in self.worksheets():
+            if w.title == title:
+                return w
+        return _retry_api(lambda: self._ss.worksheet(title), "worksheets")
+
     def values_batch_get(self, ranges, **kw):
         return _retry_api(lambda: self._ss.values_batch_get(ranges, **kw), "values_batch_get")
 
