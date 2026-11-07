@@ -55,7 +55,7 @@ _records_cache_lock = threading.Lock()
 
 
 # Sheets API-ს გამოძახებების მრიცხველი (გაზომვა, ოპტიმიზაციამდე): ყოველი მცდელობა ითვლება (retry-ც). Google-ის ლიმიტი ~60 წაკითხვა/წთ/მომხმარებელზე.
-_READ_METHODS = {"get_all_records", "get_all_values", "row_values", "col_values", "find", "findall", "get", "cell", "acell", "get_values"}
+_READ_METHODS = {"get_all_records", "get_all_values", "row_values", "col_values", "find", "findall", "get", "cell", "acell", "get_values", "worksheets", "values_batch_get"}
 _api_calls: "collections.deque" = collections.deque(maxlen=20000)   # (monotonic, is_read)
 _api_err = {"429": 0, "5xx": 0, "other": 0}
 _api_lock = threading.Lock()
@@ -342,11 +342,96 @@ def _get_client():
     return _client
 
 
+# ---------------------------------------------------------------- Sheets-ის „წაკითხვა წუთში“ (60) ლიმიტის დაცვა გაშვებისას
+# პრობლემა: ყოველი მოდული (recruit, tgnet, crm2, ai, finance...) პირველ გამოყენებაზე ensure()-ს აკეთებდა: 1 ზარი worksheets()-ზე + **თითო ზარი თითო tab-ზე** (row_values) —
+# აპლიკაციის გახსნისას/დეპლოის შემდეგ ეს ათეულობით წაკითხვა ერთ წუთში იყრიდა თავს და ლიმიტზე (429) აღწევდა -> ზოგ მოთხოვნას 500 ჰქონდა.
+# გამოსწორება: (1) worksheets() პროცესში ერთხელ/2 წთ-ში (საერთო კეში), (2) ყველა tab-ის 1-ლი სტრიქონი **ერთი** batch-ზარით (10 წთ კეში), (3) 429-ზე ავტომატური ცდა პაუზით.
+_WS_TTL, _HDR_TTL = 120.0, 600.0
+_hdr = {"at": 0.0, "rows": {}}
+_hdr_lock = threading.Lock()
+
+
+def _retry_api(fn, name: str):
+    delay, last = 1.0, None
+    for _ in range(5):
+        _count_api_call(name)
+        try:
+            return fn()
+        except gspread.exceptions.APIError as e:
+            last = e
+            try:
+                status = e.response.status_code
+            except Exception:  # noqa: BLE001
+                status = None
+            _count_api_error(status)
+            if status in (429, 500, 502, 503, 504) or status is None:
+                time.sleep(delay + random.uniform(0, 0.4))
+                delay = min(delay * 2, 15)
+                continue
+            raise
+    raise last
+
+
+class _CachedSpreadsheet:
+    """gspread Spreadsheet-ის თხელი გარსი: worksheets() კეშირებულია და 429-ზე იმეორებს; add_worksheet კეშს ასუფთავებს; დანარჩენი — უცვლელად."""
+
+    def __init__(self, ss):
+        self._ss, self._wss, self._at = ss, None, 0.0
+        self._lock = threading.RLock()
+
+    def __getattr__(self, name):
+        return getattr(self._ss, name)
+
+    def worksheets(self):
+        with self._lock:
+            if self._wss is not None and time.monotonic() - self._at < _WS_TTL:
+                return list(self._wss)
+        wss = _retry_api(lambda: self._ss.worksheets(), "worksheets")
+        with self._lock:
+            self._wss, self._at = wss, time.monotonic()
+        return list(wss)
+
+    def add_worksheet(self, *a, **k):
+        r = self._ss.add_worksheet(*a, **k)
+        with self._lock:
+            self._wss = None
+        with _hdr_lock:
+            _hdr["at"] = 0.0
+        return r
+
+    def values_batch_get(self, ranges, **kw):
+        return _retry_api(lambda: self._ss.values_batch_get(ranges, **kw), "values_batch_get")
+
+
 def _get_spreadsheet():
     global _sheet
     if _sheet is None:
-        _sheet = _get_client().open_by_key(config.GOOGLE_SHEET_ID)
+        _sheet = _CachedSpreadsheet(_get_client().open_by_key(config.GOOGLE_SHEET_ID))
     return _sheet
+
+
+def _first_row(ss, ws) -> list:
+    """ws-ის 1-ლი სტრიქონი (სათაურები). ყველა tab-ისა ერთად იკითხება ერთი ზარით და 10 წუთით ინახება; ვერ მოხერხდა/ყალბი ss -> ჩვეულებრივი row_values(1)."""
+    title = ws.title
+    with _hdr_lock:
+        if time.monotonic() - _hdr["at"] < _HDR_TTL and title in _hdr["rows"]:
+            return list(_hdr["rows"][title])
+    getter = getattr(ss, "values_batch_get", None)
+    if getter is not None:
+        try:
+            titles = [w.title for w in ss.worksheets()]
+            res = getter(["'" + t.replace("'", "''") + "'!1:1" for t in titles])
+            rows = {}
+            for t, vr in zip(titles, res.get("valueRanges", [])):
+                vals = vr.get("values") or [[]]
+                rows[t] = [str(x) for x in (vals[0] if vals else [])]
+            with _hdr_lock:
+                _hdr["at"], _hdr["rows"] = time.monotonic(), rows
+            if title in rows:
+                return list(rows[title])
+        except Exception:  # noqa: BLE001 — ნებისმიერი ხარვეზი = ძველი ქცევა (თითო ზარი)
+            logging.getLogger("safehome-crm-sheets").warning("tab-ების სათაურების ჯგუფური წაკითხვა ვერ მოხერხდა — ცალ-ცალკე ვკითხულობ", exc_info=True)
+    return ws.row_values(1)
 
 
 def _ensure_one_sheet(ss, existing: dict, name: str, headers: list[str], rows: int):
@@ -361,10 +446,12 @@ def _ensure_one_sheet(ss, existing: dict, name: str, headers: list[str], rows: i
         ws.append_row(headers)
         return
     ws = existing[name]
-    if ws.row_values(1) != headers:
+    if _first_row(ss, ws) != headers:
         if ws.col_count < len(headers):
             ws.resize(cols=len(headers))
         ws.update("A1", [headers])
+        with _hdr_lock:
+            _hdr["rows"][name] = list(headers)
 
 
 def ensure_sheets():
