@@ -129,7 +129,10 @@ def publish_post(post: dict, channel: dict, listing: dict, client: cl.Client, fe
     if config.TGNET_POST_MODE == "album" and len(blobs) > 1:
         ids = client.send_album(chat, blobs, rendered["text"])
     else:      # ერთი ყდის ფოტო + ღილაკი (კლიენტი ხედავს დეტალებს და ტოვებს მოთხოვნას); დანარჩენი ფოტო ბოტში/Mini App-ში ჩანს
-        btn = {"inline_keyboard": [[{"text": "📩 " + content.L[lang]["cta"], "url": content.link_for(lid, lang)}]]} if lid else None
+        rows = [[{"text": "📩 " + content.L[lang]["cta"], "url": content.link_for(lid, lang)}]] if lid else []
+        if content.catalog_link(lang):                    # Mini App ჩართულია -> მეორე ღილაკი: მთელი კატალოგი + რუკა + ფილტრები
+            rows.append([{"text": content.CATALOG_LABEL[lang], "url": content.catalog_link(lang)}])
+        btn = {"inline_keyboard": rows} if rows else None
         ids = [client.send_photo(chat, blobs[0], rendered["text"], reply_markup=btn)]
     return {"status": "published", "message_ids": json.dumps({"ids": ids, "h": rendered["hash"]}), "hash": rendered["hash"]}
 
@@ -174,6 +177,7 @@ def run_cycle(client: cl.Client | None = None, now: datetime.datetime | None = N
                         done_today[p["channel_key"]] = done_today.get(p["channel_key"], 0) + 1
         queue = sorted([p for p in posts if p["status"] == "approved" and p["channel_key"]], key=lambda p: p["created_at"])
         n = 0
+        notified: set = set()
         for p in queue:
             if n >= max_posts:
                 break
@@ -216,10 +220,21 @@ def run_cycle(client: cl.Client | None = None, now: datetime.datetime | None = N
                 n += 1
                 last_post[p["channel_key"]] = now
                 done_today[p["channel_key"]] = done_today.get(p["channel_key"], 0) + 1
+                if p["listing_key"] not in notified:       # ახალი ბინა გამოქვეყნდა -> შესაბამისი გამოწერების მფლობელებს ერთხელ ვატყობინებთ
+                    notified.add(p["listing_key"])
+                    _notify_subs(lst, client)
             else:
                 _set(p, status=res["status"], error=res["error"][:380])
     st.update_posts(changes)
     return rep
+
+
+def _notify_subs(listing: dict, client) -> None:
+    try:
+        import tgnet_catalog
+        tgnet_catalog.notify_new_listing(listing, lambda chat, text, markup: client.call("sendMessage", chat_id=chat, text=text, reply_markup=markup) is not None)
+    except Exception:  # noqa: BLE001 — შეტყობინების ხარვეზმა გამოქვეყნება არ უნდა შეაფერხოს
+        log.exception("TGNET: გამოწერების შეტყობინება ვერ მოხერხდა")
 
 
 def _sync(posts, chans, client, now, rep, _set, max_ops: int = 6) -> None:

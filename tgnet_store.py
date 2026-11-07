@@ -224,7 +224,7 @@ def list_posts(statuses=None, fresh: bool = False) -> list[dict]:
     return out
 
 
-def queue_groups(statuses=("pending", "needs_fix", "approved", "rejected", "skipped"), limit: int = 60) -> list[dict]:
+def queue_groups(statuses=("pending", "needs_fix", "approved", "rejected", "skipped"), limit: int | None = 60) -> list[dict]:
     """პოსტები განცხადებით დაჯგუფებული (ერთი განცხადება = ერთი ბარათი 3 არხით). ახალი პირველი."""
     groups: dict = {}
     for p in list_posts(statuses, fresh=True):
@@ -233,13 +233,13 @@ def queue_groups(statuses=("pending", "needs_fix", "approved", "rejected", "skip
         if p["channel_key"]:
             g["channels"].append(p["channel_key"])
     out = sorted(groups.values(), key=lambda g: g["created_at"], reverse=True)
-    return out[:limit]
+    return out[:limit] if limit else out
 
 
 def decide_listing(listing_key: str, action: str, by: str = "") -> int:
     """დირექტორის გადაწყვეტილება: approve | reject — ყველა ამ განცხადების pending/needs_fix ჩანაწერზე (3 არხი ერთად). approve needs_fix-ზეც შეიძლება (შეგნებული გადაწყვეტილება)."""
     if action not in ("approve", "reject"):
-        raise TgnetError("მოქმედება უცნობია", 400, "bad_action")
+        raise TgnetError("მოქმედება უცნობია", 400, "bad_action")      # წაშლა — decide_many-ით (ერთიანი ან ერთეული)
     new = "approved" if action == "approve" else "rejected"
     now = now_str()
     with _lock:
@@ -305,3 +305,56 @@ def interest_stats(limit: int = 20) -> list[dict]:
     for a in agg.values():
         a["score"] = a["leads"] * 3 + a["intents"] * 2 + a["views"]
     return sorted(agg.values(), key=lambda a: (a["score"], a["last_at"]), reverse=True)[:limit]
+
+
+QUEUE_STATUSES = ("pending", "needs_fix", "approved", "rejected", "skipped")
+
+
+def queue_page(status: str = "", q: str = "", date_from: str = "", date_to: str = "", limit: int = 20, offset: int = 0) -> dict:
+    """რიგის გვერდი ფილტრებით (სერვერზე): სტატუსი (მძიმით), ძიება (ID/აღწერა/აგენტი), თარიღი (YYYY-MM-DD). counts — სტატუსების რაოდენობა ფილტრის გარეშე, რომ ღილაკებზე რიცხვები სწორი იყოს."""
+    allg = queue_groups(QUEUE_STATUSES, limit=None)
+    counts: dict = {}
+    for g in allg:
+        counts[g["status"]] = counts.get(g["status"], 0) + 1
+    want = {x for x in str(status or "").split(",") if x in QUEUE_STATUSES}
+    ql = _s(q, 80).lower()
+    rows = []
+    for g in allg:
+        if want and g["status"] not in want:
+            continue
+        if ql and ql not in f"{g['listing_key']} {g['summary']} {g['agent_name']}".lower():
+            continue
+        day = g["created_at"][:10]
+        if (date_from and day < date_from) or (date_to and day > date_to):
+            continue
+        rows.append(g)
+    limit = max(1, min(int(limit or 20), 100))
+    offset = max(0, int(offset or 0))
+    return {"groups": rows[offset:offset + limit], "total": len(rows), "counts": counts, "limit": limit, "offset": offset}
+
+
+def decide_many(listing_keys, action: str, by: str = "") -> dict:
+    """ერთიანი მოქმედება მონიშნულ განცხადებებზე (≤200): approve | reject | delete. ერთი წაკითხვა + ერთი ჩაწერა. გამოქვეყნებული პოსტის მქონე განცხადებას არ ვეხებით (მისი წაშლა სინქრონიზაციით ხდება, რომ არხში „ობოლი“ შეტყობინება არ დარჩეს)."""
+    if action not in ("approve", "reject", "delete"):
+        raise TgnetError("მოქმედება უცნობია", 400, "bad_action")
+    keys = {_s(k, 60) for k in (listing_keys or []) if _s(k, 60)}
+    if not keys:
+        raise TgnetError("აირჩიეთ განცხადება", 400, "nothing_selected")
+    if len(keys) > 200:
+        raise TgnetError("ერთდროულად მაქსიმუმ 200 განცხადება", 400, "too_many")
+    new = {"approve": "approved", "reject": "rejected", "delete": "deleted"}[action]
+    allowed_from = ("pending", "needs_fix", "approved", "rejected") + (("skipped",) if action == "delete" else ())
+    now = now_str()
+    with _lock:
+        rows = [p for p in list_posts(fresh=True) if p["listing_key"] in keys]
+        blocked = {p["listing_key"] for p in rows if p["status"] == "published"}
+        changes, touched = {}, set()
+        for p in rows:
+            if p["listing_key"] in blocked or p["status"] not in allowed_from or p["status"] == new:
+                continue
+            changes[p["post_id"]] = {"status": new, "decided_by": _s(by, 80) or "დირექტორი", "decided_at": now, "updated_at": now}
+            touched.add(p["listing_key"])
+        n = _backend.update_many(m.TG_POSTS, m.POST_HEADERS, changes) if changes else 0
+        if n:
+            log_event("", "bulk_" + action, f"{len(touched)} განცხადება, {n} არხი")
+    return {"changed": n, "listings": len(touched), "skipped_published": len(blocked), "not_found": len(keys - {p["listing_key"] for p in rows})}

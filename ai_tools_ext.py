@@ -94,6 +94,16 @@ TOOL_DEFS = {
 RECRUIT_TOOLS = ["recruit_day", "recruit_range", "recruit_find", "recruit_stats"]
 RECRUIT_EDIT_TOOLS = ["recruit_open_queue", "propose_recruit_update"]
 FINANCE_TOOLS = ["finance_overview", "finance_reminders"]
+TG_MANAGER_TOOLS = ["tg_leads", "tg_interest"]
+TG_ADMIN_TOOLS = ["tg_queue"]
+TG_AGENT_TOOLS = ["tg_my_leads"]
+TOOL_DEFS.update({
+    "tg_leads": {"name": "tg_leads", "description": "Telegram ლიდები (არხებიდან/Mini App-დან): რამდენი ახალია (მიუბმელი), რომელია აგენტზე და დაუდასტურებელი, ვის რამდენი აქვს, ყველაზე დიდხანს მოლოდინში მყოფი. მენეჯერი/თიმლიდერი. კლიენტის სახელი პლეისჰოლდერია, ტელეფონი არ გადმოგეცემა.",
+                 "input_schema": _obj({})},
+    "tg_interest": {"name": "tg_interest", "description": "რომელი განცხადებით არიან კლიენტები ყველაზე დაინტერესებულები Telegram-იდან (ნახვა/მოთხოვნა/ლიდი, ქულით). მენეჯერი/თიმლიდერი.", "input_schema": _obj({"limit": {"type": "integer", "minimum": 1, "maximum": 20}})},
+    "tg_queue": {"name": "tg_queue", "description": "Telegram-ზე გამოსაქვეყნებელი რიგის შეჯამება: რამდენი ელოდება დამტკიცებას, გასასწორებელია, დამტკიცებულია; ბოლო განცხადებები. მხოლოდ დირექტორი.", "input_schema": _obj({})},
+    "tg_my_leads": {"name": "tg_my_leads", "description": "ჩემი Telegram ლიდები (აგენტისთვის): რომელი ელოდება დადასტურებას, რომელს აქვს follow-up და როდის. კლიენტის სახელი პლეისჰოლდერია.", "input_schema": _obj({})},
+})
 
 
 def names_for(viewer: dict) -> list[str]:
@@ -105,6 +115,12 @@ def names_for(viewer: dict) -> list[str]:
         out += RECRUIT_EDIT_TOOLS
     if p["finance"]:
         out += FINANCE_TOOLS
+    if p["admin"] or p["manager"]:
+        out += TG_MANAGER_TOOLS
+    if p["admin"]:
+        out += TG_ADMIN_TOOLS
+    if m.s(viewer.get("agent_id"), 40):
+        out += TG_AGENT_TOOLS
     return out
 
 
@@ -134,6 +150,57 @@ class ExtTools:
     def _cand(self, rec: dict) -> dict:
         return {"ref": rec.get("recruit_id"), "name": self.pseudo.token("CANDIDATE", rec.get("name")), "stage": rec.get("stage_label"), "class": rec.get("cls"),
                 "interview": f"{rec.get('interview_day', '')} {rec.get('interview_time', '')}".strip(), "call": rec.get("call_label")}
+
+    # ---------------------------------------------------------------- Telegram (ლიდები/რიგი)
+    def _t_tg_leads(self, args):
+        import tgnet_leads as tl
+        import tgnet_store as ts
+        rows = [r for r in ts.list_lead_rows(fresh=True) if r["kind"] == "lead"]
+        by = {}
+        for r in rows:
+            by[r["status"] or "new"] = by.get(r["status"] or "new", 0) + 1
+        names = {str(a.get("agent_id")): a.get("name") for a in self._agents()}
+        per_agent = {}
+        for r in rows:
+            if r["status"] in ("assigned", "acknowledged", "waiting", "contacted") and r["assigned_agent_id"]:
+                k = names.get(r["assigned_agent_id"]) or r["assigned_agent_id"]
+                per_agent[k] = per_agent.get(k, 0) + 1
+        now = tl._parse_local(ts.now_str())
+        waiting = []
+        for r in rows:
+            at = tl._parse_local(r["assigned_at"] if r["status"] == "assigned" else r["at"])
+            if r["status"] in ("new", "assigned") and at:
+                waiting.append({"client": self.pseudo.token("CLIENT", r["tg_name"] or "-"), "status": r["status"], "minutes": int((now - at).total_seconds() // 60), "seen": bool(r["seen_at"]),
+                                "agent": names.get(r["assigned_agent_id"], "")})
+        waiting.sort(key=lambda x: -x["minutes"])
+        return {"total": len(rows), "by_status": by, "per_agent_open": per_agent, "longest_waiting": waiting[:8], "note": "მიუბმელი ლიდის მისაბმელად მენეჯერი აპში ტაბი Telegram → ლიდები"}
+
+    def _t_tg_interest(self, args):
+        import tgnet_publisher as tp
+        import tgnet_store as ts
+        try:
+            n = max(1, min(20, int(args.get("limit", 8))))
+        except (TypeError, ValueError):
+            n = 8
+        out = []
+        for a in ts.interest_stats(n):
+            lst = tp.get_listing(a["listing_key"])
+            out.append({"listing": a["listing_key"], "summary": ts.listing_summary(lst) if lst else "", "views": a["views"], "requests": a["intents"], "leads": a["leads"], "score": a["score"]})
+        return {"top": out}
+
+    def _t_tg_queue(self, args):
+        import tgnet_store as ts
+        pg = ts.queue_page(limit=8)
+        return {"counts": pg["counts"], "total": pg["total"], "latest": [{"listing": g["listing_key"], "status": g["status"], "summary": g["summary"], "problem": g["error"]} for g in pg["groups"]],
+                "note": "დასამტკიცებლად ტაბი Telegram → რიგი (მონიშვნით ერთიანადაც შეიძლება)"}
+
+    def _t_tg_my_leads(self, args):
+        import tgnet_leads as tl
+        import tgnet_publisher as tp
+        flow = tl.Flow(None, get_listing=tp.get_listing, agents=self._agents)
+        items = flow.my_leads(m.s(self.viewer.get("agent_id"), 40))
+        return {"total": len(items), "leads": [{"client": self.pseudo.token("CLIENT", x["name"] or "-"), "status": x["status"], "listing": x["summary"], "seen": x["seen"], "follow_up": x["follow_up_at"]} for x in items[:12]],
+                "note": "დასადასტურებლად/შედეგის ჩასაწერად აპი → ლიდები (follow-up სავალდებულოა)"}
 
     # ---------------------------------------------------------------- კადრები
     def _t_recruit_day(self, args):

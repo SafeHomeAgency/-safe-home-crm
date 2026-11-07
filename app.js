@@ -292,7 +292,7 @@ const _apiGetCache = new Map();
 const API_GET_TTL = 3000;
 async function api(path, opts) {
   const method = String((opts && opts.method) || "GET").toUpperCase();
-  if (method !== "GET") { _apiGetCache.clear(); return _apiFetch(path, opts); }
+  if (method !== "GET") { _apiGetCache.clear(); try { if (state && state.live) state.live.self = Date.now(); } catch (e) { /* ignore */ } return _apiFetch(path, opts); }
   if (/\/api\/(ai|health)\b|[?&]nocache=1/.test(path)) return _apiFetch(path, opts);
   const hit = _apiGetCache.get(path);
   if (hit && Date.now() - hit.t < API_GET_TTL) {
@@ -2581,7 +2581,7 @@ function renderMyHomeJobs(rows, role) {
         ${(mhSearchResults === null && state.mhTotal && state.mhTotal > rows.length)
           ? `<button class="btn secondary" id="mhMore" style="margin-top:8px">⬇️ მეტის ჩვენება (კიდევ ${state.mhTotal - rows.length})</button>` : ""}
       </div>`;
-  return renderWorkerBadge(role) + renderMhAccountsButton(role) + compose + searchBar + list;
+  return `<div class="mh-wrap">` + renderWorkerBadge(role) + renderMhAccountsButton(role) + compose + searchBar + list + `</div>`;
 }
 
 function bindMyHomeJobsActions() {
@@ -5170,13 +5170,13 @@ async function hubMapRefresh() {
     L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", { maxZoom: 19, attribution: "© OpenStreetMap" }).addTo(map);   /* მუქი სტილი CSS ფილტრით (.hub-mapbox .leaflet-tile-pane) */
     const layer = L.layerGroup().addTo(map);
     h.map = { map, layer, fitted: false, points: [], me: null };
-    map.on("zoomend moveend", () => hubMapDraw());
+    map.on("zoomend moveend", () => hubMapDrawSoon());
     map.on("click", () => hubMapPreview(null));
     box.querySelectorAll("[data-hub-city]").forEach((b) => { b.onclick = () => { hubHaptic(); hubMapPreview(null); const c = HUB_CITIES[b.dataset.hubCity]; map.flyTo([c[0], c[1]], c[2], { duration: 0.8 }); }; });
     document.getElementById("hubMapLocate").onclick = () => hubMapLocate();
     setTimeout(() => map.invalidateSize(), 60);
   }
-  h.map.points = data.points;
+  h.map.points = data.points; h.map.ver = (h.map.ver || 0) + 1; h.map.sig = null;
   const byCity = hubMapCityCounts(data.points);
   box.querySelectorAll("[data-hub-city]").forEach((b) => { const n = byCity[b.dataset.hubCity] || 0; b.innerHTML = `${esc(b.dataset.hubCity)}${n ? ` <b>${n}</b>` : ""}`; });
   if (info) info.textContent = `🗺 ${data.total} განცხადება რუკაზე${data.no_coords ? ` · ${data.no_coords} კოორდინატის გარეშე (სიაში ჩანს)` : ""}${data.truncated ? " · ნაწილი (დააზუსტეთ ფილტრი)" : ""}`;
@@ -5239,12 +5239,20 @@ function hubMapGroupList(g) {
   backdrop.onclick = (e) => { if (e.target === backdrop) closeDetail(); };
   box.querySelectorAll("[data-hub-open]").forEach((b) => { b.onclick = () => hubOpenDetail(b.dataset.hubOpen); });
 }
+let _hubDrawT = 0;
+function hubMapDrawSoon() { clearTimeout(_hubDrawT); _hubDrawT = setTimeout(hubMapDraw, 120); }      // zoomend+moveend ერთად ორჯერ არ ვხატავთ; ანიმაციისას ერთხელ
 function hubMapDraw() {
   const h = state.hub, m = h.map;
   if (!m || !m.map) return;
+  /* მხოლოდ ხილული არე (+35% ზღვარი): ათასობით მარკერი DOM-ში არ ჩაიწერება; იგივე ხედი/წერტილები -> თავიდან არ ვხატავთ */
+  const bnds = m.map.getBounds().pad(0.35);
+  const vis = m.points.filter((p) => bnds.contains([p.lat, p.lng]));
+  const sig = m.map.getZoom() + "|" + bnds.getWest().toFixed(4) + "|" + bnds.getSouth().toFixed(4) + "|" + bnds.getEast().toFixed(4) + "|" + bnds.getNorth().toFixed(4) + "|" + vis.length + "|" + (m.ver || 0);
+  if (m.sig === sig) return;
+  m.sig = sig;
   m.layer.clearLayers();
   const proj = (lat, lng) => { const p = m.map.latLngToContainerPoint([lat, lng]); return { x: p.x, y: p.y }; };
-  const split = hubBuildings(m.points);
+  const split = hubBuildings(vis);
   split.buildings.forEach((g) => {
     const mk = L.marker([g.lat, g.lng], { icon: L.divIcon({ className: "hub-pin", html: hubBldPill(g), iconSize: null }), zIndexOffset: 500 }).addTo(m.layer);
     mk.on("click", () => hubOpenBuilding(g));
@@ -5864,6 +5872,7 @@ function tabsFor(role) {
   if (state.recAccess && state.recAccess.can_view) tabs.splice(tabs.indexOf(HUB_TAB) + 1, 0, REC_TAB);
   // 📣 Telegram ქსელი (TGNET): მხოლოდ დირექტორი (სერვერი ამბობს /api/tgnet/access), მხოლოდ ადმინის ხედში
   if (role === "admin" && state.tgAccess && (state.tgAccess.can_view || state.tgAccess.can_leads)) { tabs = tabs.slice(); tabs.push(TG_TAB); }
+  else if (state.tgAccess && state.tgAccess.can_mine) { tabs = tabs.slice(); tabs.push(TGM_TAB); }       // აგენტი: „ჩემი ლიდები“ (Telegram)
   return tabs;
 }
 
@@ -5886,6 +5895,47 @@ function renderTabbar() {
   });
   const more = bar.querySelector("button[data-more]");
   if (more) more.onclick = () => openMoreSheet(rest);
+}
+
+/* ================================================ ⚡ ლაივ-განახლება ==================================================
+   სერვერზე ცვლილების მრიცხველია (/api/live, ცხრილს არ კითხულობს). ~7 წმ-ში ერთხელ ვამოწმებთ; შეიცვალა -> ეკრანი თავისით განახლდება, **თუ მომხმარებელი არაფერს წერს** და ფანჯარა არ აქვს გახსნილი.
+   საკუთარი მოქმედების შემდეგ (4 წმ) ზედმეტად აღარ ვანახლებთ; AI ჩატი/სისტემა/რუკა არ ირღვევა. გვერდი დაფარულია (ფონზე) -> არ ვამოწმებთ. */
+const LIVE_SKIP = new Set(["ai", "system"]);
+if (!state.live) state.live = { seq: null, epoch: null, busy: false, last: 0, self: 0, input: 0, timer: null };
+function liveIdle() {
+  const L = state.live, ae = document.activeElement;
+  if (ae && /^(INPUT|TEXTAREA|SELECT)$/.test(ae.tagName) && !/^(checkbox|radio|button)$/.test(ae.type || "")) return false;
+  const mb = document.getElementById("modalBackdrop");
+  if (mb && !mb.hidden) return false;
+  return Date.now() - L.input > 15000;                // ბოლო 15 წმ-ში არაფერი უკრეფია (დაუსრულებელი ფორმა არ დაიკარგოს)
+}
+async function liveTick(force) {
+  const L = state.live;
+  if (L.busy || (document.hidden && !force)) return;
+  L.busy = true;
+  try {
+    const d = await api("/api/live?nocache=1");
+    if (L.seq === null) { L.seq = d.seq; L.epoch = d.epoch; return; }
+    if (d.seq === L.seq && d.epoch === L.epoch) return;
+    if (Date.now() - L.self < 4000) { L.seq = d.seq; L.epoch = d.epoch; return; }        // ჩემივე ცვლილებაა — ეკრანი უკვე განახლდა
+    if (!liveIdle() || Date.now() - L.last < 8000) return;                                // მოგვიანებით (მრიცხველს არ ვაახლებთ — შემდეგი ცდა ისევ ნახავს)
+    L.seq = d.seq; L.epoch = d.epoch;
+    const tab = state.tab[state.role];
+    if (LIVE_SKIP.has(tab) || (tab === "hub" && state.hub && state.hub.view === "map")) return;
+    L.last = Date.now();
+    try { _apiGetCache.clear(); } catch (e) { /* ignore */ }
+    for (const k in lazyCache) delete lazyCache[k];
+    if (state.rec) { state.rec.home = null; state.rec.list = null; state.rec.cal = null; state.rec.stats = null; }
+    if (state.tg) { state.tg.data = null; state.tg.queue = null; state.tg.leads = null; }
+    await renderContent();
+  } catch (e) { /* ქსელი/401 — შემდეგ ცდაზე */ } finally { L.busy = false; }
+}
+function liveStart() {
+  const L = state.live;
+  if (L.timer) return;
+  document.addEventListener("input", () => { L.input = Date.now(); }, true);
+  document.addEventListener("visibilitychange", () => { if (!document.hidden) liveTick(true); });
+  L.timer = setInterval(liveTick, 7000);
 }
 
 /* ================================================ 📣 Telegram ქსელი (TGNET) ==================================================
@@ -5924,46 +5974,137 @@ function tgCard(c) {
 }
 async function tgRefresh() {
   const a = state.tgAccess || {};
-  if (a.can_view) { state.tg.data = await api("/api/tgnet/channels"); try { state.tg.queue = await api("/api/tgnet/queue"); } catch (e) { state.tg.queue = null; } }
+  if (a.can_view) { state.tg.data = await api("/api/tgnet/channels"); try { state.tg.queue = await api(tgQueueUrl()); } catch (e) { state.tg.queue = null; } }
   if (a.can_leads) { try { state.tg.leads = await api("/api/tgnet/leads"); } catch (e) { state.tg.leads = null; } }
 }
 const TG_QST = { pending: ["ელოდება დამტკიცებას", "blue"], needs_fix: ["გასასწორებელია", "red"], approved: ["დამტკიცებულია", "green"], rejected: ["უარყოფილია", "gray"], skipped: ["არხს არ ეკუთვნის", "gray"] };
+if (!state.tg.qf) state.tg.qf = { status: "", q: "", from: "", to: "", limit: 20, sel: new Set() };
+function tgQueueUrl() {
+  const f = state.tg.qf;
+  const p = new URLSearchParams({ limit: String(f.limit) });
+  if (f.status) p.set("status", f.status);
+  if (f.q) p.set("q", f.q);
+  if (f.from) p.set("from", f.from);
+  if (f.to) p.set("to", f.to);
+  return "/api/tgnet/queue?" + p.toString();
+}
 function tgPrevHtml(p) {
   if (!p) return "";
   return `<div class="tg-prev">${["ka", "en", "ru"].map((l) => `<div class="tg-prev-l"><b>${TG_LANG[l]}</b>${(p.langs[l].problems || []).length ? `<div class="tg-err">⚠️ ${esc(p.langs[l].problems.join("; "))}</div>` : ""}<pre>${esc(String(p.langs[l].text || "").replace(/<[^>]+>/g, ""))}</pre></div>`).join("")}<div class="muted" style="font-size:12px">ფოტო: ${p.photos}</div></div>`;
 }
 function tgQueueCard(q) {
   if (!q) return "";
-  const gs = q.groups || [];
+  const f = state.tg.qf, gs = q.groups || [], counts = q.counts || {};
+  const chips = [["", "ყველა", Object.values(counts).reduce((a, b) => a + b, 0)], ["pending", "ელოდება", counts.pending || 0], ["needs_fix", "გასასწორებელი", counts.needs_fix || 0], ["approved", "დამტკიცებული", counts.approved || 0], ["rejected", "უარყოფილი", counts.rejected || 0], ["skipped", "არ ეკუთვნის", counts.skipped || 0]]
+    .map(([k, l, n]) => `<button class="hub-chip ${f.status === k ? "on" : ""}" data-tg-qs="${k}">${l} <b>${n}</b></button>`).join("");
+  const pageKeys = gs.map((g) => g.listing_key), allSel = pageKeys.length && pageKeys.every((k) => f.sel.has(k));
   const items = gs.map((g) => {
     const st = TG_QST[g.status] || [g.status, "gray"];
     const can = ["pending", "needs_fix", "approved", "rejected"].includes(g.status);
-    return `<div class="tg-q" data-tg-q="${esc(g.listing_key)}"><div class="tg-top"><b>${esc(g.listing_key)}</b><span class="rc-cl-mini tg-st tg-${st[1]}">${esc(st[0])}</span></div>
+    return `<div class="tg-q ${f.sel.has(g.listing_key) ? "tg-picked" : ""}" data-tg-q="${esc(g.listing_key)}"><div class="tg-top"><label class="tg-chk"><input type="checkbox" data-tg-sel="${esc(g.listing_key)}" ${f.sel.has(g.listing_key) ? "checked" : ""}> <b>${esc(g.listing_key)}</b></label><span class="rc-cl-mini tg-st tg-${st[1]}">${esc(st[0])}</span></div>
       <div style="font-size:13px">${esc(g.summary || "—")}</div><div class="muted" style="font-size:12px">${esc(g.agent_name || "")} · ${esc(g.created_at || "")} · არხები: ${(g.channels || []).length}</div>
       ${g.error ? `<div class="tg-err">⚠️ ${esc(g.error)}</div>` : ""}
-      <div class="tg-row"><button class="btn secondary" data-tg-prev="${esc(g.listing_key)}">👁 ტექსტი</button>${can && g.status !== "approved" ? `<button class="btn" data-tg-dec="approve" data-k="${esc(g.listing_key)}">✅ დამტკიცება</button>` : ""}${can && g.status !== "rejected" ? `<button class="btn secondary" data-tg-dec="reject" data-k="${esc(g.listing_key)}">✖ უარყოფა</button>` : ""}</div>
+      <div class="tg-row"><button class="btn secondary" data-tg-prev="${esc(g.listing_key)}">👁 ტექსტი</button>${can && g.status !== "approved" ? `<button class="btn" data-tg-dec="approve" data-k="${esc(g.listing_key)}">✅ დამტკიცება</button>` : ""}${can && g.status !== "rejected" ? `<button class="btn secondary" data-tg-dec="reject" data-k="${esc(g.listing_key)}">✖ უარყოფა</button>` : ""}<button class="btn secondary" data-tg-del="${esc(g.listing_key)}" title="წაშლა">🗑</button></div>
       ${tgPrevHtml((state.tg.prev || {})[g.listing_key])}</div>`;
   }).join("");
-  return `<div class="card"><div class="tg-top"><b>📥 გამოსაქვეყნებელი რიგი</b><span class="muted" style="font-size:12px">${gs.length}</span></div>
+  const more = (q.total || 0) > gs.length + (q.offset || 0);
+  const nsel = f.sel.size;
+  return `<div class="card"><div class="tg-top"><b>📥 გამოსაქვეყნებელი რიგი</b><span class="muted" style="font-size:12px">${q.total || 0}</span></div>
     <div class="muted" style="font-size:12px;margin:4px 0 8px">თიქი აგენტის ფორმაში: <b>${q.queue_enabled ? "ჩართულია" : "გამორთულია (Railway: TGNET_QUEUE_ENABLED=1)"}</b> · ავტომატური დამტკიცება: <b>${q.auto_approve ? "კი" : "არა — დირექტორი ამტკიცებს"}</b><br>${q.posting_available ? "დამტკიცებული განცხადება არხში გადის თავისით (თუ არხი ჩართულია და მთავარი ჩამრთველი ჩართულია)." : "არხებში გაგზავნა ამ სერვერზე <b>გამორთულია</b> (Railway: TGNET_PUBLISH_ENABLED)."}</div>
-    ${items || `<div class="empty">რიგი ცარიელია</div>`}</div>`;
+    <div class="hub-row">${chips}</div>
+    <div class="tg-row"><input class="tg-chat" id="tgQq" placeholder="ძიება: ID, უბანი, აგენტი" value="${esc(f.q)}"><input class="tg-chat" id="tgQf" type="date" value="${esc(f.from)}" title="თარიღიდან"><input class="tg-chat" id="tgQt" type="date" value="${esc(f.to)}" title="თარიღამდე">
+      <button class="btn secondary" id="tgQclr">✕ გასუფთავება</button></div>
+    <div class="tg-bulk"><label class="tg-chk"><input type="checkbox" id="tgSelAll" ${allSel ? "checked" : ""}> ყველა ამ გვერდზე (${gs.length})</label>
+      <span class="muted" style="font-size:12px">არჩეულია: <b>${nsel}</b></span>
+      <button class="btn" data-tg-bulk="approve" ${nsel ? "" : "disabled"}>✅ დამტკიცება</button><button class="btn secondary" data-tg-bulk="reject" ${nsel ? "" : "disabled"}>✖ უარყოფა</button><button class="btn secondary" data-tg-bulk="delete" ${nsel ? "" : "disabled"}>🗑 წაშლა</button></div>
+    ${items || `<div class="empty">რიგი ცარიელია</div>`}
+    ${more ? `<button class="btn secondary" id="tgQmore" style="margin-top:8px">⬇️ მეტის ჩვენება (კიდევ ${(q.total || 0) - gs.length - (q.offset || 0)})</button>` : ""}</div>`;
 }
-const TG_LST = { new: ["ახალი", "red"], assigned: ["მიბმულია", "green"], closed: ["დახურულია", "gray"] };
+
+/* ---- აგენტის „ჩემი ლიდები“ (Telegram-იდან): დადასტურება, შედეგი + სავალდებულო follow-up ---- */
+const TGM_TAB = { id: "tgmine", label: "ლიდები", icon: "📞" };
+const TGM_ST = { assigned: ["დასადასტურებელი", "red"], acknowledged: ["დადასტურებულია", "blue"], contacted: ["დაკავშირებული", "green"], waiting: ["მოგვიანებით", "gray"] };
+if (!state.tgm) state.tgm = { leads: null, open: null, seen: new Set() };
+function tgmCard(x) {
+  const st = TGM_ST[x.status] || [x.status, "gray"], o = state.tgm.open && state.tgm.open.id === x.lead_id ? state.tgm.open.kind : "";
+  const form = !o ? "" : `<div class="tg-prev"><b>${o === "contacted" ? "📞 დავუკავშირდი" : o === "waiting" ? "⏳ მოგვიანებით" : "🚫 ვერ ვასრულებ"}</b>
+      ${o === "decline" ? "" : `<div class="muted" style="font-size:12px;margin:4px 0">შემდეგი კონტაქტის თარიღი და საათი (<b>სავალდებულოა</b> — CRM-ში follow-up შეიქმნება)</div><input class="tg-chat" id="tgmDue" type="datetime-local" style="width:100%">`}
+      <textarea class="tg-chat" id="tgmNote" rows="2" style="width:100%;margin-top:6px" placeholder="${o === "decline" ? "რატომ ვერ ასრულებთ (სავალდებულოა)" : o === "contacted" ? "რა შეთანხმდით (სავალდებულოა)" : "შენიშვნა (არასავალდებულო)"}"></textarea>
+      <div class="tg-row"><button class="btn" data-tgm-save="${esc(x.lead_id)}" data-k="${o}">შენახვა</button><button class="btn secondary" data-tgm-cancel="1">გაუქმება</button></div></div>`;
+  return `<div class="card tg-card" data-tgm-card="${esc(x.lead_id)}"><div class="tg-top"><b>${esc(x.name || "—")}</b><span class="rc-cl-mini tg-st tg-${st[1]}">${esc(st[0])}</span></div>
+    <div style="font-size:14px;margin:4px 0"><a href="tel:+${esc(x.phone)}">📞 +${esc(x.phone)}</a></div><div style="font-size:13px">${esc(x.summary)}</div>
+    <div class="muted" style="font-size:12px">${esc(x.assigned_at || x.at || "")}${x.follow_up_at ? ` · 📅 follow-up ${esc(x.follow_up_at)}` : ""}${x.agent_note ? ` · 💬 ${esc(x.agent_note)}` : ""}</div>
+    <div class="tg-row">${x.status === "assigned" ? `<button class="btn" data-tgm-act="ack" data-id="${esc(x.lead_id)}">✅ ვადასტურებ</button>` : ""}
+      <button class="btn secondary" data-tgm-open="contacted" data-id="${esc(x.lead_id)}">📞 დავუკავშირდი</button><button class="btn secondary" data-tgm-open="waiting" data-id="${esc(x.lead_id)}">⏳ მოგვიანებით</button><button class="btn secondary" data-tgm-open="decline" data-id="${esc(x.lead_id)}">🚫 ვერ ვასრულებ</button></div>${form}</div>`;
+}
+async function renderTgMine(content) {
+  const root = content || document.getElementById("content");
+  if (!root) return;
+  try { state.tgm.leads = (await api("/api/tgnet/my-leads")).leads; } catch (e) { root.innerHTML = `<div class="card"><div class="empty">⚠️ ${esc(e.message || "შეცდომა")}</div></div>`; return; }
+  tgmDraw(root);
+}
+function tgmDraw(root) {
+  const L = state.tgm.leads || [];
+  root.innerHTML = `<div class="card"><div class="tg-top"><b>📞 ჩემი კლიენტები Telegram-იდან</b><span class="muted" style="font-size:12px">${L.length}</span></div>
+    <div class="muted" style="font-size:12px">დაადასტურეთ, დაუკავშირდით და მიუთითეთ შემდეგი კონტაქტის დრო — ეს CRM-ში follow-up-ად ჩაიწერება. დადასტურებამდე შეხსენება განმეორდება.</div></div>${L.map(tgmCard).join("") || `<div class="card"><div class="empty">ახალი ლიდები ჯერ არ გაქვთ</div></div>`}`;
+  L.filter((x) => x.status === "assigned" && !x.seen && !state.tgm.seen.has(x.lead_id)).forEach((x) => { state.tgm.seen.add(x.lead_id); api("/api/tgnet/my-leads/" + encodeURIComponent(x.lead_id) + "/seen", { method: "POST", body: "{}" }).catch(() => {}); });
+  const reload = async () => { await renderTgMine(root); };
+  const call = async (id, body) => { try { await api("/api/tgnet/my-leads/" + encodeURIComponent(id) + "/action", { method: "POST", body: JSON.stringify(body) }); toast("✅ შენახულია"); state.tgm.open = null; await reload(); } catch (e) { toast(e.message || "შეცდომა"); } };
+  root.querySelectorAll("[data-tgm-act]").forEach((b) => { b.onclick = () => call(b.dataset.id, { action: b.dataset.tgmAct }); });
+  root.querySelectorAll("[data-tgm-open]").forEach((b) => { b.onclick = () => { state.tgm.open = { id: b.dataset.id, kind: b.dataset.tgmOpen }; tgmDraw(root); }; });
+  root.querySelectorAll("[data-tgm-cancel]").forEach((b) => { b.onclick = () => { state.tgm.open = null; tgmDraw(root); }; });
+  root.querySelectorAll("[data-tgm-save]").forEach((b) => {
+    b.onclick = () => {
+      const due = (root.querySelector("#tgmDue") || {}).value || "", note = ((root.querySelector("#tgmNote") || {}).value || "").trim(), kind = b.dataset.k;
+      if (kind !== "decline" && !due) { toast("მიუთითეთ follow-up-ის თარიღი და საათი"); return; }
+      if (kind !== "waiting" && !note) { toast(kind === "decline" ? "მიუთითეთ რატომ ვერ ასრულებთ" : "დაწერეთ რა შეთანხმდით"); return; }
+      call(b.dataset.tgmSave, { action: kind, note, follow_up_at: due.replace("T", " ") });
+    };
+  });
+}
+/* Telegram-ის შეტყობინების ღილაკიდან: ?tgl=<ლიდი> — პირდაპირ ლიდების ეკრანზე */
+async function tgDeepLink() {
+  let q;
+  try { q = new URLSearchParams(location.search); } catch (e) { return; }
+  if (!q.get("tgl") || state._tgDeep) return;
+  state._tgDeep = true;
+  await tgLoadAccess();
+  const a = state.tgAccess || {};
+  state.tab[state.role] = (state.role === "admin" && (a.can_view || a.can_leads)) ? "tgnet" : (a.can_mine ? "tgmine" : state.tab[state.role]);
+  try { history.replaceState(null, "", location.pathname); } catch (e) { /* ignore */ }
+  await renderContent();
+}
+const TG_LST = { new: ["ახალი", "red"], assigned: ["აგენტზეა", "blue"], acknowledged: ["დადასტურებულია", "green"], contacted: ["დაკავშირებულია", "green"], waiting: ["მოგვიანებით", "gray"], closed: ["დახურულია", "gray"] };
 function tgLeadsCard(l) {
   if (!l) return "";
   const ags = l.agents || [];
   const top = (l.top || []).map((t) => `<div class="tg-top" style="font-size:13px;padding:3px 0"><span>${esc(t.summary || t.listing_key)}<span class="muted"> · ${esc(t.agent || "")}</span></span><span class="muted">👁 ${t.views} · 📞 ${t.intents} · ✅ ${t.leads}</span></div>`).join("");
   const rows = (l.leads || []).map((x) => {
-    const st = TG_LST[x.status] || [x.status, "gray"];
+    const st = TG_LST[x.status] || [x.status_label || x.status, "gray"];
     const opts = ags.map((a) => `<option value="${esc(a.agent_id)}" ${a.agent_id === x.listing_agent_id ? "selected" : ""}>${esc(a.name)}</option>`).join("");
-    return `<div class="tg-q" data-tg-lead="${esc(x.lead_id)}"><div class="tg-top"><b>${esc(x.name || "—")}</b><span class="rc-cl-mini tg-st tg-${st[1]}">${esc(st[0])}${x.assigned ? " · " + esc(x.assigned) : ""}</span></div>
+    return `<div class="tg-q ${(state.tg.lsel || new Set()).has(x.lead_id) ? "tg-picked" : ""}" data-tg-lead="${esc(x.lead_id)}"><div class="tg-top"><label class="tg-chk"><input type="checkbox" data-tg-lsel="${esc(x.lead_id)}" ${(state.tg.lsel || new Set()).has(x.lead_id) ? "checked" : ""}> <b>${esc(x.name || "—")}</b></label><span class="rc-cl-mini tg-st tg-${st[1]}">${esc(st[0])}${x.assigned ? " · " + esc(x.assigned) : ""}</span></div>
       <div style="font-size:13px"><a href="tel:+${esc(x.phone)}">📞 +${esc(x.phone)}</a></div><div style="font-size:13px">${esc(x.summary)}</div>
-      <div class="muted" style="font-size:12px">${esc(x.at)} · ბინის აგენტი: ${esc(x.listing_agent || "—")}${x.note ? " · " + esc(x.note) : ""}</div>
+      <div class="muted" style="font-size:12px">${esc(x.at)} · ბინის აგენტი: ${esc(x.listing_agent || "—")}${x.note ? " · " + esc(x.note) : ""}${x.status === "assigned" ? (x.seen ? " · 👀 გახსნა, არ დაუდასტურებია" : " · 👁 ჯერ არ გაუხსნია") : ""}${x.follow_up_at ? " · 📅 " + esc(x.follow_up_at) : ""}${x.agent_note ? " · 💬 " + esc(x.agent_note) : ""}</div>
       <div class="tg-row"><select class="tg-ag" data-tg-ag="${esc(x.lead_id)}">${opts}</select><button class="btn" data-tg-assign="${esc(x.lead_id)}">${x.status === "assigned" ? "🔁 სხვას მიბმა" : "👤 აგენტს მიბმა"}</button></div></div>`;
   }).join("");
+  if (!state.tg.lsel) state.tg.lsel = new Set();
+  const nl = state.tg.lsel.size;
   return `<div class="card"><div class="tg-top"><b>📞 ლიდები Telegram-იდან</b><span class="muted" style="font-size:12px">${(l.leads || []).length}</span></div>
+    ${(l.leads || []).length ? `<div class="tg-bulk"><label class="tg-chk"><input type="checkbox" id="tgLSelAll" ${(l.leads || []).every((x) => state.tg.lsel.has(x.lead_id)) ? "checked" : ""}> ყველა</label><span class="muted" style="font-size:12px">არჩეულია: <b>${nl}</b></span><button class="btn secondary" id="tgLClose" ${nl ? "" : "disabled"}>🗑 დახურვა/წაშლა</button></div>` : ""}
     ${top ? `<div class="muted" style="font-size:12px;margin:6px 0 2px">🔥 ყველაზე დაინტერესებული განცხადებები (👁 ნახვა · 📞 მოთხოვნა · ✅ ლიდი)</div>${top}` : ""}
     ${rows || `<div class="empty">ლიდები ჯერ არ არის</div>`}</div>`;
+}
+function tgHelpCard() {
+  return `<details class="card tg-help"><summary><b>❓ როგორ მუშაობს Telegram ქსელი</b></summary>
+    <ol class="muted" style="font-size:13px;line-height:1.6;padding-left:18px">
+      <li><b>აგენტი</b> MyHome ფორმაში მონიშნავს „📣 Telegram-ის არხებშიც გამოქვეყნდეს“ — განცხადება რიგში ჩადგება (ფოტო ≥3, ფასი, უბანი სავალდებულოა).</li>
+      <li><b>დირექტორი/მენეჯერი</b> რიგში ხედავს ტექსტს 3 ენაზე (👁), ამტკიცებს ერთიანად (☑ + ✅) ან უარყოფს/წაშლის. თარიღით და ძიებით ფილტრი ხელმისაწვდომია.</li>
+      <li>დამტკიცებული განცხადება <b>თავისით გადის</b> ჩართულ არხებში (9:00–22:00, არხზე ინტერვალი 20 წთ) „SH“ იარლიყიანი ფოტოთი.</li>
+      <li><b>კლიენტი</b> ღილაკით იხსნება ბოტი/Mini App: დეტალები, კატალოგი, რუკა, ფილტრები, გამოწერა. „მინდა დაკავშირება“ → ნომერი → CRM-ში კლიენტი.</li>
+      <li><b>მენეჯერს</b> მოდის შეტყობინება; აქ „ლიდები“-ში ირჩევს აგენტს (ნაგულისხმევად ბინის აგენტი). მიუბმელი ლიდის შესახებ 5 წთ-ში მოდის შეხსენება.</li>
+      <li><b>აგენტი</b> ტაბში „ლიდები“ ადასტურებს, დაუკავშირდება და მიუთითებს <b>follow-up</b>-ს (სავალდებულოა). დადასტურებამდე შეხსენება განმეორდება, მენეჯერს უკუკავშირი მიდის.</li>
+      <li><b>SAIRO</b>-ს შეგიძლიათ ჰკითხოთ: „რამდენი მიუბმელი ლიდია?“, „რომელ ბინაზეა ყველაზე მეტი ინტერესი?“, „რა ელოდება დამტკიცებას?“.</li>
+    </ol></details>`;
 }
 async function renderTgnet(content) {
   const root = content || document.getElementById("content");
@@ -5989,8 +6130,27 @@ function tgDraw(root) {
       <div class="tg-row"><button class="btn secondary" id="tgHook">🤖 ბოტის დაკავშირება (webhook)</button><button class="btn secondary" id="tgHookInfo">ℹ️ ბოტის სტატუსი</button></div>
       <div class="muted" id="tgHookOut" style="font-size:12px;margin-top:4px">${esc(state.tg.hookText || "")}</div></div>${tgQueueCard(state.tg.queue)}`;
   }
-  root.innerHTML = head + tgLeadsCard(state.tg.leads) + groups;
+  root.innerHTML = head + tgLeadsCard(state.tg.leads) + groups + tgHelpCard();
   if (!(a.can_view && d)) return;
+  const qreload = act(async () => { await tgRefresh(); tgDraw(root); });
+  const qf = state.tg.qf;
+  root.querySelectorAll("[data-tg-qs]").forEach((b) => { b.onclick = () => { qf.status = b.dataset.tgQs; qf.limit = 20; qreload(); }; });
+  const qin = (id, key) => { const el = root.querySelector(id); if (el) el.onchange = () => { qf[key] = (el.value || "").trim(); qf.limit = 20; qreload(); }; };
+  qin("#tgQq", "q"); qin("#tgQf", "from"); qin("#tgQt", "to");
+  const qc = root.querySelector("#tgQclr"); if (qc) qc.onclick = () => { Object.assign(qf, { status: "", q: "", from: "", to: "", limit: 20 }); qf.sel.clear(); qreload(); };
+  const qm = root.querySelector("#tgQmore"); if (qm) qm.onclick = () => { qf.limit += 20; qreload(); };
+  root.querySelectorAll("[data-tg-sel]").forEach((c) => { c.onchange = () => { if (c.checked) qf.sel.add(c.dataset.tgSel); else qf.sel.delete(c.dataset.tgSel); tgDraw(root); }; });
+  const sa = root.querySelector("#tgSelAll"); if (sa) sa.onchange = () => { const ks = ((state.tg.queue || {}).groups || []).map((g) => g.listing_key); ks.forEach((k) => (sa.checked ? qf.sel.add(k) : qf.sel.delete(k))); tgDraw(root); };
+  const bulk = async (action, keys) => {
+    const label = { approve: "დამტკიცდეს", reject: "უარყოფილი იყოს", delete: "წაიშალოს რიგიდან" }[action];
+    if (action !== "approve" && !confirm(`${keys.length} განცხადება ${label}?`)) return;
+    const r = await api("/api/tgnet/queue/bulk", { method: "POST", body: JSON.stringify({ keys, action }) });
+    keys.forEach((k) => qf.sel.delete(k));
+    toast(`✅ ${r.listings} განცხადება${r.skipped_published ? ` · ${r.skipped_published} გამოქვეყნებულია — არ შეეხო` : ""}`);
+    await tgRefresh(); tgDraw(root);
+  };
+  root.querySelectorAll("[data-tg-bulk]").forEach((b) => { b.onclick = act(() => bulk(b.dataset.tgBulk, Array.from(qf.sel))); });
+  root.querySelectorAll("[data-tg-del]").forEach((b) => { b.onclick = act(() => bulk("delete", [b.dataset.tgDel])); });
   root.querySelectorAll("[data-tg-dec]").forEach((b) => {
     b.onclick = act(async () => { await api("/api/tgnet/queue/" + encodeURIComponent(b.dataset.k), { method: "POST", body: JSON.stringify({ action: b.dataset.tgDec }) }); toast(b.dataset.tgDec === "approve" ? "✅ დამტკიცდა" : "✖ უარყოფილია"); await tgRefresh(); tgDraw(root); });
   });
@@ -6019,7 +6179,22 @@ function tgDraw(root) {
   const hk = root.querySelector("#tgHook"); if (hk) hk.onclick = act(async () => { const r = await api("/api/tgnet/webhook/set", { method: "POST", body: "{}" }); state.tg.hookText = "✅ ბოტი დაკავშირებულია: " + r.url; tgDraw(root); });
   const hi = root.querySelector("#tgHookInfo"); if (hi) hi.onclick = act(async () => { const r = await api("/api/tgnet/webhook/info"); state.tg.hookText = (r.url ? (r.url === r.expected ? "✅ დაკავშირებულია" : "⚠️ სხვა მისამართზეა: " + r.url) : "⚠️ ბოტი არ არის დაკავშირებული") + ` · რიგში: ${r.pending}` + (r.last_error ? ` · ბოლო შეცდომა: ${r.last_error}` : ""); tgDraw(root); });
 }
-document.addEventListener("click", (ev) => {      // მიბმა (ლიდები) — დელეგირებული, რომ თიმლიდერის ხედშიც (არხების გარეშე) იმუშაოს
+document.addEventListener("change", (ev) => {      // ლიდების მონიშვნა (დელეგირებული — თიმლიდერის ხედშიც მუშაობს)
+  const t = ev.target;
+  if (!t || !t.matches) return;
+  const sel = state.tg && (state.tg.lsel || (state.tg.lsel = new Set()));
+  if (t.matches("[data-tg-lsel]")) { if (t.checked) sel.add(t.dataset.tgLsel); else sel.delete(t.dataset.tgLsel); tgDraw(document.getElementById("content")); }
+  else if (t.matches("#tgLSelAll")) { ((state.tg.leads || {}).leads || []).forEach((x) => (t.checked ? sel.add(x.lead_id) : sel.delete(x.lead_id))); tgDraw(document.getElementById("content")); }
+});
+document.addEventListener("click", (ev) => {      // მიბმა (ლიდები)
+  const cb = ev.target && ev.target.closest ? ev.target.closest("#tgLClose") : null;
+  if (cb && !cb.disabled) {
+    const ids = Array.from(state.tg.lsel || []);
+    if (!ids.length || !confirm(`${ids.length} ლიდი დაიხუროს (ეკრანიდან გაქრება, ჩანაწერი აუდიტისთვის დარჩება)?`)) return;
+    api("/api/tgnet/leads/bulk", { method: "POST", body: JSON.stringify({ ids, action: "close" }) }).then((r) => { state.tg.lsel.clear(); toast(`✅ დაიხურა: ${r.closed}${r.skipped ? ` · გამოტოვებული: ${r.skipped}` : ""}`); return tgRefresh(); }).then(() => tgDraw(document.getElementById("content"))).catch((e) => toast(e.message || "შეცდომა"));
+    return;
+  }
+  // — დელეგირებული, რომ თიმლიდერის ხედშიც (არხების გარეშე) იმუშაოს
   const b = ev.target && ev.target.closest ? ev.target.closest("[data-tg-assign]") : null;
   if (!b) return;
   const id = b.dataset.tgAssign, sel = document.querySelector(`[data-tg-ag="${id}"]`);
@@ -7110,6 +7285,7 @@ async function renderContent() {
     if (tab === "hub") { await renderHub(content); return; }
     if (tab === "recruit") { await renderRecruit(content); return; }
     if (tab === "tgnet") { await renderTgnet(content); return; }
+    if (tab === "tgmine") { await renderTgMine(content); return; }
     if (tab === "system") { await renderSystem(content); return; }
     if (tab === "ai") { await renderAi(content); return; }
     if (LAZY_ENDPOINTS[tab]) {
@@ -7246,6 +7422,8 @@ async function load() {
     recLoadAccess();
     tgLoadAccess();
     tgLoadShare();
+    liveStart();
+    tgDeepLink();
     recDeepLink();
   } catch (e) {
     document.getElementById("content").innerHTML =

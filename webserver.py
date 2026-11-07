@@ -103,6 +103,30 @@ def _track_request(resp):
     return resp
 
 
+@app.after_request
+def _live_bump(resp):
+    """ნებისმიერი წარმატებული ცვლილება (POST/PUT/PATCH/DELETE /api/* და /internal/*) -> live მრიცხველი იზრდება (კლიენტები თავისით განახლდებიან)."""
+    try:
+        if request.method in ("POST", "PUT", "PATCH", "DELETE") and resp.status_code < 400 and (request.path.startswith("/api/") or request.path.startswith("/internal/")) \
+                and request.path not in ("/api/live", "/api/ai/chat", "/internal/worker/heartbeat"):
+            import live_feed
+            live_feed.bump(request.path[:60])
+    except Exception:  # noqa: BLE001
+        pass
+    return resp
+
+
+@app.get("/api/live")
+@rate_limited("live")
+def api_live():
+    """მსუბუქი: მხოლოდ მრიცხველი (არ კითხულობს Google Sheets-ს). კლიენტი ამას ~7 წმ-ში ერთხელ ეკითხება და ცვლილებისას ეკრანს განაახლებს."""
+    agent, admin, err = _authed_agent()
+    if err:
+        return err
+    import live_feed
+    return jsonify(**live_feed.snapshot())
+
+
 _GZIP_TYPES = ("text/html", "text/css", "text/plain", "application/javascript", "text/javascript", "application/json")
 _GZIP_MIN = 1024
 _gz_static: dict = {}                                   # (ETag, სიგრძე) -> შეკუმშული ბაიტები (app.js 500KB-ს ყოველ მოთხოვნაზე თავიდან არ ვკუმშავთ)
@@ -3311,8 +3335,8 @@ except Exception:
 # TGNET (Telegram არხების ქსელი, ეტაპი 2B): /api/tgnet/... — მხოლოდ დირექტორი; არხების რეესტრი + წაკითხვითი შემოწმება, არაფერი ქვეყნდება. ჩავარდნა სერვერს არ აჩერებს.
 try:
     import tgnet_api  # noqa: E402
-    tgnet_api.register(app, authed=_authed_agent, audit=_audit, rate_limited=rate_limited, notify=lambda chat, text, key=None: notify_async(chat, text, key=key, priority="operational"),
-                       get_agents=lambda: sheets.get_agents())
+    tgnet_api.register(app, authed=_authed_agent, audit=_audit, rate_limited=rate_limited, notify=lambda chat, text, key=None, reply_markup=None: notify_async(chat, text, key=key, priority="operational", reply_markup=reply_markup),
+                       get_agents=lambda: sheets.get_agents(), start_sla=True)
     import tgnet_pipeline  # noqa: E402
     tgnet_pipeline.register_hook()                    # ახალი განცხადება + აგენტის თიქი -> რიგი (TGNET_QUEUE_ENABLED=1-ზე; გაგზავნის გარეშე)
 except Exception:

@@ -18,13 +18,19 @@ HEADERS = ["channel_key", "n", "lang", "segment", "deal", "city", "title", "user
 POST_HEADERS = ["post_id", "listing_key", "channel_key", "message_ids", "status", "posted_at", "updated_at", "error", "created_at", "decided_by", "decided_at", "summary", "agent_name"]
 # post_id = "<listing_key>:<channel_key>" (განმეორებითი გაშვება დუბლს ვერ ქმნის). status: pending (ელოდება დამტკიცებას) | approved | rejected | needs_fix (ხარისხის ფილტრი) |
 # skipped (არხს არ ეკუთვნის) | published/failed/removed (მომავალი ეტაპი: პოსტინგი)
-POST_STATUSES = ["pending", "approved", "rejected", "needs_fix", "skipped", "published", "failed", "removed", "expired"]
+POST_STATUSES = ["pending", "approved", "rejected", "needs_fix", "skipped", "published", "failed", "removed", "expired", "deleted"]     # deleted = მენეჯერმა რიგიდან წაშალა (რბილად: ჩანაწერი რჩება აუდიტისთვის, ეკრანზე აღარ ჩანს)
 SETTINGS_HEADERS = ["key", "value"]
 LOG_HEADERS = ["log_id", "at", "channel_key", "kind", "text"]
 TG_LEADS = "TgLeads"
 # kind: view (ბოტი გაიხსნა განცხადებით) | intent (დააჭირა „მინდა დაკავშირება“) | lead (ნომერი დატოვა -> CRM-ში კლიენტი). status: new -> assigned -> closed
-LEAD_HEADERS = ["lead_id", "at", "listing_key", "channel_key", "kind", "tg_user_id", "tg_name", "phone_norm", "client_id", "status", "assigned_agent_id", "assigned_by", "note"]
-ALL_TABS = [(TG_CHANNELS, HEADERS, 60), (TG_POSTS, POST_HEADERS, 20000), (TG_SETTINGS, SETTINGS_HEADERS, 50), (TG_LOG, LOG_HEADERS, 5000), (TG_LEADS, LEAD_HEADERS, 20000)]
+LEAD_HEADERS = ["lead_id", "at", "listing_key", "channel_key", "kind", "tg_user_id", "tg_name", "phone_norm", "client_id", "status", "assigned_agent_id", "assigned_by", "note",
+                "assigned_at", "seen_at", "ack_at", "last_remind_at", "remind_count", "follow_up_at", "closed_at", "agent_note"]
+# ლიდის სტატუსები: new (ელოდება მიბმას) -> assigned (აგენტზეა, არ დაუდასტურებია) -> acknowledged (აგენტმა დაადასტურა) -> contacted (დაუკავშირდა + follow-up დაგეგმილია) | waiting (მოგვიანებით + დრო) | closed;
+# declined — აგენტი ვერ ასრულებს -> ისევ new (მენეჯერი თავიდან მიაბამს)
+LEAD_STATUS_LABELS = {"new": "ახალი", "assigned": "აგენტზეა", "acknowledged": "დადასტურებულია", "contacted": "დაუკავშირდა", "waiting": "მოგვიანებით", "closed": "დახურულია"}
+TG_SUBS = "TgSubs"       # კლიენტის გამოწერები ფილტრით (Mini App)
+SUB_HEADERS = ["sub_id", "tg_user_id", "tg_name", "lang", "filter_json", "created_at", "active", "last_sent_at", "sent_count", "sent_ids", "fail_count"]
+ALL_TABS = [(TG_CHANNELS, HEADERS, 60), (TG_POSTS, POST_HEADERS, 20000), (TG_SETTINGS, SETTINGS_HEADERS, 50), (TG_LOG, LOG_HEADERS, 5000), (TG_LEADS, LEAD_HEADERS, 20000), (TG_SUBS, SUB_HEADERS, 5000)]
 
 # planned = გეგმაშია; created = არხი შექმნილია, chat_id ჯერ არ ვიცით; linked = chat_id მითითებულია, ჯერ არ შემოწმებულა; live = შემოწმდა (ბოტი ადმინია, უფლებები საკმარისია);
 # attention = შემოწმებამ პრობლემა აჩვენა; paused = ხელით შეჩერებულია

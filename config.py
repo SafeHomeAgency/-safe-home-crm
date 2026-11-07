@@ -155,6 +155,7 @@ RATE_LIMITS = {
     "tgnet_read": (60, 60),        # TGNET (Telegram ქსელი): არხების სია
     "tgnet_write": (30, 60),       # TGNET: არხის მიბმა/შემოწმება/პარამეტრები
     "tgnet_webhook": (600, 60),    # TGNET: საჯარო ბოტის webhook (Telegram-იდან)
+    "live": (30, 60),              # live-განახლების შემოწმება (~7 წმ-ში ერთხელ; ცხრილს არ კითხულობს)
 }
 RATE_LIMIT_ENABLED = os.environ.get("RATE_LIMIT_ENABLED", "1").strip().lower() not in ("0", "false", "no")
 
@@ -389,3 +390,8 @@ TGNET_WM_COVER = os.environ.get("TGNET_WM_COVER", "").strip()
 TGNET_BRAND_REQUIRED = _flag("TGNET_BRAND_REQUIRED", "1")
 # BRAND_PHOTOS_PROXY=0 (ნაგულისხმევი) — კატალოგში (Property Hub) ფოტოები უცვლელია. =1 -> MyHome/ss.ge-ს ფოტოები ჩვენს სერვერზე გავლით ბრენდირდება („SH“ იარლიყი) — იხ. tgnet_img.py. წინასწარ გადაამოწმეთ TGNET_WM_* პარამეტრები.
 BRAND_PHOTOS_PROXY = _flag("BRAND_PHOTOS_PROXY", "0")
+# ლიდების SLA (Telegram-იდან შემოსული): მენეჯერს შეხსენება N წთ-ის შემდეგ თუ არავის მიუბამს; აგენტს — თუ არ დაუდასტურებია (განმეორებით ყოველ REPEAT წთ); TGNET_LEAD_SLA=0 -> გამორთულია.
+TGNET_LEAD_SLA = _flag("TGNET_LEAD_SLA", "1")
+TGNET_SLA_MANAGER_MIN = int(os.environ.get("TGNET_SLA_MANAGER_MIN", "5") or "5")
+TGNET_SLA_AGENT_MIN = int(os.environ.get("TGNET_SLA_AGENT_MIN", "15") or "15")
+TGNET_SLA_REPEAT_MIN = int(os.environ.get("TGNET_SLA_REPEAT_MIN", "10") or "10")

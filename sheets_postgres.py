@@ -675,6 +675,13 @@ def decide_dayoff(request_id: str, status: str) -> dict | None:
             return None
         row = db.query_one("SELECT * FROM dayoff WHERE request_id = %s", (request_id,))
     _audit("decide_dayoff", "dayoff", request_id, new_value={"status": status})
+    if status == "approved" and row:
+        try:        # დამტკიცებული Day off-ის დღეზე უკვე ჩაწერილი გაფრთხილებები ავტომატურად იხსნება
+            d = crm_time.parse_user_date(row.get("date", ""))
+            if d:
+                dismiss_warnings_for_day(str(row.get("agent_id")), d, "დამტკიცებული Day off")
+        except Exception:  # noqa: BLE001
+            pass
     return row
 
 
@@ -970,8 +977,24 @@ def _has_approved_dayoff(agent_id: str, day=None) -> bool:
     return False
 
 
-def add_warning(agent_id: str, type_: str, detail: str = "") -> dict:
-    if _has_approved_dayoff(agent_id):
+def dismiss_warnings_for_day(agent_id: str, day, reason: str = "დამტკიცებული Day off") -> int:
+    """იხ. sheets_gspread.dismiss_warnings_for_day."""
+    want = day.strftime(crm_time.DATE_FMT)
+    n = 0
+    with _lock:
+        now = _now()
+        for r in db.query_all("SELECT * FROM warnings WHERE agent_id = %s", (agent_id,)):
+            if str(r.get("status") or "active") not in ("active", "dismiss_pending") or crm_time.business_date_of_server_naive(r.get("created_at", "")) != want:
+                continue
+            db.execute("UPDATE warnings SET status = %s, dismiss_reason = %s, dismiss_requested_by = %s, dismiss_requested_by_name = %s, dismiss_requested_at = %s, "
+                       "dismiss_decided_by = %s, dismiss_decided_at = %s WHERE warning_id = %s",
+                       ("dismissed", reason, "system", "სისტემა", now, "system", now, r.get("warning_id")))
+            n += 1
+    return n
+
+
+def add_warning(agent_id: str, type_: str, detail: str = "", for_day=None) -> dict:
+    if _has_approved_dayoff(agent_id, for_day):
         current = len([
             w for w in get_warnings(agent_id=agent_id, days=config.WARNING_WINDOW_DAYS)
             if str(w.get("status") or "active") != "dismissed"
@@ -996,7 +1019,7 @@ def add_warning(agent_id: str, type_: str, detail: str = "") -> dict:
     return {"warning_id": warning_id, "count": count, "deactivated": deactivated}
 
 
-def add_warning_once(agent_id: str, type_: str, detail: str = "", exclusive_with: tuple = ()) -> dict:
+def add_warning_once(agent_id: str, type_: str, detail: str = "", exclusive_with: tuple = (), for_day=None) -> dict:
     """იხ. sheets_gspread.add_warning_once — დღეში (თბილისი) ერთხელ აგენტზე."""
     types = {type_, *exclusive_with}
     with _lock:
@@ -1009,7 +1032,7 @@ def add_warning_once(agent_id: str, type_: str, detail: str = "", exclusive_with
                 if str(w.get("status") or "active") != "dismissed"
             ])
             return {"warning_id": "", "count": current, "deactivated": False, "skipped": "duplicate"}
-        return add_warning(agent_id, type_, detail)
+        return add_warning(agent_id, type_, detail, for_day=for_day)
 
 
 def request_warning_dismissal(warning_id: str, requested_by: str, reason: str) -> dict | None:

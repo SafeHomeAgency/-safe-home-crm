@@ -82,6 +82,16 @@ def link_for(lid: str, lang: str) -> str:
     return f"https://t.me/{BOT}/{sn}?startapp={start_payload(lid, lang)}" if sn else f"https://t.me/{BOT}?start={start_payload(lid, lang)}"
 
 
+CATALOG_LABEL = {"ka": "🗺 კატალოგი და რუკა", "en": "🗺 Catalog & map", "ru": "🗺 Каталог и карта"}
+
+
+def catalog_link(lang: str) -> str:
+    """Mini App-ის კატალოგი/რუკა (მხოლოდ თუ TGNET_MINIAPP_SHORTNAME დაყენებულია BotFather-ში; სხვაგვარად — ცარიელი)."""
+    import config
+    sn = getattr(config, "TGNET_MINIAPP_SHORTNAME", "")
+    return f"https://t.me/{BOT}/{sn}?startapp=catalog_{lang}" if sn else ""
+
+
 def render(listing: dict, lang: str, channel_key: str = "", cta: bool = True) -> dict:
     """აბრუნებს {text, photos, hash, lang}. text — HTML (Telegram parse_mode=HTML), უკვე გაექსკეიპებული."""
     if lang not in L:

@@ -18,8 +18,9 @@ import tgnet_store as st
 log = logging.getLogger("safehome-tgnet-api")
 
 
-def register(app, *, authed, audit, rate_limited, client_factory=None, notify=None, get_agents=None, sync_webhook=False, crm2=None) -> None:
+def register(app, *, authed, audit, rate_limited, client_factory=None, notify=None, get_agents=None, sync_webhook=False, crm2=None, start_sla=False) -> None:
     import threading
+    import time as _time
 
     import tgnet_leads as leads
     import tgnet_publisher as pub
@@ -72,7 +73,7 @@ def register(app, *, authed, audit, rate_limited, client_factory=None, notify=No
         agent, admin, err = authed()
         if err:
             return err
-        return jsonify(can_view=bool(admin), can_leads=_is_lead_mgr(agent, admin), configured=bool(config.TGNET_BOT_TOKEN and ":" in config.TGNET_BOT_TOKEN))
+        return jsonify(can_view=bool(admin), can_leads=_is_lead_mgr(agent, admin), can_mine=bool((agent or {}).get("agent_id")), configured=bool(config.TGNET_BOT_TOKEN and ":" in config.TGNET_BOT_TOKEN))
 
     # ---- საჯარო ბოტის webhook (Telegram-იდან; ავტორიზაცია: secret_token ჰედერი)
     @app.post("/api/tgnet/webhook")
@@ -143,6 +144,61 @@ def register(app, *, authed, audit, rate_limited, client_factory=None, notify=No
         mm = _re.match(r"^([A-Za-z0-9][A-Za-z0-9-]{0,40}?)(?:_(ka|en|ru))?$", payload or "")
         return (mm.group(1), mm.group(2) or "ka") if mm else ("", "ka")
 
+    def _app_filters():
+        a = request.args
+        return {k: a.get(k, "") for k in ("deal", "seg", "city", "q", "price_min", "price_max", "rooms")}
+
+    def _app_lang():
+        lg = request.args.get("lang", "ka")
+        return lg if lg in ("ka", "en", "ru") else "ka"
+
+    @app.get("/api/tgnet/app/catalog")
+    @rate_limited("tgnet_webhook")
+    def tgnet_app_catalog():
+        import tgnet_catalog as cat
+        if not _app_user():
+            return jsonify(error="ავტორიზაცია ვერ დადასტურდა — გახსენით Telegram-იდან"), 401
+        try:
+            return jsonify(**cat.search(_app_filters(), _app_lang(), int(request.args.get("page", 1) or 1), int(request.args.get("limit", 24) or 24), request.args.get("sort", "new")))
+        except ValueError:
+            return jsonify(error="პარამეტრი არასწორია"), 400
+
+    @app.get("/api/tgnet/app/map")
+    @rate_limited("tgnet_webhook")
+    def tgnet_app_map():
+        import tgnet_catalog as cat
+        if not _app_user():
+            return jsonify(error="ავტორიზაცია ვერ დადასტურდა"), 401
+        return jsonify(**cat.map_points(_app_filters(), _app_lang()))
+
+    @app.get("/api/tgnet/app/similar")
+    @rate_limited("tgnet_webhook")
+    def tgnet_app_similar():
+        import tgnet_catalog as cat
+        if not _app_user():
+            return jsonify(error="ავტორიზაცია ვერ დადასტურდა"), 401
+        lid, lang = _split(request.args.get("l", ""))
+        return jsonify(items=cat.similar(lid, lang if request.args.get("lang") is None else _app_lang()) if lid else [])
+
+    @app.route("/api/tgnet/app/subs", methods=["GET", "POST", "DELETE"])
+    @rate_limited("tgnet_webhook")
+    def tgnet_app_subs():
+        import tgnet_catalog as cat
+        user = _app_user()
+        if not user:
+            return jsonify(error="ავტორიზაცია ვერ დადასტურდა"), 401
+        try:
+            if request.method == "GET":
+                return jsonify(subs=cat.list_subs(user["id"]), max=cat.MAX_SUBS_PER_USER)
+            b = request.get_json(silent=True) or {}
+            if request.method == "POST":
+                name = " ".join(x for x in (str(user.get("first_name") or ""), str(user.get("last_name") or "")) if x)
+                res = cat.add_sub(user["id"], name, str(b.get("lang") or "ka"), b.get("filters") or {})
+                return jsonify(ok=True, **res)
+            return jsonify(ok=cat.remove_sub(user["id"], str(b.get("sub_id") or request.args.get("sub_id") or "")))
+        except st.TgnetError as e:
+            return jsonify(error=str(e), code=e.code), e.status
+
     @app.get("/api/tgnet/app/listing")
     @rate_limited("tgnet_webhook")
     def tgnet_app_listing():
@@ -196,12 +252,75 @@ def register(app, *, authed, audit, rate_limited, client_factory=None, notify=No
                 return jsonify(error="სერვერის შეცდომა — სცადეთ ხელახლა"), 500
         return wrapper
 
+    # ---- აგენტის ლიდები: ნახვა/დადასტურება/შედეგი (follow-up სავალდებულოა)
+    def _agent_guard(fn):
+        @functools.wraps(fn)
+        def wrapper(*a, **kw):
+            agent, admin, err = authed()
+            if err:
+                return err
+            if not (agent or {}).get("agent_id") and not admin:
+                return jsonify(error="მხოლოდ დარეგისტრირებული აგენტისთვის", code="tgnet_forbidden"), 403
+            try:
+                return fn(agent, admin, *a, **kw)
+            except st.TgnetError as e:
+                return jsonify(error=str(e), code=getattr(e, "code", "")), e.status
+            except Exception:  # noqa: BLE001
+                log.exception("tgnet my-leads API შეცდომა: %s", fn.__name__)
+                return jsonify(error="სერვერის შეცდომა — სცადეთ ხელახლა"), 500
+        return wrapper
+
+    @app.get("/api/tgnet/my-leads")
+    @rate_limited("tgnet_read")
+    @_agent_guard
+    def tgnet_my_leads(agent, admin):
+        return jsonify(leads=_flow().my_leads(str((agent or {}).get("agent_id") or "")))
+
+    @app.post("/api/tgnet/my-leads/<lead_id>/seen")
+    @rate_limited("tgnet_write")
+    @_agent_guard
+    def tgnet_my_lead_seen(agent, admin, lead_id):
+        _flow().mark_seen(lead_id, str((agent or {}).get("agent_id") or ""), manager=_is_lead_mgr(agent, admin))
+        return jsonify(ok=True)
+
+    @app.post("/api/tgnet/my-leads/<lead_id>/action")
+    @rate_limited("tgnet_write")
+    @_agent_guard
+    def tgnet_my_lead_action(agent, admin, lead_id):
+        b = request.get_json(silent=True) or {}
+        res = _flow().agent_action(lead_id, str((agent or {}).get("agent_id") or ""), str(b.get("action") or ""), str(b.get("note") or ""), str(b.get("follow_up_at") or ""), manager=_is_lead_mgr(agent, admin))
+        audit(agent, admin, "tgnet_lead_" + str(b.get("action")), "tgnet_lead", lead_id, metadata=res)
+        return jsonify(ok=True, **res)
+
+    if start_sla and config.TGNET_BOT_TOKEN:      # ლიდების SLA: ყოველ 2 წუთში (მხოლოდ რეალურ სერვერზე; ტესტებში გამორთულია)
+        def _sla_loop():
+            _time.sleep(90)
+            while True:
+                try:
+                    if config.TGNET_LEAD_SLA:
+                        leads.sla_cycle(_flow())
+                except Exception:  # noqa: BLE001
+                    log.exception("TGNET SLA ციკლი ვერ გაეშვა")
+                _time.sleep(120)
+        threading.Thread(target=_sla_loop, daemon=True, name="tgnet-sla").start()
+
     @app.get("/api/tgnet/leads")
     @rate_limited("tgnet_read")
     @_lead_guard
     def tgnet_leads(agent, admin):
         team = "" if admin else str((agent or {}).get("team") or "")
         return jsonify(**leads.leads_view(pub.get_listing, agents_fn, viewer_team=team, admin=bool(admin)))
+
+    @app.post("/api/tgnet/leads/bulk")
+    @rate_limited("tgnet_write")
+    @_lead_guard
+    def tgnet_leads_bulk(agent, admin):
+        b = request.get_json(silent=True) or {}
+        if str(b.get("action") or "") != "close":
+            raise st.TgnetError("მოქმედება უცნობია", 400, "bad_action")
+        res = _flow().close_many(b.get("ids") or [], viewer_team=str((agent or {}).get("team") or ""), admin=bool(admin), by=str((agent or {}).get("name") or "დირექტორი"))
+        audit(agent, admin, "tgnet_leads_close", "tgnet_lead", "bulk", metadata=res)
+        return jsonify(ok=True, **res)
 
     @app.post("/api/tgnet/leads/<lead_id>/assign")
     @rate_limited("tgnet_write")
@@ -225,11 +344,23 @@ def register(app, *, authed, audit, rate_limited, client_factory=None, notify=No
     @rate_limited("tgnet_read")
     @_guard
     def tgnet_queue(agent, admin):
-        groups = st.queue_groups()
-        counts = {}
-        for g in groups:
-            counts[g["status"]] = counts.get(g["status"], 0) + 1
-        return jsonify(groups=groups, counts=counts, queue_enabled=bool(config.TGNET_QUEUE_ENABLED), auto_approve=bool(config.TGNET_AUTO_APPROVE), posting_available=bool(config.TGNET_PUBLISH_ENABLED))
+        a = request.args
+        try:
+            page = st.queue_page(a.get("status", ""), a.get("q", ""), a.get("from", ""), a.get("to", ""), int(a.get("limit", 20) or 20), int(a.get("offset", 0) or 0))
+        except ValueError:
+            page = st.queue_page()
+        groups, counts = page["groups"], page["counts"]
+        return jsonify(groups=groups, counts=counts, total=page["total"], limit=page["limit"], offset=page["offset"], queue_enabled=bool(config.TGNET_QUEUE_ENABLED), auto_approve=bool(config.TGNET_AUTO_APPROVE), posting_available=bool(config.TGNET_PUBLISH_ENABLED))
+
+    @app.post("/api/tgnet/queue/bulk")
+    @rate_limited("tgnet_write")
+    @_guard
+    def tgnet_queue_bulk(agent, admin):
+        """მონიშნულებზე ერთიანი მოქმედება: {keys:[...], action: approve|reject|delete}."""
+        body = request.get_json(silent=True) or {}
+        res = st.decide_many(body.get("keys") or [], str(body.get("action") or ""), by=str((agent or {}).get("name") or "დირექტორი"))
+        audit(agent, admin, "tgnet_queue_bulk_" + str(body.get("action")), "tgnet_listing", "bulk", metadata=res)
+        return jsonify(ok=True, **res)
 
     @app.post("/api/tgnet/queue/<listing_key>")
     @rate_limited("tgnet_write")

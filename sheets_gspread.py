@@ -165,6 +165,11 @@ def _cached_records(name: str) -> list[dict]:
 def _invalidate(name: str) -> None:
     with _records_cache_lock:
         _records_cache.pop(name, None)
+    try:                                      # live-განახლება: ცვლილების მრიცხველი (ბოტის/ფონური ჩაწერებიც ჩანს); ხარვეზმა ჩაწერას არ უნდა შეუშალოს
+        import live_feed
+        live_feed.bump(name)
+    except Exception:  # noqa: BLE001
+        pass
 
 
 AGENTS_HEADERS = [
@@ -1158,7 +1163,16 @@ def decide_dayoff(request_id: str, status: str) -> dict | None:
         ws.update_cell(cell.row, DAYOFF_HEADERS.index("decided_at") + 1, _now())
         row = ws.row_values(cell.row)
         _invalidate(config.DAYOFF_SHEET_NAME)
-        return dict(zip(DAYOFF_HEADERS, row))
+        res = dict(zip(DAYOFF_HEADERS, row))
+    if status == "approved":
+        # დამტკიცებული Day off-ის დღეზე უკვე ჩაწერილი გაფრთხილებები (მაგ. „არ გამოცხადდა“ 22:00-ზე, ან ხვალ დამტკიცდა უკუქცევით) ავტომატურად იხსნება
+        try:
+            d = crm_time.parse_user_date(res.get("date", ""))
+            if d:
+                dismiss_warnings_for_day(str(res.get("agent_id")), d, "დამტკიცებული Day off")
+        except Exception:  # noqa: BLE001 — გაუქმების ხარვეზმა Day off-ის დამტკიცება არ უნდა გააფუჭოს
+            logging.getLogger("safehome-crm-sheets").exception("Day off-ის დღის გაფრთხილებების ავტო-გაუქმება ვერ მოხერხდა")
+    return res
 
 
 def get_dayoff_request(request_id: str) -> dict | None:
@@ -1497,9 +1511,29 @@ def _has_approved_dayoff(agent_id: str, day=None) -> bool:
     return False
 
 
-def add_warning(agent_id: str, type_: str, detail: str = "") -> dict:
+def dismiss_warnings_for_day(agent_id: str, day, reason: str = "დამტკიცებული Day off") -> int:
+    """აგენტის ყველა აქტიური/გაუქმების მოლოდინში გაფრთხილება, რომელიც `day` (თბილისის ბიზნეს-დღე) დღეს ეკუთვნის -> dismissed (ერთი batch ჩაწერა). აბრუნებს რაოდენობას."""
+    want = day.strftime(crm_time.DATE_FMT)
+    with _lock:
+        ws = _warnings_ws()
+        records = _cached_records(config.WARNINGS_SHEET_NAME)
+        now = _now()
+        updates = []
+        for idx, r in enumerate(records, start=2):
+            if str(r.get("agent_id")) != str(agent_id) or str(r.get("status") or "active") not in ("active", "dismiss_pending"):
+                continue
+            if crm_time.business_date_of_server_naive(r.get("created_at", "")) != want:
+                continue
+            updates.append({"range": f"G{idx}:M{idx}", "values": [["dismissed", reason, "system", "სისტემა", now, "system", now]]})
+        if updates:
+            ws.batch_update(updates)
+            _invalidate(config.WARNINGS_SHEET_NAME)
+    return len(updates)
+
+
+def add_warning(agent_id: str, type_: str, detail: str = "", for_day=None) -> dict:
     """
-    სვამს ახალ გაფრთხილებას და ამოწმებს ბოლო WARNING_WINDOW_DAYS დღეში
+    სვამს ახალ გაფრთხილებას (`for_day` — რომელი დღის დარღვევაა; ნაგულისხმევად დღეს. წინა დღის დარღვევისას Day off-ის შემოწმება ამ დღეზე ხდება) და ამოწმებს ბოლო WARNING_WINDOW_DAYS დღეში
     ჯამურ რაოდენობას — თუ WARNING_LIMIT-ს მიაღწია, აგენტი ავტომატურად
     გამოირთვება (active=no).
     აბრუნებს: {"warning_id", "count", "deactivated": bool}
@@ -1508,7 +1542,7 @@ def add_warning(agent_id: str, type_: str, detail: str = "") -> dict:
     იწერება და შედეგში `skipped="dayoff"` ბრუნდება (გამომძახებლები ამ
     შემთხვევაში შეტყობინებას აღარ აგზავნიან).
     """
-    if _has_approved_dayoff(agent_id):
+    if _has_approved_dayoff(agent_id, for_day):
         current = len([
             w for w in get_warnings(agent_id=agent_id, days=config.WARNING_WINDOW_DAYS)
             if str(w.get("status") or "active") != "dismissed"
@@ -1533,7 +1567,7 @@ def add_warning(agent_id: str, type_: str, detail: str = "") -> dict:
     return {"warning_id": warning_id, "count": count, "deactivated": deactivated}
 
 
-def add_warning_once(agent_id: str, type_: str, detail: str = "", exclusive_with: tuple = ()) -> dict:
+def add_warning_once(agent_id: str, type_: str, detail: str = "", exclusive_with: tuple = (), for_day=None) -> dict:
     """add_warning, მაგრამ დღეში (თბილისის დღე) ერთხელ აგენტზე იმავე ტიპის
     (ან `exclusive_with`-ში ჩამოთვლილი ტიპის) გაფრთხილება არ მეორდება.
     შემოწმება ხდება ბაზის **ახალ** წაკითხვაზე (კეშის გარეშე) და იმავე
@@ -1553,7 +1587,7 @@ def add_warning_once(agent_id: str, type_: str, detail: str = "", exclusive_with
                     if str(w.get("status") or "active") != "dismissed"
                 ])
                 return {"warning_id": "", "count": current, "deactivated": False, "skipped": "duplicate"}
-        return add_warning(agent_id, type_, detail)
+        return add_warning(agent_id, type_, detail, for_day=for_day)
 
 
 def _find_warning_row(warning_id: str):

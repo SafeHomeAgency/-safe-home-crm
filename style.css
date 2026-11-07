@@ -1131,3 +1131,27 @@ button.chip { cursor: pointer; font-family: inherit; }
 .tg-prev{margin-top:8px;padding:8px;border-radius:10px;background:rgba(150,150,150,.08)}
 .tg-prev pre{white-space:pre-wrap;word-break:break-word;font:12px/1.4 inherit;margin:4px 0 8px}
 .tg-ag{flex:2 1 140px;min-width:0;padding:7px;border-radius:10px;border:1px solid var(--line,#2a3a4d);background:transparent;color:inherit;font-size:13px}
+
+.tg-chk{display:flex;align-items:center;gap:6px;cursor:pointer}.tg-chk input{width:auto;margin:0}
+.tg-picked{background:rgba(233,196,106,.07);border-radius:10px}
+.tg-bulk{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:8px 0;padding:8px;border-radius:10px;background:rgba(150,150,150,.08)}
+.tg-bulk .btn{padding:6px 10px;font-size:12px}
+
+/* ===== 🏘️ MyHome ტაბის ვიზუალი: შესვლის ანიმაცია, ველების ფოკუსი, მოხდენილი თიქები, სოლიდური ტიპოგრაფია (მხოლოდ .mh-wrap-ში — დანარჩენი აპი უცვლელია) ===== */
+.mh-wrap{font-feature-settings:"kern","liga";letter-spacing:.1px}
+.mh-wrap h2{font-weight:800;letter-spacing:.2px;display:flex;align-items:center;gap:8px}
+.mh-wrap .card{animation:mhIn .38s cubic-bezier(.2,.8,.2,1) both;transition:transform .18s ease,box-shadow .18s ease}
+.mh-wrap .card:nth-child(2){animation-delay:.05s}.mh-wrap .card:nth-child(3){animation-delay:.1s}.mh-wrap .card:nth-child(4){animation-delay:.15s}.mh-wrap .card:nth-child(n+5){animation-delay:.2s}
+@keyframes mhIn{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:none}}
+.mh-wrap .qa-compose input,.mh-wrap .qa-compose select,.mh-wrap .qa-compose textarea{transition:border-color .2s,box-shadow .2s,background .2s;border-radius:12px}
+.mh-wrap .qa-compose input:focus,.mh-wrap .qa-compose select:focus,.mh-wrap .qa-compose textarea:focus{outline:none;border-color:var(--gold,#e9c46a);box-shadow:0 0 0 3px rgba(233,196,106,.18)}
+.mh-wrap .qa-compose label{display:flex;align-items:center;gap:10px;padding:10px 12px;border-radius:12px;background:rgba(150,150,150,.08);cursor:pointer;transition:background .2s,transform .12s}
+.mh-wrap .qa-compose label:active{transform:scale(.985)}
+.mh-wrap .qa-compose label:has(input:checked){background:rgba(233,196,106,.16)}
+.mh-wrap .btn{transition:transform .12s ease,filter .2s ease,box-shadow .2s ease}
+.mh-wrap .btn:hover{filter:brightness(1.07)}.mh-wrap .btn:active{transform:scale(.97)}
+.mh-wrap .btn:not(.secondary):not(:disabled){box-shadow:0 6px 18px rgba(233,196,106,.16)}
+.mh-wrap .row,.mh-wrap .list-row{transition:background .2s,transform .15s}
+.mh-wrap .row:hover,.mh-wrap .list-row:hover{background:rgba(233,196,106,.06);transform:translateX(2px)}
+.mh-wrap .cnt{display:inline-block;min-width:22px;text-align:center;border-radius:999px;padding:1px 8px;background:rgba(233,196,106,.2);font-size:12px}
+@media (prefers-reduced-motion:reduce){.mh-wrap .card{animation:none}.mh-wrap *{transition:none!important}}
