@@ -166,6 +166,18 @@ def register(app, *, authed, audit, rate_limited, get_jobs, interest=None, my_di
         audit(agent, admin, "listing_status", "listing", listing_id, metadata={"active": res["active"]})
         return jsonify(ok=True, **res)
 
+    @app.post("/api/listings/bulk-status")
+    @rate_limited("listings_write")
+    @_guard
+    def listings_bulk_status(agent, admin):
+        """მონიშნულების ერთიანი გათიშვა/გააქტიურება: {ids:[...], active:false}. სხვისი განცხადება გამოტოვდება (უფლება თითოეულზე)."""
+        body = request.get_json(silent=True) or {}
+        if "active" not in body:
+            raise ListingError("active საჭიროა")
+        res = store.set_active_many(body.get("ids") or [], viewer_of(agent, admin), bool(body.get("active")))
+        audit(agent, admin, "listing_status_bulk", "listing", ",".join(str(i) for i in (body.get("ids") or [])[:20]), metadata=res)
+        return jsonify(ok=True, **res)
+
     @app.get("/api/listings/<listing_id>")
     @rate_limited("listings_read")
     @_guard

@@ -94,6 +94,34 @@ def register(app, *, authed, is_team_lead, audit, rate_limited, get_agents) -> N
             out.append(d)
         return jsonify(rows=out, count=len(rows))
 
+    @app.post("/api/crm2/clients/archive")
+    @rate_limited("crm2_write")
+    def crm2_clients_archive():
+        """მენეჯერი/დირექტორი: მონიშნული კლიენტების დაარქივება (რბილი წაშლა — სიიდან ქრება, ისტორია რჩება). მხოლოდ ხილული (თავისი გუნდის) კლიენტები; ≤100."""
+        agent, admin, visible, err = _ctx()
+        if err:
+            return err
+        if not (admin or is_team_lead(agent)):
+            return jsonify(error="დაარქივება მხოლოდ მენეჯერს/დირექტორს შეუძლია"), 403
+        body = request.get_json(silent=True) or {}
+        ids = []
+        for i in body.get("ids") or []:
+            s = str(i).strip()[:40]
+            if s and s not in ids:
+                ids.append(s)
+        if not ids or len(ids) > 100:
+            return jsonify(error="მონიშნეთ 1–100 კლიენტი"), 400
+        done = skipped = 0
+        for cid in ids:
+            c = _client_or_404(cid, visible)
+            if c is None:
+                skipped += 1
+                continue
+            if store.archive_client(cid):
+                done += 1
+        audit(agent, admin, "crm2_clients_archive", "client", ",".join(ids[:20]), metadata={"archived": done, "skipped": skipped})
+        return jsonify(ok=True, archived=done, skipped=skipped)
+
     @app.get("/api/crm2/clients/<client_id>")
     @rate_limited("crm2_read")
     def crm2_client_card(client_id):

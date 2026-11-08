@@ -1326,12 +1326,8 @@ def get_agent_schedule(agent_id: str) -> dict | None:
 
 
 def get_today_mode(agent_id: str) -> str:
-    """თუ გრაფიკი საერთოდ არ არის დაყენებული, ითვლება 'off'-ად."""
-    sched = get_agent_schedule(agent_id)
-    if not sched:
-        return "off"
-    key = WEEKDAY_KEYS[crm_time.local_today().weekday()]
-    return str(sched.get(key) or "off")
+    """თუ გრაფიკი საერთოდ არ არის დაყენებული, ითვლება 'off'-ად. დღევანდელი დამტკიცებული გაცვლა გათვალისწინებულია (mode_on)."""
+    return mode_on(agent_id) or "off"
 
 
 def clock_in(agent_id: str) -> str:
@@ -1446,10 +1442,9 @@ def agent_available_now(agent_id: str) -> bool:
     აგენტისთვის — ძველებურად ხელმისაწვდომია (უკან-თავსებადობისთვის,
     სანამ ადმინი /setschedule-ს არ გაუშვებს).
     """
-    sched = get_agent_schedule(agent_id)
-    if not sched:
+    mode = mode_on(agent_id)
+    if mode is None:
         return True
-    mode = str(sched.get(WEEKDAY_KEYS[crm_time.local_today().weekday()]) or "off")
     if mode == "off":
         return False
     return is_clocked_in_today(agent_id)
@@ -1487,7 +1482,7 @@ def _warning_cutoff(days: int) -> datetime.datetime:
 
 def get_warnings(agent_id: str | None = None, days: int | None = None) -> list[dict]:
     with _lock:
-        rows = _cached_records(config.WARNINGS_SHEET_NAME)
+        rows = [r for r in _cached_records(config.WARNINGS_SHEET_NAME) if str(r.get("status") or "") != "deleted"]   # დირექტორის მიერ წაშლილი — არსად ჩანს/ითვლება
     if agent_id:
         rows = [r for r in rows if str(r.get("agent_id")) == str(agent_id)]
     if days:
@@ -1511,8 +1506,8 @@ def _has_approved_dayoff(agent_id: str, day=None) -> bool:
     return False
 
 
-def dismiss_warnings_for_day(agent_id: str, day, reason: str = "დამტკიცებული Day off") -> int:
-    """აგენტის ყველა აქტიური/გაუქმების მოლოდინში გაფრთხილება, რომელიც `day` (თბილისის ბიზნეს-დღე) დღეს ეკუთვნის -> dismissed (ერთი batch ჩაწერა). აბრუნებს რაოდენობას."""
+def dismiss_warnings_for_day(agent_id: str, day, reason: str = "დამტკიცებული Day off", types: tuple = ()) -> int:
+    """აგენტის ყველა აქტიური/გაუქმების მოლოდინში გაფრთხილება, რომელიც `day` (თბილისის ბიზნეს-დღე) დღეს ეკუთვნის -> dismissed (ერთი batch ჩაწერა). `types` — მხოლოდ ეს ტიპები (ცარიელი = ყველა). აბრუნებს რაოდენობას."""
     want = day.strftime(crm_time.DATE_FMT)
     with _lock:
         ws = _warnings_ws()
@@ -1522,7 +1517,7 @@ def dismiss_warnings_for_day(agent_id: str, day, reason: str = "დამტკ�
         for idx, r in enumerate(records, start=2):
             if str(r.get("agent_id")) != str(agent_id) or str(r.get("status") or "active") not in ("active", "dismiss_pending"):
                 continue
-            if crm_time.business_date_of_server_naive(r.get("created_at", "")) != want:
+            if crm_time.business_date_of_server_naive(r.get("created_at", "")) != want or (types and r.get("type") not in types):
                 continue
             updates.append({"range": f"G{idx}:M{idx}", "values": [["dismissed", reason, "system", "სისტემა", now, "system", now]]})
         if updates:
@@ -1588,6 +1583,25 @@ def add_warning_once(agent_id: str, type_: str, detail: str = "", exclusive_with
                 ])
                 return {"warning_id": "", "count": current, "deactivated": False, "skipped": "duplicate"}
         return add_warning(agent_id, type_, detail, for_day=for_day)
+
+
+def delete_warnings(warning_ids: list, deleted_by: str = "") -> int:
+    """დირექტორის ერთიანი წაშლა (მონიშნულები): status -> "deleted" — სიებიდან, მრიცხველებიდან და ლიმიტიდან ქრება (get_warnings აღარ აბრუნებს),
+    ჩანაწერი ცხრილში რჩება აუდიტისთვის. ერთი batch ჩაწერა. აბრუნებს რეალურად წაშლილების რაოდენობას."""
+    ids = {str(i) for i in (warning_ids or []) if str(i).strip()}
+    if not ids:
+        return 0
+    with _lock:
+        ws = _warnings_ws()
+        _invalidate(config.WARNINGS_SHEET_NAME)
+        updates = []
+        for idx, r in enumerate(_cached_records(config.WARNINGS_SHEET_NAME), start=2):
+            if str(r.get("warning_id")) in ids and str(r.get("status") or "active") != "deleted":
+                updates.append({"range": f"G{idx}:H{idx}", "values": [["deleted", f"წაშალა: {deleted_by or 'დირექტორი'}"[:200]]]})
+        if updates:
+            ws.batch_update(updates)
+            _invalidate(config.WARNINGS_SHEET_NAME)
+    return len(updates)
 
 
 def _find_warning_row(warning_id: str):
@@ -1781,30 +1795,71 @@ def decide_shift_swap(swap_id: str, status: str, decided_by: str) -> dict | None
             return None
         ws.update_cell(cell.row, SHIFT_SWAPS_HEADERS.index("status") + 1, status)
         ws.update_cell(cell.row, SHIFT_SWAPS_HEADERS.index("decided_at") + 1, _now())
-        ws.update_cell(cell.row, SHIFT_SWAPS_HEADERS.index("decided_by") + 1, decided_by)
+        ws.update_cell(cell.row, SHIFT_SWAPS_HEADERS.index("decided_by") + 1, str(decided_by) + (SWAP_DATED if status == "approved" else ""))
         row = dict(zip(SHIFT_SWAPS_HEADERS, ws.row_values(cell.row)))
         _invalidate(config.SHIFT_SWAPS_SHEET_NAME)
 
     if status == "approved":
-        wk = _weekday_key_for_date(row.get("swap_date", ""))
-        if wk:
-            if row.get("request_type") == "change_mode":
-                sched = get_agent_schedule(row["agent_id"]) or {}
-                pattern = {k: str(sched.get(k) or "off") for k in WEEKDAY_KEYS}
-                pattern[wk] = row.get("to_mode") or "off"
-                set_agent_schedule(row["agent_id"], pattern)
-            elif row.get("target_agent_id"):
-                sched_a = get_agent_schedule(row["agent_id"]) or {}
-                sched_b = get_agent_schedule(row["target_agent_id"]) or {}
-                mode_a = str(sched_a.get(wk) or "off")
-                mode_b = str(sched_b.get(wk) or "off")
-                pat_a = {k: str(sched_a.get(k) or "off") for k in WEEKDAY_KEYS}
-                pat_b = {k: str(sched_b.get(k) or "off") for k in WEEKDAY_KEYS}
-                pat_a[wk] = mode_b
-                pat_b[wk] = mode_a
-                set_agent_schedule(row["agent_id"], pat_a)
-                set_agent_schedule(row["target_agent_id"], pat_b)
+        # გრაფიკი არ იცვლება — გაცვლა მოქმედებს მხოლოდ swap_date-ზე (იხ. mode_on). თუ ამ დღეზე უკვე ჩაიწერა გაფრთხილება ძველი
+        # ცვლის მიხედვით (გაცვლა მოგვიანებით დამტკიცდა) — ვისაც ცვლა შეეცვალა, იმ დღის დასწრების გაფრთხილება იხსნება; ვინც დღეს აღარ მუშაობს — ყველა.
+        try:
+            d = crm_time.parse_user_date(row.get("swap_date", ""))
+            if d:
+                wk = WEEKDAY_KEYS[d.weekday()]
+                for aid in {str(row.get("agent_id") or ""), str(row.get("target_agent_id") or "")} - {""}:
+                    base = str((get_agent_schedule(aid) or {}).get(wk) or "off")
+                    new = mode_on(aid, d) or "off"
+                    if new == "off":
+                        dismiss_warnings_for_day(aid, d, "დამტკიცებული სმენის გაცვლა — ამ დღეს არ მუშაობს")
+                    elif new != base:
+                        dismiss_warnings_for_day(aid, d, "დამტკიცებული სმენის გაცვლა — ცვლა შეიცვალა", types=("late_arrival", "no_show"))
+        except Exception:  # noqa: BLE001 — გაფრთხილებების გაწმენდის ხარვეზმა გადაწყვეტილება არ უნდა გააფუჭოს
+            logging.getLogger("safehome-crm-sheets").exception("გაცვლის დღის გაფრთხილებების გაწმენდა ვერ მოხერხდა")
     return row
+
+
+# ---------- ეფექტური ცვლა კონკრეტულ თარიღზე (კვირის გრაფიკი + იმ დღის დამტკიცებული გაცვლა) ----------
+# ძველი ქცევა: გაცვლის დამტკიცება კვირის გრაფიკს **სამუდამოდ** ცვლიდა (ერთი ოთხშაბათის გაცვლა ყველა მომდევნო ოთხშაბათზე ვრცელდებოდა ->
+# არასწორი „არ გამოცხადდა“/„დაგვიანება“). ახლა გრაფიკი ხელუხლებელია, გაცვლა მოქმედებს მხოლოდ თავის თარიღზე. ახალი წესით დამტკიცებულს
+# decided_by-ში ბოლოს აქვს ნიშანი SWAP_DATED (ძველი ჩანაწერები უკვე ჩაწერილია გრაფიკში — ორჯერ რომ არ „გადატრიალდეს“).
+SWAP_DATED = "|d"
+
+
+def swaps_on(agent_id: str, day=None) -> list[dict]:
+    """აგენტის დამტკიცებული (ახალი წესით) გაცვლები `day` თარიღზე (თბილისის დღე)."""
+    ds = (day or crm_time.local_today()).strftime("%Y-%m-%d")
+    return [r for r in get_shift_swaps(agent_id=agent_id, status="approved")
+            if str(r.get("swap_date", "")).strip() == ds and str(r.get("decided_by") or "").endswith(SWAP_DATED)]
+
+
+def mode_on(agent_id: str, day=None) -> str | None:
+    """ეფექტური ცვლა `day`-ზე (ნაგულისხმევად დღეს): კვირის გრაფიკი + ამ თარიღის გაცვლა. გრაფიკი საერთოდ არ აქვს -> None."""
+    day = day or crm_time.local_today()
+    sched = get_agent_schedule(agent_id)
+    if not sched:
+        return None
+    wk = WEEKDAY_KEYS[day.weekday()]
+    mode = str(sched.get(wk) or "off")
+    for r in swaps_on(agent_id, day):
+        if r.get("request_type") == "change_mode":
+            if str(r.get("agent_id")) == str(agent_id):
+                mode = str(r.get("to_mode") or "off")
+        elif r.get("target_agent_id"):
+            other = r.get("target_agent_id") if str(r.get("agent_id")) == str(agent_id) else r.get("agent_id")
+            mode = str((get_agent_schedule(other) or {}).get(wk) or "off")
+    return mode
+
+
+def swap_note(agent_id: str, day=None) -> str:
+    """მოკლე ახსნა გაფრთხილების/ეკრანისთვის: „გაცვლილი ცვლა (X-თან)“ ან „ცვლის ტიპი შეიცვალა“; გაცვლა არ არის -> ''."""
+    out = []
+    for r in swaps_on(agent_id, day):
+        if r.get("request_type") == "change_mode":
+            out.append("ცვლის ტიპი ამ დღეს შეცვლილია (დამტკიცებული)")
+        else:
+            other = r.get("target_agent_name") if str(r.get("agent_id")) == str(agent_id) else r.get("agent_name")
+            out.append(f"ამ დღის ცვლა გაცვლილია {other or 'კოლეგასთან'}")
+    return "; ".join(out)
 
 
 # ---------- ექსკლუზივები ("ბინების ბაზა") ----------

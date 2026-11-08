@@ -184,6 +184,8 @@ def card(row: dict, agents: list[dict] | None = None) -> dict:
                     what=f"CRM-ში დაემატება follow-up: „{p['next_action']}“, ვადა {p['due_at'][:10]}.",
                     effect="ვადის გადაცილებისას SAIRO შეგახსენებთ, ხოლო დაგვიანებისას მენეჯერს ეცნობება. კლიენტს არაფერი გაეგზავნება.",
                     external=False)
+    elif typ.startswith("tg_"):
+        base.update(_card_tg(typ, p, agents))
     elif typ == "recruit_update":
         try:
             pre = _recruit_pre(p)
@@ -253,7 +255,7 @@ def revise(viewer: dict, action_id: str, changes: dict, agents: list[dict], now:
         if _s(r.get("status")) != S_PROPOSED:
             raise AiError("შეცვლა შესაძლებელია მხოლოდ დადასტურებამდე", 409, "not_revisable")
         p = json.loads(r.get("payload") or "{}")
-        allowed = {"followup_create": ("due_at", "next_action"), "agent_message": ("text", "recipients"), "recruit_update": ("note",)}[_s(r.get("type"))]
+        allowed = {"followup_create": ("due_at", "next_action"), "agent_message": ("text", "recipients"), "recruit_update": ("note",)}.get(_s(r.get("type")), ())
         merged = dict(p, **{k: v for k, v in (changes or {}).items() if k in allowed})
         new = propose(viewer, _s(r.get("type")), merged, agents, now)
         _backend.update_many(SHEET, HEADERS, {r["action_id"]: {"status": S_CANCELLED, "decided_at": (now or m.now_dt()).strftime("%Y-%m-%d %H:%M:%S"), "result": json.dumps({"superseded_by": new["action_id"]})}})
@@ -326,6 +328,156 @@ def _exec_recruit(viewer: dict, row: dict, p: dict, agents: list[dict], deps: di
 
 
 EXECUTORS = {"followup_create": _exec_followup, "agent_message": _exec_message, "recruit_update": _exec_recruit}
+
+
+# ====================================================================== Telegram ლიდები / რიგი (SAIRO ამზადებს, მომხმარებელი ადასტურებს)
+TITLES.update({"tg_assign": "📣 Telegram ლიდის გადაბარება აგენტზე", "tg_lead_result": "📞 Telegram ლიდი — შედეგი / დადასტურება", "tg_queue_decide": "📥 Telegram რიგი — დამტკიცება/უარყოფა"})
+TG_RESULT_ACTIONS = {"ack": "ვადასტურებ (მივიღე)", "contacted": "დავუკავშირდი", "waiting": "მოგვიანებით"}
+
+
+def _tg_flow():
+    import tgnet_api
+    f = getattr(tgnet_api, "FLOW", None)
+    if not f:
+        raise AiError("Telegram ქსელი ამ სერვერზე ჩართული არ არის", 409, "tgnet_off")
+    return f()
+
+
+def _tg_lead(lead_id: str) -> dict:
+    import tgnet_store as ts
+    r = next((x for x in ts.list_lead_rows(fresh=True) if _s(x.get("lead_id")) == _s(lead_id) and _s(x.get("kind")) == "lead"), None)
+    if not r or _s(r.get("status")) == "closed":
+        raise AiError("ლიდი ვერ მოიძებნა ან დახურულია", 404, "lead_not_found")
+    return r
+
+
+def _tg_listing(r: dict) -> dict:
+    import tgnet_publisher as tp
+    return (tp.get_listing(r.get("listing_key")) if _s(r.get("listing_key")) else None) or {}
+
+
+def _norm_tg_assign(viewer: dict, p: dict, agents: list[dict]) -> tuple[dict, str]:
+    if not _manager(viewer):
+        raise AiError("ლიდის გადაბარება მხოლოდ მენეჯერს/დირექტორს შეუძლია", 403, "forbidden")
+    r = _tg_lead(p.get("lead_id"))
+    if _s(r.get("status")) not in ("new", "assigned", "acknowledged", "waiting", "contacted"):
+        raise AiError("ამ ლიდის გადაბარება შეუძლებელია")
+    lst = _tg_listing(r)
+    ag = next((a for a in agents if _s(a.get("agent_id")) == _s(p.get("agent_id"), 40) and _s(a.get("active", "yes")).lower() not in ("no", "false", "0")), None)
+    if not ag:
+        raise AiError("აგენტი ვერ მოიძებნა ან არააქტიურია", 404, "agent_not_found")
+    if not viewer.get("admin"):
+        team = _s(viewer.get("team"))
+        if _s(lst.get("team")) and _s(lst.get("team")) != team:
+            raise AiError("ეს ლიდი სხვა გუნდის ბინაზეა — მხოლოდ თქვენი გუნდის ლიდებს გადაბარებთ", 403, "out_of_scope")
+        if _s(ag.get("team")) != team:
+            raise AiError("აგენტი თქვენი გუნდიდან არ არის", 403, "out_of_scope")
+    if _s(r.get("assigned_agent_id")) == _s(ag.get("agent_id")) and _s(r.get("status")) != "new":
+        raise AiError("ლიდი უკვე ამ აგენტზეა")
+    payload = {"lead_id": _s(r.get("lead_id")), "agent_id": _s(ag.get("agent_id"))}
+    return payload, f"{_s(r.get('tg_name'), 60) or 'კლიენტი'} → {_s(ag.get('name'), 60)}"
+
+
+def _norm_tg_result(viewer: dict, p: dict, agents: list[dict]) -> tuple[dict, str]:
+    import tgnet_leads as tl
+    import tgnet_store as ts
+    r = _tg_lead(p.get("lead_id"))
+    mine = _s(r.get("assigned_agent_id")) and _s(r.get("assigned_agent_id")) == _s(viewer.get("agent_id"))
+    if not mine and not _manager(viewer):
+        raise AiError("ეს ლიდი თქვენზე არ არის", 403, "forbidden")
+    act = _s(p.get("action"), 20)
+    if act not in TG_RESULT_ACTIONS:
+        raise AiError("მოქმედება: ack | contacted | waiting")
+    note = _s(p.get("note"), 300)
+    due = ""
+    if act in ("contacted", "waiting"):
+        d = tl._parse_local(p.get("follow_up_at"))
+        if not d:
+            raise AiError("Follow-up სავალდებულოა: მიუთითეთ შემდეგი კონტაქტის თარიღი და საათი (YYYY-MM-DD HH:MM)", 400, "followup_required")
+        if d < tl._parse_local(ts.now_str()):
+            raise AiError("Follow-up წარსულში ვერ იქნება", 400, "followup_past")
+        due = d.strftime("%Y-%m-%d %H:%M")
+        if act == "contacted" and len(note) < 3:
+            raise AiError("მოკლე შენიშვნა სავალდებულოა (რა შეთანხმდით)", 400, "note_required")
+    payload = {"lead_id": _s(r.get("lead_id")), "action": act, "follow_up_at": due, "note": note}
+    return payload, f"{_s(r.get('tg_name'), 60) or 'კლიენტი'} · {TG_RESULT_ACTIONS[act]}" + (f" · follow-up {due}" if due else "")
+
+
+def _norm_tg_queue(viewer: dict, p: dict, agents: list[dict]) -> tuple[dict, str]:
+    import tgnet_store as ts
+    if not viewer.get("admin"):
+        raise AiError("რიგის დამტკიცება მხოლოდ დირექტორს შეუძლია", 403, "forbidden")
+    act = _s(p.get("action"), 20)
+    if act not in ("approve", "reject"):
+        raise AiError("მოქმედება: approve | reject")
+    want = [_s(k, 40) for k in (p.get("keys") or []) if _s(k, 40)]
+    if not want or len(want) > 50:
+        raise AiError("მიუთითეთ 1–50 განცხადება")
+    known = {g["listing_key"] for g in ts.queue_groups(limit=None)}
+    missing = [k for k in want if k not in known]
+    if missing:
+        raise AiError("რიგში ვერ მოიძებნა: " + ", ".join(missing[:5]), 404, "not_in_queue")
+    keys = sorted(set(want))
+    return {"keys": keys, "action": act}, f"{len(keys)} განცხადება · {'დამტკიცება' if act == 'approve' else 'უარყოფა'}"
+
+
+def _card_tg(typ: str, p: dict, agents: list[dict]) -> dict:
+    import tgnet_store as ts
+    by_id = {str(a.get("agent_id")): a for a in (agents or [])}
+    if typ == "tg_queue_decide":
+        groups = {g["listing_key"]: g for g in ts.queue_groups(limit=None)}
+        lines = [f"• {k} — {(groups.get(k) or {}).get('summary') or ''}".rstrip(" —") for k in p["keys"][:12]]
+        return {"who": f"{len(p['keys'])} განცხადება", "uses": ["გამოსაქვეყნებელი რიგი"], "editable": {},
+                "what": ("დამტკიცდება და ჩართულ არხებში თავისით გავა (საათების/ინტერვალის წესით):\n" if p["action"] == "approve" else "უარყოფილი იქნება (არხებში არ გავა):\n") + "\n".join(lines),
+                "effect": "ცვლილება ჩაიწერება რიგში თქვენი სახელით. გამოქვეყნებულ პოსტებს არ ეხება.", "external": p["action"] == "approve"}
+    try:
+        r = _tg_lead(p["lead_id"])
+    except AiError:
+        r = {}
+    name = _s(r.get("tg_name"), 60) or "კლიენტი"
+    lst = _tg_listing(r) if r else {}
+    summ = ts.listing_summary(lst) if lst else "ზოგადი მოთხოვნა"
+    if typ == "tg_assign":
+        ag = by_id.get(p["agent_id"], {})
+        return {"who": f"{name} · {summ}", "uses": ["Telegram ლიდი", "აგენტების სია თქვენი უფლებით"], "editable": {},
+                "what": f"ლიდი გადაბარდება აგენტს: {_s(ag.get('name')) or p['agent_id']}" + (" (ბინის აგენტი)" if _s(lst.get("agent_id")) == p["agent_id"] else ""),
+                "effect": "აგენტს Telegram-ში მიუვა შეტყობინება „👤 კლიენტის ნახვა“ ღილაკით; დადასტურებამდე შეხსენება განმეორდება, თქვენ კი უკუკავშირი მოგივათ. კლიენტს არაფერი ეგზავნება.",
+                "external": True}
+    return {"who": f"{name} · {summ}", "uses": ["თქვენი Telegram ლიდი"], "editable": {},
+            "what": f"სტატუსი: {TG_RESULT_ACTIONS[p['action']]}" + (f"; follow-up {p['follow_up_at']} (CRM-ში შეიქმნება)" if p.get("follow_up_at") else "") + (f"; შენიშვნა: {p['note']}" if p.get("note") else ""),
+            "effect": "მენეჯერს უკუკავშირი მიუვა; follow-up-ის დროს შეგახსენებთ. კლიენტს არაფერი ეგზავნება.", "external": False}
+
+
+def _exec_tg_assign(viewer: dict, row: dict, p: dict, agents: list[dict], deps: dict) -> dict:
+    _norm_tg_assign(viewer, p, agents)                                               # უფლება/მდგომარეობა შესრულებისას ხელახლა
+    res = _tg_flow().assign(p["lead_id"], p["agent_id"], by=_s(viewer.get("name")) or "მენეჯერი (SAIRO)")
+    return {"lead_id": p["lead_id"], "agent_id": res["agent_id"], "text": f"ლიდი გადაბარდა: {res['agent_name']} — შეტყობინება გაიგზავნა"}
+
+
+def _exec_tg_result(viewer: dict, row: dict, p: dict, agents: list[dict], deps: dict) -> dict:
+    import tgnet_store as ts
+    r = _tg_lead(p["lead_id"])
+    mgr = _manager(viewer) and _s(r.get("assigned_agent_id")) != _s(viewer.get("agent_id"))
+    try:
+        res = _tg_flow().agent_action(p["lead_id"], _s(viewer.get("agent_id")), p["action"], p.get("note", ""), p.get("follow_up_at", ""), manager=mgr)
+    except ts.TgnetError as e:
+        raise AiError(str(e), e.status, getattr(e, "code", "") or "tgnet") from None
+    return {"lead_id": p["lead_id"], "status": res.get("status"), "text": f"ჩაიწერა: {TG_RESULT_ACTIONS[p['action']]}" + (f" · follow-up {res.get('follow_up_at')}" if res.get("follow_up_at") else "")}
+
+
+def _exec_tg_queue(viewer: dict, row: dict, p: dict, agents: list[dict], deps: dict) -> dict:
+    import tgnet_store as ts
+    if not viewer.get("admin"):
+        raise AiError("რიგის დამტკიცება მხოლოდ დირექტორს შეუძლია", 403, "forbidden")
+    try:
+        res = ts.decide_many(p["keys"], p["action"], by=_s(viewer.get("name")) or "დირექტორი (SAIRO)")
+    except ts.TgnetError as e:
+        raise AiError(str(e), e.status, getattr(e, "code", "") or "tgnet") from None
+    return dict(res, text=f"{'დამტკიცდა' if p['action'] == 'approve' else 'უარყოფილია'}: {res.get('listings', res.get('changed', len(p['keys'])))}")
+
+
+NORMALIZERS.update({"tg_assign": _norm_tg_assign, "tg_lead_result": _norm_tg_result, "tg_queue_decide": _norm_tg_queue})
+EXECUTORS.update({"tg_assign": _exec_tg_assign, "tg_lead_result": _exec_tg_result, "tg_queue_decide": _exec_tg_queue})
 
 
 def confirm(viewer: dict, action_id: str, expect_hash: str, agents: list[dict], deps: dict, now: datetime.datetime | None = None) -> dict:

@@ -1169,6 +1169,25 @@ def api_warnings_request_dismiss_bulk():
     return jsonify(ok=True, requested=len(rows), skipped=len(ids) - len(rows))
 
 
+@app.post("/api/warnings/delete-bulk")
+@rate_limited("bulk_notify")
+def api_warnings_delete_bulk():
+    """დირექტორი: მონიშნული გაფრთხილებების წაშლა (სიიდან, მრიცხველიდან და ლიმიტიდან ქრება; ჩანაწერი აუდიტისთვის რჩება).
+    თიმლიდერს არ შეუძლია — მას აქვს „გაუქმების მოთხოვნა“."""
+    agent, admin, err = _authed_agent()
+    if err:
+        return err
+    if not admin:
+        return jsonify(error="წაშლა მხოლოდ დირექტორს შეუძლია — თიმლიდერს: „გაუქმების მოთხოვნა“"), 403
+    body = request.get_json(silent=True) or {}
+    ids = _clean_id_list(body.get("warning_ids"))
+    if not ids:
+        return jsonify(error="მონიშნეთ გაფრთხილებები"), 400
+    n = sheets.delete_warnings(ids, deleted_by=(agent or {}).get("name") or "დირექტორი")
+    _audit(agent, admin, "warnings_delete_bulk", "warning", ",".join(ids[:20]), metadata={"requested": len(ids), "deleted": n})
+    return jsonify(ok=True, deleted=n, skipped=len(ids) - n)
+
+
 @app.post("/api/warnings/decide-dismiss-bulk")
 @rate_limited("bulk_notify")
 def api_warnings_decide_dismiss_bulk():
@@ -3289,6 +3308,21 @@ import criteria_api  # noqa: E402
 import criteria_store  # noqa: E402
 
 criteria_api.register(app, authed=_authed_agent, audit=_audit, rate_limited=rate_limited)
+
+# 📘 აპის სახელმძღვანელო (ეკრანი + SAIRO — ერთი წყარო)
+try:
+    import app_guide  # noqa: E402
+    app_guide.register(app, authed=_authed_agent)
+except Exception:
+    log.exception("app_guide ვერ ჩაირთო")
+
+# 👤 პირადი კაბინეტი (აგენტი/მენეჯერი): ერთი მოთხოვნით ყველა რაოდენობა + გუნდის ცხრილი; მხოლოდ კითხულობს
+try:
+    import cabinet_api  # noqa: E402
+    cabinet_api.register(app, authed=_authed_agent, rate_limited=rate_limited, get_agents=lambda: sheets.get_agents(), get_tasks=lambda: sheets.get_tasks(),
+                         get_warnings=lambda days=None: sheets.get_warnings(days=days), get_exclusives=lambda status=None: sheets.get_exclusives(status=status))
+except Exception:
+    log.exception("cabinet_api ვერ ჩაირთო")
 
 
 # Safe Home AI (შიდა ასისტენტი): ახალი endpoint-ები `/api/ai/...`; არსებულ `/api/questions*`-ს არ ცვლის. AI_ENABLED=0 (ნაგულისხმევი) — ჩატი გამორთულია.

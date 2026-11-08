@@ -843,7 +843,7 @@ button.chip { cursor: pointer; font-family: inherit; }
 .hub-mapbox .leaflet-container { background: #0b1a2a; }
 .hub-map-top { left: auto; right: 10px; }
 .hub-map-top .hub-row { flex-wrap: nowrap; }
-.hub-mapbox .leaflet-tile-pane { filter: invert(1) hue-rotate(190deg) brightness(.8) contrast(.95) saturate(.5); }
+/* მუქი ფილები CARTO-დან — CSS filter მოხსნილია (ტელეფონზე რუკას აჭედებდა) */
 .modal .hub-row .btn, .hub-priv .hub-row .btn { flex: 1 1 30%; white-space: nowrap; padding: 11px 8px; font-size: 13px; }
 
 /* ---- Property Hub: შეხვედრები (ბინიდან დაგეგმვა, სია, ტოპები) ---- */
@@ -1155,3 +1155,110 @@ button.chip { cursor: pointer; font-family: inherit; }
 .mh-wrap .row:hover,.mh-wrap .list-row:hover{background:rgba(233,196,106,.06);transform:translateX(2px)}
 .mh-wrap .cnt{display:inline-block;min-width:22px;text-align:center;border-radius:999px;padding:1px 8px;background:rgba(233,196,106,.2);font-size:12px}
 @media (prefers-reduced-motion:reduce){.mh-wrap .card{animation:none}.mh-wrap *{transition:none!important}}
+
+/* ===== 👤 პირადი კაბინეტი ===== */
+.cab-hero{display:flex;align-items:center;gap:12px;padding:14px;border-radius:18px;margin-top:8px;background:linear-gradient(135deg,rgba(233,196,106,.18),rgba(42,157,143,.10));border:1px solid rgba(233,196,106,.25);animation:mhIn .35s ease both}
+.cab-av{width:52px;height:52px;flex:0 0 52px;border-radius:16px;display:flex;align-items:center;justify-content:center;font-weight:800;font-size:19px;letter-spacing:.5px;color:#1b2430;background:linear-gradient(135deg,#e9c46a,#f4a261);box-shadow:0 6px 16px rgba(233,196,106,.3)}
+.cab-who{flex:1;min-width:0;display:flex;flex-direction:column;gap:2px}.cab-who b{font-size:17px;font-weight:800}.cab-who span{font-size:12px;opacity:.75}
+.cab-rf{padding:8px 10px}
+.cab-tiles{display:grid;grid-template-columns:repeat(auto-fill,minmax(104px,1fr));gap:8px;margin-top:10px}
+.cab-tile{position:relative;display:flex;flex-direction:column;align-items:flex-start;gap:2px;padding:10px 10px 9px;border-radius:14px;border:1px solid var(--line,#2a3a4d);background:rgba(150,150,150,.06);color:inherit;font:inherit;text-align:left;cursor:pointer;transition:transform .12s,background .2s,border-color .2s;animation:mhIn .35s ease both}
+.cab-tile:active{transform:scale(.97)}.cab-tile:hover{background:rgba(233,196,106,.08)}
+.cab-tile .cab-ic{font-size:18px}.cab-tile b{font-size:22px;font-weight:800;line-height:1.1}.cab-tile .cab-lb{font-size:12px;opacity:.85;line-height:1.25}.cab-tile small{font-size:11px;opacity:.65}
+.cab-tile.red.has{border-color:rgba(230,57,70,.55);background:rgba(230,57,70,.10)}.cab-tile.red.has b{color:#ff6b6b}
+.cab-tile.orange.has{border-color:rgba(244,162,97,.55);background:rgba(244,162,97,.10)}.cab-tile.orange.has b{color:#f4a261}
+.cab-tile.sk{height:78px;cursor:default;background:linear-gradient(90deg,rgba(150,150,150,.06),rgba(150,150,150,.14),rgba(150,150,150,.06));background-size:200% 100%;animation:cabSk 1.2s infinite}
+@keyframes cabSk{from{background-position:200% 0}to{background-position:-200% 0}}
+.cab-tabs{overflow-x:auto;flex-wrap:nowrap;scrollbar-width:none;padding-bottom:2px}.cab-tabs::-webkit-scrollbar{display:none}.cab-tabs .hub-chip{flex:0 0 auto}
+.cab-src{display:inline-block;font-size:11px;padding:1px 7px;border-radius:999px;background:rgba(42,157,143,.18);margin-right:4px}
+.cab-tg{border-left:3px solid #2a9d8f}.cab-focus{box-shadow:0 0 0 2px #e9c46a;animation:cabPulse 1.2s ease 2}
+@keyframes cabPulse{50%{box-shadow:0 0 0 6px rgba(233,196,106,.25)}}
+.cab-late{color:#ff6b6b;font-weight:700}
+.cab-row{padding:10px 12px;border-radius:12px;margin:6px 0;background:rgba(150,150,150,.06);border-left:4px solid #2a9d8f;cursor:pointer;transition:background .2s}
+.cab-row:hover{background:rgba(233,196,106,.07)}.cab-row.lv-red{border-left-color:#e63946}.cab-row.lv-orange{border-left-color:#f4a261}
+.cab-row-h{display:flex;align-items:center;gap:8px}.cab-row-h small{opacity:.6}
+.cab-dot{width:9px;height:9px;border-radius:50%;background:#2a9d8f}.lv-red .cab-dot{background:#e63946}.lv-orange .cab-dot{background:#f4a261}
+.cab-nums{display:flex;flex-wrap:wrap;gap:6px;margin-top:6px}.cab-nums span{font-size:12px;padding:3px 8px;border-radius:999px;background:rgba(150,150,150,.12)}
+.cab-nums .bad{background:rgba(230,57,70,.18);color:#ff8a8a;font-weight:700}.cab-nums .warn{background:rgba(244,162,97,.18)}
+.cab-ex-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:8px}
+.cab-ex{padding:12px;border-radius:14px;background:rgba(150,150,150,.06);border:1px solid var(--line,#2a3a4d);animation:mhIn .3s ease both}
+.cab-ex-h{display:flex;justify-content:space-between;gap:8px;margin-bottom:4px}.cab-ex-h span{color:#e9c46a;font-weight:800}
+.warn-fold summary{cursor:pointer;list-style:none}.warn-fold summary::-webkit-details-marker{display:none}.warn-fold summary h2::after{content:" ▾";opacity:.6}.warn-fold[open] summary h2::after{content:" ▴"}
+@media (prefers-reduced-motion:reduce){.cab-tile,.cab-hero,.cab-ex{animation:none}}
+
+/* ===== 🏘️ MyHome ტაბი v2: დღის სურათი, ნაბიჯებიანი ფორმა, გადამრთველები, სტატუსის ბარათები ===== */
+.mh-hidden{display:none!important}
+.mh-hero{padding:16px;border-radius:20px;margin-bottom:12px;background:radial-gradient(120% 140% at 0% 0%,rgba(233,196,106,.22),transparent 55%),linear-gradient(135deg,rgba(38,70,83,.55),rgba(42,157,143,.18));border:1px solid rgba(233,196,106,.22);animation:mhIn .4s cubic-bezier(.2,.8,.2,1) both}
+.mh-hero-top{display:flex;justify-content:space-between;align-items:center;gap:12px}
+.mh-hero-t{font-size:20px;font-weight:800;letter-spacing:.2px}.mh-hero-s{font-size:12.5px;opacity:.8;margin-top:2px}
+.mh-ring{--p:0;width:64px;height:64px;flex:0 0 64px;border-radius:50%;display:flex;flex-direction:column;align-items:center;justify-content:center;background:conic-gradient(#2a9d8f calc(var(--p)*1%),rgba(150,150,150,.18) 0);position:relative}
+.mh-ring::before{content:"";position:absolute;inset:6px;border-radius:50%;background:var(--card,#16212e)}
+.mh-ring b,.mh-ring small{position:relative}.mh-ring b{font-size:15px;font-weight:800}.mh-ring small{font-size:9px;opacity:.7}
+.mh-stats{display:grid;grid-template-columns:repeat(5,1fr);gap:6px;margin-top:12px}
+.mh-stat{display:flex;flex-direction:column;align-items:center;gap:1px;padding:8px 4px;border-radius:14px;border:1px solid rgba(150,150,150,.2);background:rgba(0,0,0,.12);color:inherit;font:inherit;cursor:pointer;transition:transform .12s,background .2s,border-color .2s}
+.mh-stat:active{transform:scale(.95)}.mh-stat b{font-size:18px;font-weight:800}.mh-stat small{font-size:10.5px;opacity:.8}
+.mh-stat.on{border-color:#e9c46a;background:rgba(233,196,106,.16)}
+.mh-stat.amber b{color:#f4a261}.mh-stat.blue b{color:#62b6cb}.mh-stat.green b{color:#52c47f}.mh-stat.red b{color:#ff6b6b}
+.mh-form h2{margin-bottom:10px}
+.mh-step{display:flex;gap:12px;margin:0 0 12px}
+.mh-n{flex:0 0 28px;height:28px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-weight:800;font-size:13px;color:#1b2430;background:linear-gradient(135deg,#e9c46a,#f4a261);box-shadow:0 4px 12px rgba(233,196,106,.25)}
+.mh-step-b{flex:1;min-width:0}.mh-k{font-size:12.5px;opacity:.8;margin:3px 0 6px;font-weight:600}
+.mh-seg{display:flex;gap:4px;padding:4px;border-radius:14px;background:rgba(150,150,150,.1)}
+.mh-seg button{flex:1;padding:9px 6px;border:0;border-radius:10px;background:transparent;color:inherit;font:inherit;font-size:13px;font-weight:600;cursor:pointer;transition:background .2s,color .2s,box-shadow .2s}
+.mh-seg button.on{background:linear-gradient(135deg,#e9c46a,#f4a261);color:#1b2430;box-shadow:0 4px 12px rgba(233,196,106,.25)}
+.mh-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+@media (max-width:420px){.mh-grid{grid-template-columns:1fr}.mh-stats{grid-template-columns:repeat(3,1fr)}}
+.mh-wrap .qa-compose label.mh-f{display:flex;flex-direction:column;align-items:stretch;gap:4px;padding:0;background:none;cursor:default}
+.mh-f span{font-size:12px;opacity:.8;font-weight:600}
+.mh-sws{display:flex;flex-direction:column;gap:6px;margin:4px 0}
+.mh-wrap .qa-compose label.mh-sw{display:flex;align-items:center;gap:12px;padding:10px 12px;border-radius:12px;background:rgba(150,150,150,.08);cursor:pointer}
+.mh-sw input{position:absolute;opacity:0;width:0;height:0}
+.mh-sw i{flex:0 0 42px;height:24px;border-radius:999px;background:rgba(150,150,150,.35);position:relative;transition:background .2s}
+.mh-sw i::after{content:"";position:absolute;top:3px;left:3px;width:18px;height:18px;border-radius:50%;background:#fff;transition:transform .2s cubic-bezier(.2,.8,.2,1);box-shadow:0 1px 3px rgba(0,0,0,.3)}
+.mh-sw input:checked+i{background:#2a9d8f}.mh-sw input:checked+i::after{transform:translateX(18px)}
+.mh-sw input:focus-visible+i{box-shadow:0 0 0 3px rgba(233,196,106,.35)}
+.mh-sw span{display:flex;flex-direction:column;font-size:13.5px}.mh-sw small{font-size:11px;opacity:.65}
+.mh-go{width:100%;padding:13px;font-size:15px;font-weight:800;background:linear-gradient(135deg,#e9c46a,#f4a261);color:#1b2430}
+.mh-search summary{cursor:pointer;list-style:none}.mh-search summary::-webkit-details-marker{display:none}.mh-search summary h2::after{content:" ▾";opacity:.6}.mh-search[open] summary h2::after{content:" ▴"}
+.mh-job{border-left:4px solid rgba(150,150,150,.4);border-radius:12px;margin:6px 0;padding-left:8px;animation:mhIn .3s ease both}
+.mh-job.st-completed{border-left-color:#52c47f}.mh-job.st-failed{border-left-color:#ff6b6b;background:rgba(230,57,70,.05)}.mh-job.st-processing{border-left-color:#62b6cb}.mh-job.st-queued{border-left-color:#f4a261}
+.mh-pills{display:flex;gap:4px;flex-wrap:wrap;margin-bottom:3px}
+.mh-pill{font-size:10.5px;font-weight:700;padding:1px 8px;border-radius:999px}.mh-pill.mh{background:rgba(233,196,106,.2);color:#e9c46a}.mh-pill.ss{background:rgba(98,182,203,.2);color:#62b6cb}.mh-pill.tg{background:rgba(42,157,143,.2);color:#52c4b3}
+.mh-prog{height:4px;border-radius:4px;background:rgba(98,182,203,.18);overflow:hidden;margin-top:6px}
+.mh-prog i{display:block;width:40%;height:100%;border-radius:4px;background:#62b6cb;animation:mhProg 1.3s ease-in-out infinite}
+@keyframes mhProg{from{transform:translateX(-100%)}to{transform:translateX(250%)}}
+@media (prefers-reduced-motion:reduce){.mh-hero,.mh-job{animation:none}.mh-prog i{animation:none}}
+
+/* ===== სოლიდური ტიპოგრაფია (მთელი აპი): Noto Sans Georgian — მკვეთრი სათაურები, ციფრები ერთ სიგანეზე ===== */
+:root{--font-ui:"Manrope","Noto Sans Georgian","Segoe UI",-apple-system,BlinkMacSystemFont,Roboto,sans-serif}
+body{-webkit-font-smoothing:antialiased;text-rendering:optimizeLegibility}
+h1,h2,h3,.card h2,.hub-title h2{font-weight:800;letter-spacing:.15px}
+b,strong{font-weight:700}
+.cnt,.badge,.cab-tile b,.mh-stat b,.hub-price,.hub-stat b{font-variant-numeric:tabular-nums}
+.mh-job [data-mh-retry]{width:auto;flex:0 0 auto;align-self:center;padding:8px 12px}
+.mh-job .main{min-width:0}
+.hub-map-flt{position:absolute;left:54px;right:10px;top:52px;z-index:500;display:flex;gap:6px}
+.hub-map-flt select,.hub-map-flt input{min-width:0;flex:1 1 140px;height:34px;border-radius:12px;border:1px solid rgba(233,196,106,.35);background:rgba(11,26,42,.88);color:#fff;padding:0 10px;font:inherit;font-size:12.5px;backdrop-filter:blur(6px)}
+.hub-map-flt .hub-chip{height:34px}
+.hub-mapbox .leaflet-marker-icon.hub-pin{will-change:transform}
+.hub-selbar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:8px 10px;border-radius:14px;background:rgba(150,150,150,.07);border:1px dashed rgba(233,196,106,.3)}
+.hub-selbar .btn{width:auto;padding:7px 12px;font-size:12.5px}
+.hub-card.hub-selable{outline:2px dashed rgba(233,196,106,.35);outline-offset:-2px}
+.hub-card.hub-sel{outline:3px solid #e9c46a;outline-offset:-3px;transform:scale(.985)}
+.hub-chk{position:absolute;left:8px;top:8px;z-index:2;width:26px;height:26px;border-radius:8px;display:flex;align-items:center;justify-content:center;font-weight:900;color:#1b2430;background:rgba(255,255,255,.85);border:2px solid #e9c46a}
+.hub-sel .hub-chk{background:#e9c46a}
+/* ===== 🆕 სახელმძღვანელო ===== */
+.guide-head{background:linear-gradient(135deg,rgba(233,196,106,.14),rgba(42,157,143,.08))}
+.guide-q{width:100%;margin:10px 0 8px;height:40px;border-radius:12px;border:1px solid var(--line,#2a3a4d);background:rgba(0,0,0,.15);color:inherit;padding:0 12px;font:inherit}
+.guide-chips{display:flex;gap:6px;overflow-x:auto;scrollbar-width:none;padding-bottom:2px}.guide-chips::-webkit-scrollbar{display:none}
+.guide-card{animation:mhIn .35s ease both}
+.guide-card summary{display:flex;align-items:center;gap:12px;cursor:pointer;list-style:none}.guide-card summary::-webkit-details-marker{display:none}
+.guide-ic{flex:0 0 42px;height:42px;border-radius:13px;display:flex;align-items:center;justify-content:center;font-size:21px;background:rgba(233,196,106,.15)}
+.guide-t{display:flex;flex-direction:column;gap:2px;min-width:0}.guide-t b{font-size:15px;font-weight:800}.guide-t small{font-size:12px;opacity:.7}
+.guide-steps{counter-reset:g;list-style:none;padding:0;margin:12px 0 4px}
+.guide-steps li{counter-increment:g;position:relative;padding:8px 10px 8px 42px;margin:6px 0;border-radius:12px;background:rgba(150,150,150,.07);line-height:1.55;font-size:13.5px}
+.guide-steps li::before{content:counter(g);position:absolute;left:10px;top:8px;width:22px;height:22px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:800;color:#1b2430;background:linear-gradient(135deg,#e9c46a,#f4a261)}
+.guide-tip{margin-top:6px;padding:8px 10px;border-radius:12px;background:rgba(42,157,143,.12);font-size:13px;line-height:1.5}
+.cab-hero .cab-rf{width:auto;flex:0 0 auto;padding:8px 12px}
+.cab-tg a,.hub-ld a[href^="tel:"]{color:#e9c46a;font-weight:700;text-decoration:none}
+.cab-tg .tg-row .btn{flex:1 1 auto;min-width:0}

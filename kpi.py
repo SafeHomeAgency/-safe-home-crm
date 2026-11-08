@@ -61,9 +61,14 @@ def _comp(score, value, target, text):
             "value": value, "target": target, "text": text}
 
 
-def _day_mode(att, sched, d: datetime.date) -> str:
+def _day_mode(att, sched, d: datetime.date, aid: str = "") -> str:
     if att and att.get("mode"):
         return str(att.get("mode"))
+    if aid and hasattr(sheets, "mode_on"):                 # კვირის გრაფიკი + ამ თარიღის დამტკიცებული გაცვლა
+        try:
+            return sheets.mode_on(aid, d) or "off"
+        except Exception:  # noqa: BLE001
+            pass
     return str((sched or {}).get(sheets.WEEKDAY_KEYS[d.weekday()]) or "off")
 
 
@@ -140,7 +145,7 @@ def compute(days: int = 30, agent_ids=None, now_local: datetime.datetime | None 
         for d in dates:
             ds = _s(d)
             row = att.get((aid, ds))
-            mode = _day_mode(row, sched, d)
+            mode = _day_mode(row, sched, d, aid)
             if mode == "off" or (aid, ds) in dayoffs:
                 continue
             opened = shift_rules.is_opened(row)

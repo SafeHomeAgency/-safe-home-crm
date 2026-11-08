@@ -124,6 +124,20 @@ def task_created(task_id: str, assigned_to: str = "", client_phone: str = "", ow
 
 
 @_safe
+def criteria_created(criteria_id: str, agent_id: str = "", client_phone: str = "", client_name: str = "", deal_type: str = "",
+                     budget: str = "", summary: str = "") -> None:
+    """კლიენტის კრიტერიუმი (Property Hub) -> CRM-ის კლიენტი (ტელეფონით, დუბლიკატის გარეშე) + აქტივობა — რომ ყველა წყაროს კლიენტი ერთ ბარათში ჩანდეს."""
+    if not m.normalize_phone(client_phone):
+        return
+    name = _agent_name(agent_id)
+    cid, _ = store.upsert_client(client_phone, {"name": client_name, "assigned_agent_id": str(agent_id), "assigned_agent_name": name,
+                                                "deal_type": deal_type, "budget": budget, "source": "criteria"}, by="sync")
+    ref = f"criteria:{criteria_id}"
+    if not _has_ref(ref):
+        store.add_activity("client", cid, "note", f"კრიტერიუმი: {summary}".strip()[:300], agent_id=str(agent_id), agent_name=name, source_ref=ref)
+
+
+@_safe
 def report_created(report_id: str, agent_id: str = "", client_phone: str = "",
                    actions: str = "", notes: str = "") -> None:
     if not m.normalize_phone(client_phone):

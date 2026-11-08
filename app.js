@@ -46,9 +46,20 @@ const WARNING_LABELS = {
   late_arrival: "დაგვიანება სამუშაოზე",
   no_show: "არ გამოცხადება",
   quota_missed: "დღიური გეგმა ვერ შესრულდა",
+  missing_checkout: "სამუშაო დღე არ დაიხურა",
 };
 
 const state = { role: null, data: null, tab: {}, period: "month" };
+/* სოლიდური ქართული ფონტი: Manrope-ს ქართული ასოები არ აქვს (ტელეფონზე სისტემური, სუსტი შრიფტი ჩანდა) -> Noto Sans Georgian (display=swap — გვერდს არ აყოვნებს) */
+(function loadGeorgianFont() {
+  try {
+    if (document.querySelector("link[data-font-ka]")) return;
+    const l = document.createElement("link");
+    l.rel = "stylesheet"; l.setAttribute("data-font-ka", "1");
+    l.href = "https://fonts.googleapis.com/css2?family=Noto+Sans+Georgian:wght@400;500;600;700;800&display=swap";
+    document.head.appendChild(l);
+  } catch (e) { /* ფონტი არასავალდებულოა */ }
+})();
 
 const AGENT_TABS = [
   { id: "today", label: "დღეს", icon: "🏠" },
@@ -81,7 +92,7 @@ const ADMIN_TABS = [
   { id: "warnings", label: "გაფრთხილებები", icon: "⚠️", lazy: true },
   { id: "swaps", label: "სმენის გაცვლა", icon: "🔁", lazy: true },
   { id: "reports", label: "რეპორტები", icon: "📝", lazy: true },
-  { id: "clients", label: "კლიენტები", icon: "👥", lazy: true },
+  // „👥 კლიენტები“ (ძველი სია ტელეფონით) დამალულია — იგივე მონაცემი ერთიანად 🗃️ CRM-შია (დავალება/რეპორტი/შეხვედრა/Telegram/კრიტერიუმი), აგენტის მხრიდან კი 👤 კაბინეტში. კოდი რჩება (ძველი ბმული მუშაობს).
   { id: "exclusives", label: "ექსკლუზივები", icon: "🏘️", lazy: true },
   { id: "myhomejobs", label: "MyHome", icon: "🏘️", lazy: true },
   { id: "myhomestats", label: "MyHome სტატისტიკა", icon: "📊", lazy: true },
@@ -1087,8 +1098,9 @@ function renderWarnings(rows) {
     const bucket = _warningBucket(w);
     // მულტი-მონიშვნა: აქტიურზე (გაუქმების მოთხოვნისთვის) და მომლოდინეზე
     // (დამტკიცება/უარყოფა — მხოლოდ ადმინი).
-    const selectable = w.warning_id && (bucket === "active" || bucket === "rejected" || (bucket === "pending" && !isLeadView));
-    const pickKind = bucket === "pending" ? "pending" : "active";
+    // დირექტორს ნებისმიერი გაფრთხილება შეუძლია მონიშნოს (წასაშლელად); თიმლიდერს — აქტიური (გაუქმების მოთხოვნისთვის)
+    const selectable = w.warning_id && (!isLeadView || bucket === "active" || bucket === "rejected");
+    const pickKind = bucket === "pending" ? "pending" : bucket === "dismissed" ? "dismissed" : "active";
     return `
       <div class="list-row clickable chk-row" data-warn-idx="${rows.indexOf(w)}">
         ${selectable ? `<input type="checkbox" class="chk-pick" data-warn-chk="${esc(w.warning_id)}" data-kind="${pickKind}" ${state.warnSel.has(String(w.warning_id)) ? "checked" : ""} />` : ""}
@@ -1096,22 +1108,28 @@ function renderWarnings(rows) {
         <div class="main">
           <div class="title">${esc(w.agent_name)} — ${esc(WARNING_LABELS[w.type] || w.type)}</div>
           <div class="sub">${esc(w.detail || "")}${statusLabel ? " · " + statusLabel : ""}</div>
+          ${w.dismiss_reason && bucket !== "active" ? `<div class="sub" style="opacity:.85">💬 ${esc(w.dismiss_reason)}${w.dismiss_requested_by_name ? " — " + esc(w.dismiss_requested_by_name) : ""}</div>` : ""}
         </div>
         <div class="side sub">${esc((w.created_at || "").split(" ")[0] || "")}</div>
       </div>`;
   };
-  const section = (icon, title, list, selKind) => `<div class="card">
-    <h2>${icon} ${title} <span class="cnt">${list.length}</span></h2>
-    ${selKind && list.length > 1 && (selKind === "active" || !isLeadView)
-      ? `<div style="margin-bottom:8px"><button class="chip" data-sel-all="${selKind}">☑ ყველას მონიშვნა / მოხსნა</button></div>` : ""}
-    ${list.length === 0 ? `<div class="empty">ცარიელია</div>` : list.map(warnRowHtml).join("")}
-  </div>`;
+  const section = (icon, title, list, selKind, collapsed) => {
+    const head = `${icon} ${title} <span class="cnt">${list.length}</span>`;
+    const tools = selKind && list.length > 1 && (selKind === "active" || !isLeadView)
+      ? `<div style="margin-bottom:8px"><button class="chip" data-sel-all="${selKind}">☑ ყველას მონიშვნა / მოხსნა</button></div>` : "";
+    const body = list.length === 0 ? `<div class="empty">ცარიელია</div>` : list.map(warnRowHtml).join("");
+    // ძველი/დახურული ჯგუფები ნაგულისხმევად აკეცილია — ეკრანი არ „ჭრელდება“
+    return collapsed && list.length
+      ? `<details class="card warn-fold"><summary><h2 style="display:inline">${head}</h2></summary>${tools}${body}</details>`
+      : `<div class="card"><h2>${head}</h2>${tools}${body}</div>`;
+  };
+  const hint = isLeadView ? "" : `<div class="hub-note" style="margin:0 0 10px">☑ მონიშნეთ ნებისმიერი გაფრთხილება → „🗑 წაშლა“ (სიიდან და ლიმიტიდან ქრება). დამტკიცებული Day off-ის და გაცვლილი სმენის დღის გაფრთხილებები <b>ავტომატურად</b> იხსნება.</div>`;
 
-  return filterBar + agentCardsHtml + `<div id="warnBulk"></div>`
+  return filterBar + agentCardsHtml + hint + `<div id="warnBulk"></div>`
     + section("🕐", "დასადასტურებელი", buckets.pending, "pending")
-    + section("✅", "დადასტურებული (გაუქმებულია)", buckets.dismissed)
-    + section("❌", "უარყოფილი (აქტიურად რჩება)", buckets.rejected)
-    + section("⚠️", "აქტიური", buckets.active, "active");
+    + section("⚠️", "აქტიური", buckets.active, "active")
+    + section("❌", "უარყოფილი (აქტიურად რჩება)", buckets.rejected, isLeadView ? "" : "active", true)
+    + section("✅", "გაუქმებული", buckets.dismissed, isLeadView ? "" : "dismissed", true);
 }
 
 function _warningBucket(w) {
@@ -1131,7 +1149,8 @@ function bindWarningsBulk(rows, isAdmin) {
   if (!bar) return;
   const kindOf = (id) => {
     const w = rows.find((x) => String(x.warning_id) === id);
-    return w && _warningBucket(w) === "pending" ? "pending" : "active";
+    const b = w ? _warningBucket(w) : "active";
+    return b === "pending" ? "pending" : b === "dismissed" ? "dismissed" : "active";
   };
   // ფილტრის/სიის ცვლილებისას გაქრობილი ID-ები მონიშვნიდან ამოვიღოთ
   const present = new Set(rows.map((w) => String(w.warning_id)));
@@ -1147,8 +1166,15 @@ function bindWarningsBulk(rows, isAdmin) {
       ${act.length ? `<button class="btn" id="bulkReq">📝 გაუქმების მოთხოვნა (${act.length})</button>` : ""}
       ${pen.length && isAdmin ? `<button class="btn" id="bulkApprove">✅ დამტკიცება (${pen.length})</button>
         <button class="btn danger" id="bulkReject">❌ უარყოფა (${pen.length})</button>` : ""}
+      ${isAdmin ? `<button class="btn danger" id="bulkDel">🗑 წაშლა (${ids.length})</button>` : ""}
       <button class="btn secondary" id="bulkClear">✖</button>
     </div>`;
+    const del = document.getElementById("bulkDel");
+    if (del) del.onclick = async () => {
+      if (!confirm(`წაიშალოს ${ids.length} გაფრთხილება? სიიდან და ლიმიტის მრიცხველიდან გაქრება (ჩანაწერი აუდიტისთვის რჩება).`)) return;
+      del.disabled = true;
+      await done(() => api("/api/warnings/delete-bulk", { method: "POST", body: JSON.stringify({ warning_ids: ids }) }), (r) => `🗑 წაიშალა: ${r.deleted}${r.skipped ? ` · გამოტოვებული: ${r.skipped}` : ""}`);
+    };
     document.getElementById("bulkClear").onclick = () => {
       state.warnSel.clear();
       document.querySelectorAll("[data-warn-chk]").forEach((c) => { c.checked = false; });
@@ -2281,16 +2307,19 @@ let mhRowsById = {}; // job_id -> row, დეტალის მოდალი�
 
 function _renderMyHomeRow(r, showAgentName) {
   const canRetry = r.status === "FAILED" || r.status === "PROCESSING";
+  const tgt = r.publish_target === "both" ? ["MyHome", "ss.ge"] : [r.publish_target === "ssge" ? "ss.ge" : "MyHome"];
   return `
-    <div class="list-row" data-mh-row="${esc(r.job_id)}" style="cursor:pointer">
-      <div class="avatar">🏠</div>
+    <div class="list-row mh-job st-${esc(String(r.status || "").toLowerCase())}" data-mh-row="${esc(r.job_id)}" style="cursor:pointer">
+      <div class="avatar">${{ COMPLETED: "✅", FAILED: "⚠️", PROCESSING: "⚙️", QUEUED: "⏳" }[r.status] || "🏠"}</div>
       <div class="main">
+        <div class="mh-pills">${tgt.map((t) => `<span class="mh-pill ${t === "ss.ge" ? "ss" : "mh"}">${t}</span>`).join("")}${String(r.notes || "").includes("Telegram: კი") ? `<span class="mh-pill tg">📣 Telegram</span>` : ""}</div>
         <div class="title">${r.listing_source === "ssge" ? "ss.ge" : "MyHome"} ID: ${esc(r.myhome_listing_id)}${r.publish_target === "both" ? " → MyHome+ss.ge" : (r.publish_target === "ssge" && r.listing_source !== "ssge" ? " → ss.ge" : (r.publish_target === "myhome" && r.listing_source === "ssge" ? " → MyHome" : ""))}${showAgentName ? " · " + esc(r.agent_name) : ""}</div>
         <div class="sub">${MYHOME_JOB_STATUS_LABEL[r.status] || esc(r.status)}${r.deal_type ? " · " + esc(r.deal_type) : ""}${r.cooperation_percent ? " · " + esc(r.cooperation_percent) + "%" : ""}${r.final_price ? " · 💰 " + esc(r.final_price) : ""}</div>
         ${r.address ? `<div class="sub">📍 ${esc(r.address)}${r.district ? ", " + esc(r.district) : ""}</div>` : ""}
         ${r.notes ? `<div class="sub">📝 ${esc(r.notes)}</div>` : ""}
         <div class="sub">${esc((r.created_at || "").split(" ")[0] || "")}${r.completed_at ? " → " + esc((r.completed_at || "").split(" ")[0] || "") : ""}</div>
         ${r.status === "FAILED" && r.error_message ? `<div class="sub">⚠️ ${esc(r.error_message)}</div>` : ""}
+        ${r.status === "PROCESSING" ? `<div class="mh-prog"><i></i></div>` : ""}
       </div>
       ${canRetry ? `<button class="btn" data-mh-retry="${esc(r.job_id)}" style="padding:8px 10px">🔁</button>` : ""}
     </div>`;
@@ -2509,35 +2538,54 @@ async function openMhAccountsModal() {
 }
 
 function renderMyHomeJobs(rows, role) {
+  // ---- დღის სურათი (უკვე ჩატვირთული სიიდან, დამატებითი მოთხოვნის გარეშე): რიგი / მუშავდება / დაიდო / ჩავარდა — ჩიპზე დაჭერა ფილტრავს
+  const allRows = rows || [], today = new Date().toISOString().slice(0, 10);
+  const cnt = (st) => allRows.filter((r) => r.status === st).length;
+  const doneToday = allRows.filter((r) => r.status === "COMPLETED" && String(r.completed_at || r.created_at || "").slice(0, 10) === today).length;
+  const addedToday = allRows.filter((r) => String(r.created_at || "").slice(0, 10) === today).length;
+  const fin = cnt("COMPLETED") + cnt("FAILED"), rate = fin ? Math.round((cnt("COMPLETED") / fin) * 100) : null;
+  const cur = state.mhSearch.status || "";
+  const chip = (st, icon, n, label, tone) => `<button class="mh-stat ${tone} ${cur === st ? "on" : ""}" data-mh-filter="${st}"><span>${icon}</span><b>${n}</b><small>${label}</small></button>`;
+  const hero = `
+    <div class="mh-hero">
+      <div class="mh-hero-top"><div><div class="mh-hero-t">🏘️ MyHome · ss.ge</div><div class="mh-hero-s">${role === "agent" ? "ჩემი განცხადებები" : "გუნდის განცხადებები"} · დღეს დაემატა ${addedToday} · დაიდო ${doneToday}</div></div>
+        ${rate == null ? "" : `<div class="mh-ring" style="--p:${rate}"><b>${rate}%</b><small>წარმატება</small></div>`}</div>
+      <div class="mh-stats">${chip("", "📋", allRows.length, "ყველა", "")}${chip("QUEUED", "⏳", cnt("QUEUED"), "რიგშია", "amber")}${chip("PROCESSING", "⚙️", cnt("PROCESSING"), "მუშავდება", "blue")}${chip("COMPLETED", "✅", cnt("COMPLETED"), "დაიდო", "green")}${chip("FAILED", "❌", cnt("FAILED"), "ჩავარდა", "red")}</div>
+    </div>`;
+  const seg = (sel, opts) => `<div class="mh-seg" data-mh-seg="${sel}">${opts.map(([v, l], i) => `<button type="button" class="${i === 0 ? "on" : ""}" data-v="${v}">${l}</button>`).join("")}</div>`;
+  const sw = (id, label, sub) => `<label class="mh-sw"><input id="${id}" type="checkbox"><i></i><span>${label}${sub ? `<small>${sub}</small>` : ""}</span></label>`;
   const compose = `
-    <div class="card">
-      <h2>🏘️ MyHome ლისტინგის დამატება</h2>
-      <div class="qa-compose">
-        <select id="mhSource" title="საიდან ავიღოთ განცხადება">
-          <option value="myhome">📥 წყარო: MyHome-ის განცხადება (ID)</option>
-          <option value="ssge">📥 წყარო: ss.ge-ს განცხადება (ID ან ბმული)</option>
-        </select>
-        <select id="mhTarget" title="სად დავდოთ">
-          <option value="myhome">📤 დადება: მხოლოდ MyHome-ზე</option>
-          <option value="ssge">📤 დადება: მხოლოდ ss.ge-ზე</option>
-          <option value="both">📤 დადება: MyHome-ზეც და ss.ge-ზეც</option>
-        </select>
-        <input id="mhListingId" type="text" inputmode="numeric" placeholder="MyHome ID (მაგ. 20134412)">
-        <input id="mhOwnerNumber" type="text" inputmode="tel" placeholder="მესაკუთრის ნომერი (სავალდებულო)">
-        <input id="mhPercent" type="text" inputmode="decimal" placeholder="თანამშრომლობის საკომისიო % — გადავა ბაზაში (არასავალდებულო)">
-        <input id="mhPrice" type="text" inputmode="decimal" placeholder="საბოლოო ფასი (არასავალდებულო)">
-        <textarea id="mhNotes" placeholder="შეზღუდვები / შენიშვნა — გადავა ბაზაში (არასავალდებულო). ss.ge-ზე დადებისას: თუ განცხადების მისამართს სახლის ნომერი არ აქვს, ჩაიწერება „2“ (სხვა ნომრისთვის დაწერეთ აქ „სახლი: 12“)"></textarea>
-        <label style="display:flex;align-items:center;gap:8px"><input id="mhNoPets" type="checkbox" style="width:auto"> 🐾 მესაკუთრე ცხოველებს არ უშვებს</label>
-        <label style="display:flex;align-items:center;gap:8px"><input id="mhTurkeys" type="checkbox" style="width:auto"> 🦃 ინდაურები დაიშვება</label>
-        ${state.tgShare ? `<label style="display:flex;align-items:center;gap:8px"><input id="mhTelegram" type="checkbox" style="width:auto"> 📣 Telegram-ის არხებშიც გამოქვეყნდეს</label>` : ""}
-        <button class="btn" id="mhSubmit">დამატება</button>
-      </div>
+    <div class="card mh-form">
+      <h2>➕ ახალი განცხადების დადება</h2>
+      <div class="mh-step"><span class="mh-n">1</span><div class="mh-step-b"><div class="mh-k">საიდან ავიღოთ</div>${seg("mhSource", [["myhome", "🏠 MyHome ID"], ["ssge", "🔵 ss.ge ID / ბმული"]])}</div></div>
+      <div class="mh-step"><span class="mh-n">2</span><div class="mh-step-b"><div class="mh-k">სად დავდოთ</div>${seg("mhTarget", [["myhome", "MyHome"], ["ssge", "ss.ge"], ["both", "ორივეზე"]])}</div></div>
+      <div class="mh-step"><span class="mh-n">3</span><div class="mh-step-b"><div class="mh-k">მონაცემები</div>
+        <div class="qa-compose">
+          <select id="mhSource" class="mh-hidden" title="საიდან ავიღოთ განცხადება">
+            <option value="myhome">📥 წყარო: MyHome-ის განცხადება (ID)</option>
+            <option value="ssge">📥 წყარო: ss.ge-ს განცხადება (ID ან ბმული)</option>
+          </select>
+          <select id="mhTarget" class="mh-hidden" title="სად დავდოთ">
+            <option value="myhome">📤 დადება: მხოლოდ MyHome-ზე</option>
+            <option value="ssge">📤 დადება: მხოლოდ ss.ge-ზე</option>
+            <option value="both">📤 დადება: MyHome-ზეც და ss.ge-ზეც</option>
+          </select>
+          <div class="mh-grid">
+            <label class="mh-f"><span>🔢 განცხადების ID *</span><input id="mhListingId" type="text" inputmode="numeric" placeholder="MyHome ID (მაგ. 20134412)"></label>
+            <label class="mh-f"><span>📞 მესაკუთრის ნომერი *</span><input id="mhOwnerNumber" type="text" inputmode="tel" placeholder="5xx xx xx xx"></label>
+            <label class="mh-f"><span>🤝 თანამშრომლობის %</span><input id="mhPercent" type="text" inputmode="decimal" placeholder="მაგ. 50 (არასავალდებულო)"></label>
+            <label class="mh-f"><span>💰 საბოლოო ფასი</span><input id="mhPrice" type="text" inputmode="decimal" placeholder="არასავალდებულო"></label>
+          </div>
+          <label class="mh-f"><span>📝 შეზღუდვები / შენიშვნა</span><textarea id="mhNotes" rows="2" placeholder="გადავა ბაზაში (არასავალდებულო). ss.ge-ზე: თუ მისამართს სახლის ნომერი არ აქვს, ჩაიწერება „2“ (სხვა ნომრისთვის: „სახლი: 12“)"></textarea></label>
+          <div class="mh-sws">${sw("mhNoPets", "🐾 ცხოველები არ დაიშვება", "მესაკუთრის მოთხოვნა")}${sw("mhTurkeys", "🦃 ინდაურები დაიშვება", "")}${state.tgShare ? sw("mhTelegram", "📣 Telegram-ის არხებშიც გამოქვეყნდეს", "დირექტორის დამტკიცების შემდეგ") : ""}</div>
+          <button class="btn mh-go" id="mhSubmit">🚀 დამატება რიგში</button>
+        </div></div></div>
     </div>`;
 
   const s = state.mhSearch;
   const searchBar = `
-    <div class="card">
-      <h2>🔎 ძებნა ყველა კოლეგაში</h2>
+    <details class="card mh-search" ${mhSearchResults !== null || s.q || s.dateFrom || s.dateTo ? "open" : ""}>
+      <summary><h2 style="display:inline">🔎 ძებნა ყველა კოლეგაში</h2></summary>
       <div class="qa-compose">
         <input id="mhSearchQ" type="text" placeholder="მისამართი, MyHome ID, აგენტის სახელი..." value="${esc(s.q)}">
         <select id="mhSearchDealType">
@@ -2557,7 +2605,7 @@ function renderMyHomeJobs(rows, role) {
         <button class="btn" id="mhSearchBtn">ძებნა</button>
         ${mhSearchResults !== null ? `<button class="btn" id="mhSearchClear">✕ გასუფთავება</button>` : ""}
       </div>
-    </div>`;
+    </details>`;
 
   const baseRows = mhSearchResults !== null ? mhSearchResults : rows;
   // სტატუსის ფილტრი ვრცელდება ჩვეულებრივ (არა-ძებნის) სიაზეც — ცალკე
@@ -2581,7 +2629,7 @@ function renderMyHomeJobs(rows, role) {
         ${(mhSearchResults === null && state.mhTotal && state.mhTotal > rows.length)
           ? `<button class="btn secondary" id="mhMore" style="margin-top:8px">⬇️ მეტის ჩვენება (კიდევ ${state.mhTotal - rows.length})</button>` : ""}
       </div>`;
-  return `<div class="mh-wrap">` + renderWorkerBadge(role) + renderMhAccountsButton(role) + compose + searchBar + list + `</div>`;
+  return `<div class="mh-wrap">` + hero + renderWorkerBadge(role) + renderMhAccountsButton(role) + compose + searchBar + list + `</div>`;
 }
 
 function bindMyHomeJobsActions() {
@@ -2591,6 +2639,21 @@ function bindMyHomeJobsActions() {
   if (moreBtn) moreBtn.onclick = async () => { state.mhLimit = (state.mhLimit || 150) + 150; delete lazyCache.myhomejobs; await renderContent(); };
   const retryBtn = document.getElementById("mhRetryBtn");
   if (retryBtn) retryBtn.onclick = runBulkRetry;
+  document.querySelectorAll("[data-mh-seg]").forEach((g) => {
+    g.querySelectorAll("button").forEach((b) => {
+      b.onclick = () => {
+        const sel = document.getElementById(g.dataset.mhSeg);
+        if (!sel) return;
+        sel.value = b.dataset.v;
+        g.querySelectorAll("button").forEach((x) => x.classList.toggle("on", x === b));
+        if (sel.onchange) sel.onchange();
+        tg && tg.HapticFeedback && tg.HapticFeedback.selectionChanged && tg.HapticFeedback.selectionChanged();
+      };
+    });
+  });
+  document.querySelectorAll("[data-mh-filter]").forEach((b) => {
+    b.onclick = () => { state.mhSearch = { ...state.mhSearch, status: b.dataset.mhFilter }; renderContent(); };
+  });
   const srcSel = document.getElementById("mhSource");
   if (srcSel) srcSel.onchange = () => {
     const inp = document.getElementById("mhListingId");
@@ -3026,7 +3089,39 @@ function _renderRegGroups(groups, isBotCommands) {
   </div>`).join("");
 }
 
+/* 🆕 ვიზუალური სახელმძღვანელო (სერვერიდან, როლის მიხედვით — იგივე ტექსტს იყენებს SAIRO) */
+function renderAppGuide(items) {
+  if (!items || !items.length) return "";
+  const q = (state.guideQ || "").toLowerCase();
+  const list = items.filter((g) => !q || (g.title + " " + g.where + " " + g.steps.join(" ") + " " + (g.tips || []).join(" ")).toLowerCase().includes(q));
+  return `<div class="card guide-head"><h2>🆕 როგორ გამოვიყენო — სახელმძღვანელო</h2>
+      <div class="sub">ყველა ახალი ფუნქცია ნაბიჯ-ნაბიჯ. ვერ იპოვეთ? ჰკითხეთ <b>🦸 SAIRO</b>-ს — იგივე სახელმძღვანელოთი გიპასუხებთ და საჭიროზე ღილაკსაც მოგცემთ.</div>
+      <input id="guideQ" class="guide-q" placeholder="🔎 ძებნა: მაგ. follow-up, რუკა, წაშლა, Telegram" value="${esc(state.guideQ || "")}">
+      <div class="guide-chips">${items.map((g) => `<button class="hub-chip" data-guide-jump="${esc(g.id)}">${g.icon} ${esc(g.title.split(" — ")[0])}</button>`).join("")}</div></div>
+    ${list.map((g, i) => `<details class="card guide-card" id="guide-${esc(g.id)}" ${i === 0 && !q ? "open" : q ? "open" : ""} style="animation-delay:${Math.min(i, 8) * 40}ms">
+      <summary><span class="guide-ic">${g.icon}</span><span class="guide-t"><b>${esc(g.title)}</b><small>📍 ${esc(g.where)}</small></span></summary>
+      <ol class="guide-steps">${g.steps.map((s) => `<li>${esc(s)}</li>`).join("")}</ol>
+      ${(g.tips || []).map((t) => `<div class="guide-tip">💡 ${esc(t)}</div>`).join("")}
+    </details>`).join("") || `<div class="card"><div class="empty">ვერაფერი მოიძებნა — ჰკითხეთ SAIRO-ს</div></div>`}`;
+}
+async function loadAppGuide() {
+  const box = document.getElementById("appGuide");
+  if (!box) return;
+  try { if (!state.guide) state.guide = (await api("/api/guide")).items || []; } catch (e) { state.guide = []; }
+  box.innerHTML = renderAppGuide(state.guide);
+  const qi = document.getElementById("guideQ");
+  if (qi) qi.oninput = () => { state.guideQ = qi.value; const pos = qi.selectionStart; box.innerHTML = renderAppGuide(state.guide); loadAppGuideBind(box); const n = document.getElementById("guideQ"); n.focus(); try { n.setSelectionRange(pos, pos); } catch (e) { /* ignore */ } };
+  loadAppGuideBind(box);
+}
+function loadAppGuideBind(box) {
+  const qi = document.getElementById("guideQ");
+  if (qi && !qi.oninput) qi.oninput = () => { state.guideQ = qi.value; loadAppGuide(); };
+  box.querySelectorAll("[data-guide-jump]").forEach((b) => {
+    b.onclick = () => { const d = document.getElementById("guide-" + b.dataset.guideJump); if (d) { d.open = true; d.scrollIntoView({ behavior: "smooth", block: "start" }); } };
+  });
+}
 function bindRegulationsActions() {
+  loadAppGuide();
   document.querySelectorAll("[data-reg-idx]").forEach((el) => {
     el.onclick = () => {
       const entry = _regDetailStore[parseInt(el.dataset.regIdx, 10)];
@@ -3054,6 +3149,7 @@ function renderRegulations(payload) {
     </div>
   </div>`;
 
+  const guideTop = `<div id="appGuide"><div class="card"><div class="empty">იტვირთება სახელმძღვანელო…</div></div></div>`;
   const regsHtml = `<div class="card"><h2>📄 კომპანიის რეგულაციები</h2><div class="sub">ეს საწყისი ვერსიაა — ადმინს შეუძლია მოგვიანებით ზუსტი ტექსტით ჩანაცვლება.</div></div>` + _renderRegGroups(REGULATION_GROUPS, false);
 
   let guideHtml;
@@ -3076,7 +3172,7 @@ function renderRegulations(payload) {
     guideHtml = `<div class="card"><h2>📘 ბოტის ინსტრუქცია — აგენტი</h2></div>` + _renderRegGroups(AGENT_BOT_COMMAND_GROUPS, true);
   }
 
-  return limitsCard + regsHtml + guideHtml;
+  return guideTop + limitsCard + regsHtml + guideHtml;
 }
 
 /* ============================================== v4.0 — ახალი ტაბები */
@@ -4065,8 +4161,10 @@ function _crm2Time(iso) {
 
 function _crm2RowsHtml(rows) {
   if (!rows.length) return `<div class="empty">კლიენტი ვერ მოიძებნა</div>`;
+  const sel = state.crm2Sel;
   return rows.map((c, i) => `
-    <div class="list-row clickable" data-crm2-idx="${i}">
+    <div class="list-row clickable ${sel && sel.has(c.client_id) ? "tg-picked" : ""}" data-crm2-idx="${i}">
+      ${sel ? `<input type="checkbox" class="chk-pick" data-crm2-chk="${esc(c.client_id)}" ${sel.has(c.client_id) ? "checked" : ""}>` : ""}
       <div class="avatar">${c.overdue_followups ? "⏰" : "👤"}</div>
       <div class="main">
         <div class="title">${esc(c.name || c.phone_raw || c.phone_norm)}</div>
@@ -4081,9 +4179,12 @@ function renderCrm2(rows) {
   rows = rows || [];
   return `<div class="card">
     <h2>🗃️ CRM — კლიენტები <span class="cnt">${rows.length}</span></h2>
+    <div class="sub" style="white-space:normal;margin-bottom:6px">ერთი კლიენტი = ერთი ბარათი ყველა წყაროდან (დავალება, რეპორტი, შეხვედრა, Telegram, კრიტერიუმი) — ტელეფონით ერთიანდება.</div>
     <div class="qa-compose">
       <input id="crm2Search" placeholder="ძებნა — სახელი ან ტელეფონი" />
     </div>
+    ${state.role === "admin" ? `<div class="tg-bulk"><button class="chip" id="crm2SelMode">${state.crm2Sel ? "✖ მონიშვნის დასრულება" : "☑ მონიშვნა"}</button>
+      ${state.crm2Sel ? `<span class="muted" style="font-size:12px">არჩეულია: <b id="crm2SelN">${state.crm2Sel.size}</b></span><button class="btn secondary" id="crm2Arch" ${state.crm2Sel.size ? "" : "disabled"}>🗄 დაარქივება</button>` : `<span class="muted" style="font-size:12px">დუბლი/უაზრო კლიენტების ერთიანად დასაარქივებლად</span>`}</div>` : ""}
     <div id="crm2List">${_crm2RowsHtml(rows)}</div>
   </div>`;
 }
@@ -4093,8 +4194,33 @@ function bindCrm2Actions(rows) {
   const input = document.getElementById("crm2Search");
   const bindRows = (list) => {
     document.querySelectorAll("[data-crm2-idx]").forEach((el) => {
-      el.onclick = () => openCrm2Card(list[parseInt(el.dataset.crm2Idx, 10)]);
+      el.onclick = (e) => {
+        const c = list[parseInt(el.dataset.crm2Idx, 10)];
+        if (state.crm2Sel) {                                   // მონიშვნის რეჟიმში მწკრივზე დაჭერა მონიშნავს
+          if (e.target && e.target.matches && e.target.matches("[data-crm2-chk]")) { /* checkbox თავად იცვლება */ } else { const cb = el.querySelector("[data-crm2-chk]"); if (cb) cb.checked = !cb.checked; }
+          const cb = el.querySelector("[data-crm2-chk]");
+          if (cb && cb.checked) state.crm2Sel.add(c.client_id); else state.crm2Sel.delete(c.client_id);
+          el.classList.toggle("tg-picked", !!(cb && cb.checked));
+          const n = document.getElementById("crm2SelN"); if (n) n.textContent = state.crm2Sel.size;
+          const ab = document.getElementById("crm2Arch"); if (ab) ab.disabled = !state.crm2Sel.size;
+          return;
+        }
+        openCrm2Card(c);
+      };
     });
+  };
+  const sm = document.getElementById("crm2SelMode");
+  if (sm) sm.onclick = () => { state.crm2Sel = state.crm2Sel ? null : new Set(); renderContent(); };
+  const ab = document.getElementById("crm2Arch");
+  if (ab) ab.onclick = async () => {
+    const ids = Array.from(state.crm2Sel || []);
+    if (!ids.length || !confirm(`${ids.length} კლიენტი დაარქივდეს? სიიდან გაქრება, ისტორია (აქტივობები/follow-up) შენახული რჩება.`)) return;
+    ab.disabled = true;
+    try {
+      const r = await api("/api/crm2/clients/archive", { method: "POST", body: JSON.stringify({ ids }) });
+      toast(`🗄 დაარქივდა: ${r.archived}${r.skipped ? ` · გამოტოვებული: ${r.skipped}` : ""}`);
+      state.crm2Sel = null; delete lazyCache.crm2; await renderContent();
+    } catch (e) { toast(e.message || "შეცდომა"); ab.disabled = false; }
   };
   if (input) {
     input.oninput = () => {
@@ -4968,8 +5094,34 @@ function hubDrawList() {
     };
     return;
   }
-  el.innerHTML = h.items.map(hubCard).join("");
-  el.querySelectorAll("[data-hub-id]").forEach((c) => { c.onclick = () => hubOpenDetail(c.dataset.hubId); });
+  if (!h.sel) h.sel = new Set();
+  const canSel = h.items.some((x) => x.private);
+  el.innerHTML = (canSel ? `<div class="hub-selbar" style="grid-column:1/-1"><button class="hub-chip ${h.selMode ? "on" : ""}" id="hubSelMode">☑ მონიშვნა</button>
+      ${h.selMode ? `<button class="hub-chip" id="hubSelAll">ყველა ჩემი ამ გვერდზე</button><span class="muted" style="font-size:12px">არჩეულია: <b>${h.sel.size}</b></span>
+      <button class="btn secondary" id="hubSelOff" ${h.sel.size ? "" : "disabled"}>🗄 გაქირავდა/გაიყიდა — გათიშვა</button>${h.items.some((x) => x.private && x.active === "no") ? `<button class="btn secondary" id="hubSelOn" ${h.sel.size ? "" : "disabled"}>♻️ გააქტიურება</button>` : ""}` : `<span class="muted" style="font-size:12px">ძველი/გაქირავებული განცხადებების ერთიანად გასათიშად</span>`}</div>` : "")
+    + h.items.map((it, i) => hubCard(it, i).replace('<div class="hub-card"', `<div class="hub-card ${h.selMode && it.private ? "hub-selable" : ""} ${h.sel.has(it.listing_id) ? "hub-sel" : ""}"`)
+        .replace('<div class="hub-ph">', h.selMode && it.private ? `<div class="hub-ph"><span class="hub-chk">${h.sel.has(it.listing_id) ? "✓" : ""}</span>` : '<div class="hub-ph">')).join("");
+  el.querySelectorAll("[data-hub-id]").forEach((c) => {
+    c.onclick = () => {
+      const id = c.dataset.hubId, it = h.items.find((x) => x.listing_id === id);
+      if (h.selMode && it && it.private) { hubHaptic(); if (h.sel.has(id)) h.sel.delete(id); else if (h.sel.size < 40) h.sel.add(id); else toast("ერთდროულად მაქსიმუმ 40"); hubDrawList(); return; }
+      hubOpenDetail(id);
+    };
+  });
+  const sm = document.getElementById("hubSelMode"); if (sm) sm.onclick = () => { h.selMode = !h.selMode; if (!h.selMode) h.sel.clear(); hubDrawList(); };
+  const sa = document.getElementById("hubSelAll"); if (sa) sa.onclick = () => { const mine = h.items.filter((x) => x.private).slice(0, 40); const all = mine.every((x) => h.sel.has(x.listing_id)); mine.forEach((x) => (all ? h.sel.delete(x.listing_id) : h.sel.add(x.listing_id))); hubDrawList(); };
+  const bulk = async (active) => {
+    const ids = Array.from(h.sel);
+    if (!ids.length) return;
+    if (!active && !confirm(`${ids.length} განცხადება გაითიშოს (გაქირავდა/გაიყიდა)? კატალოგიდან და Telegram-იდან ჩამოიხსნება; ჩანაწერი არ იშლება — შეგიძლიათ ისევ გააქტიუროთ.`)) return;
+    try {
+      const r = await api("/api/listings/bulk-status", { method: "POST", body: JSON.stringify({ ids, active }) });
+      hubHaptic("ok"); toast(`✅ ${active ? "გააქტიურდა" : "გაითიშა"}: ${r.changed}${r.skipped ? ` · სხვისი (გამოტოვდა): ${r.skipped}` : ""}${r.same ? ` · უკვე იყო: ${r.same}` : ""}`);
+      h.sel.clear(); h.selMode = false; hubReload(); hubLoadIns();
+    } catch (e) { toast(e.message || "შეცდომა"); }
+  };
+  const so = document.getElementById("hubSelOff"); if (so) so.onclick = () => bulk(false);
+  const sn = document.getElementById("hubSelOn"); if (sn) sn.onclick = () => bulk(true);
   el.querySelectorAll("[data-hub-fav]").forEach((b) => {
     b.onclick = (ev) => { ev.stopPropagation(); hubHaptic(); const on = hubToggleFav(b.dataset.hubFav); b.classList.toggle("on", on); b.textContent = on ? "♥" : "♡"; hubDrawChips(); };
   });
@@ -5164,16 +5316,26 @@ async function hubMapRefresh() {
   if (!h.map || !h.map.map || !document.getElementById("hubMapCanvas")) {
     box.innerHTML = `<div id="hubMapCanvas"></div>
       <div class="hub-map-top"><div class="hub-row" style="margin:0">${Object.keys(HUB_CITIES).map((c) => `<button class="hub-chip" data-hub-city="${c}">${c}</button>`).join("")}<button class="hub-chip" id="hubMapLocate" title="ჩემი მდებარეობა">📍</button></div></div>
+      <div class="hub-map-flt"><select id="hubMapDist"><option value="">📍 ყველა რაიონი</option>${((h.facets && h.facets.districts) || []).map((d) => `<option value="${esc(d.name || d)}" ${(d.name || d) === h.district ? "selected" : ""}>${esc(d.name || d)}${d.count != null ? ` (${d.count})` : ""}</option>`).join("")}</select>
+        <input id="hubMapStreet" list="hubMapStreets" placeholder="🛣 ქუჩა" value="${esc(h.street)}" autocomplete="off"><datalist id="hubMapStreets">${((h.facets && h.facets.streets) || []).map((s) => `<option value="${esc(s.name)}">`).join("")}</datalist>
+        <button class="hub-chip" id="hubMapFltX" ${h.district || h.street ? "" : "hidden"}>✕</button></div>
       <div class="hub-map-legend"><span class="fr-green"><i></i>ახალი</span><span class="fr-orange"><i></i>საშუალო</span><span class="fr-red"><i></i>ძველი</span></div>
       <div class="hub-mprev" id="hubMapPrev" hidden></div>`;
-    const map = L.map("hubMapCanvas", { zoomControl: true, attributionControl: true, preferCanvas: true }).setView([41.7151, 44.8271], 12);
-    L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", { maxZoom: 19, attribution: "© OpenStreetMap" }).addTo(map);   /* მუქი სტილი CSS ფილტრით (.hub-mapbox .leaflet-tile-pane) */
+    const map = L.map("hubMapCanvas", { zoomControl: true, attributionControl: true, preferCanvas: true, zoomSnap: 0.5, wheelPxPerZoomLevel: 90, markerZoomAnimation: false }).setView([41.7151, 44.8271], 12);
+    L.tileLayer("https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png", { maxZoom: 19, subdomains: "abcd", updateWhenIdle: true, keepBuffer: 2,
+      attribution: "© OpenStreetMap © CARTO" }).addTo(map);   /* მზა მუქი ფილები — CSS filter აღარ არის (ის ტელეფონზე რუკას ანელებდა/ჭედავდა) */
     const layer = L.layerGroup().addTo(map);
     h.map = { map, layer, fitted: false, points: [], me: null };
     map.on("zoomend moveend", () => hubMapDrawSoon());
     map.on("click", () => hubMapPreview(null));
     box.querySelectorAll("[data-hub-city]").forEach((b) => { b.onclick = () => { hubHaptic(); hubMapPreview(null); const c = HUB_CITIES[b.dataset.hubCity]; map.flyTo([c[0], c[1]], c[2], { duration: 0.8 }); }; });
     document.getElementById("hubMapLocate").onclick = () => hubMapLocate();
+    const md = document.getElementById("hubMapDist"), ms = document.getElementById("hubMapStreet"), mx = document.getElementById("hubMapFltX");
+    const reFit = () => { if (state.hub.map) state.hub.map.fitted = false; if (mx) mx.hidden = !(h.district || h.street); hubDrawChips(); hubReload(); };
+    if (md) md.onchange = () => { hubHaptic(); h.district = md.value; reFit(); };
+    let st = null;
+    if (ms) { ms.oninput = () => { clearTimeout(st); st = setTimeout(() => { h.street = ms.value.trim(); reFit(); }, 450); }; ms.onchange = () => { clearTimeout(st); h.street = ms.value.trim(); reFit(); }; }
+    if (mx) mx.onclick = () => { h.district = ""; h.street = ""; md.value = ""; ms.value = ""; reFit(); };
     setTimeout(() => map.invalidateSize(), 60);
   }
   h.map.points = data.points; h.map.ver = (h.map.ver || 0) + 1; h.map.sig = null;
@@ -5182,9 +5344,9 @@ async function hubMapRefresh() {
   if (info) info.textContent = `🗺 ${data.total} განცხადება რუკაზე${data.no_coords ? ` · ${data.no_coords} კოორდინატის გარეშე (სიაში ჩანს)` : ""}${data.truncated ? " · ნაწილი (დააზუსტეთ ფილტრი)" : ""}`;
   if (data.points.length && !h.map.fitted) {
     h.map.fitted = true;
-    // საწყისი ხედი — ქალაქი, სადაც ყველაზე მეტი განცხადებაა (თბილისი+ბათუმი ერთად ძალიან შორიდან ჩანდა)
+    // საწყისი ხედი — ქალაქი, სადაც ყველაზე მეტი განცხადებაა (თბილისი+ბათუმი ერთად ძალიან შორიდან ჩანდა); რაიონის/ქუჩის ფილტრზე — ზუსტად იმ წერტილებზე
     const top = Object.keys(byCity).sort((a, b) => byCity[b] - byCity[a])[0];
-    const pts = data.points.filter((p) => hubMapCityOf(p) === top);
+    const pts = h.district || h.street ? data.points : data.points.filter((p) => hubMapCityOf(p) === top);
     try { h.map.map.fitBounds((pts.length ? pts : data.points).map((p) => [p.lat, p.lng]), { padding: [40, 40], maxZoom: 15 }); } catch (e) { /* ignore */ }
   }
   hubMapDraw();
@@ -5239,6 +5401,11 @@ function hubMapGroupList(g) {
   backdrop.onclick = (e) => { if (e.target === backdrop) closeDetail(); };
   box.querySelectorAll("[data-hub-open]").forEach((b) => { b.onclick = () => hubOpenDetail(b.dataset.hubOpen); });
 }
+function hubMapDispose() {
+  const m = state.hub.map;
+  if (m && m.map) { try { m.map.off(); m.map.remove(); } catch (e) { /* უკვე მოშორებულია */ } }
+  state.hub.map = null;
+}
 let _hubDrawT = 0;
 function hubMapDrawSoon() { clearTimeout(_hubDrawT); _hubDrawT = setTimeout(hubMapDraw, 120); }      // zoomend+moveend ერთად ორჯერ არ ვხატავთ; ანიმაციისას ერთხელ
 function hubMapDraw() {
@@ -5282,7 +5449,8 @@ function hubSetView(v) {
   if (mt) mt.hidden = v !== "meet";
   if (inf && v !== "map") inf.textContent = "";
   hubDrawList();
-  if (v === "map") { h.map = null; hubMapRefresh(); }
+  if (v === "map") { hubMapDispose(); hubMapRefresh(); }
+  else if (h.map) hubMapDispose();
   if (v === "meet") hubLoadMeet();
   else if (!h.items.length && !h.loading) hubLoad(false);
 }
@@ -5296,7 +5464,125 @@ async function hubLoadIns() {
 const HUB_ST = { pending: "დასადასტურებელი", planned: "დაგეგმილი", done: "ჩატარდა", cancelled: "გაუქმდა", rejected: "უარყოფილია", no_show: "არ გამოცხადდა" };
 const HUB_WD = ["კვირა", "ორშაბათი", "სამშაბათი", "ოთხშაბათი", "ხუთშაბათი", "პარასკევი", "შაბათი"];
 const HUB_COOP_CHIPS = ["მესაკუთრესთან პირდაპირ", "აგენტთან 50/50", "აგენტთან 100%", "შეთანხმებით"];
-state.hub.mv = state.hub.mv || { tab: "clients", items: [], meta: null, stats: null, loading: false, err: "", leads: [], leadsMeta: null };
+state.hub.mv = state.hub.mv || { tab: "clients", items: [], meta: null, stats: null, loading: false, err: "", leads: [], leadsMeta: null, cab: null, tgMine: [], tgMgr: null, tgOpen: null, tgFocus: "", excl: null, tf: { days: 30 } };
+/* ===================================================== 👤 პირადი კაბინეტი (განცხადებები → კაბინეტი) =====================================================
+   ერთ ადგილას: კლიენტები (მენეჯერის დავალებები + Telegram ლიდები), შეხვედრები, დასადასტურებელი, ყურადღება, კრიტერიუმები, ექსკლუზივები, ჩემი ბინები;
+   მენეჯერს — გუნდის ცხრილი ფილტრებით. მონაცემი: /api/cabinet (ერთი მოთხოვნა, მხოლოდ რაოდენობები) + ლიდების სიები. */
+const CAB_ROLE = { admin: "დირექტორი", team_lead: "გუნდის მენეჯერი", agent: "აგენტი" };
+const CAB_TG_ST = { new: ["ახალი — მიუბმელი", "red"], assigned: ["დასადასტურებელი", "red"], acknowledged: ["დადასტურებულია", "blue"], contacted: ["დაკავშირებული", "green"], waiting: ["მოგვიანებით", "gray"] };
+function cabInit(n) { return String(n || "SH").trim().split(/\s+/).slice(0, 2).map((w) => w[0] || "").join("") || "SH"; }
+function cabTile(go, icon, n, label, tone, sub) {
+  return `<button class="cab-tile ${tone || ""} ${n ? "has" : ""}" data-cab-go="${esc(go)}"><span class="cab-ic">${icon}</span><b>${n == null ? "—" : n}</b><span class="cab-lb">${esc(label)}</span>${sub ? `<small>${esc(sub)}</small>` : ""}</button>`;
+}
+function cabHero(mv) {
+  const c = mv.cab, t = (c && c.totals) || {};
+  const name = (c && c.me_name) || (state.data && (state.data.agent_name || (state.data.agent || {}).name)) || "";
+  const role = c ? CAB_ROLE[c.role] || "" : "";
+  const fu = (t.followups_overdue || 0) + (t.tg_overdue || 0);
+  const tiles = !c ? `<div class="cab-tiles">${Array.from({ length: 6 }, () => `<div class="cab-tile sk"></div>`).join("")}</div>` : `<div class="cab-tiles">
+    ${c.manager ? cabTile("tgnew", "🆕", t.tg_new, "მიუბმელი ლიდი", t.tg_new ? "red" : "", "Telegram") : ""}
+    ${cabTile("clients", "📥", t.clients_open + (t.tg_open || 0), "ღია კლიენტი", "", (t.clients_unseen ? t.clients_unseen + " მიუღებელი" : "") )}
+    ${cabTile("tgconfirm", "📣", t.tg_unconfirmed, "დასადასტურებელი", t.tg_unconfirmed ? "red" : "", "Telegram ლიდი")}
+    ${cabTile("attention", "⏰", fu, "ვადაგადაცილ. follow-up", fu ? "red" : "", (t.followups_open || 0) + " ღია")}
+    ${cabTile("upcoming", "📅", (t.today || 0), "შეხვედრა დღეს", "", "ხვალ: " + (t.tomorrow || 0))}
+    ${cabTile("pending", "🤝", t.pending_for_me, "დასადასტურებელი შეხვედრა", t.pending_for_me ? "orange" : "")}
+    ${cabTile("attention", "🔔", t.attention, "ყურადღება", t.attention ? "orange" : "")}
+    ${cabTile("criteria", "🎯", t.criteria, "კრიტერიუმი")}
+    ${cabTile("mine", "🏠", t.listings, c.manager ? "ბინა (გუნდი)" : "ჩემი ბინა")}
+    ${cabTile("excl", "🏘️", t.exclusives, "ექსკლუზივი")}
+    ${cabTile("past", "✅", t.meetings_done, "ჩატარდა (" + c.days + "დ)", "", [t.no_show ? "🚫 " + t.no_show + " არ მოვიდა" : "", mv.stats && mv.stats.totals && mv.stats.totals.contracts ? "📑 " + mv.stats.totals.contracts + " ხელშ." : ""].filter(Boolean).join(" · "))}
+    ${c.manager ? cabTile("team", "👥", (c.team || []).filter((x) => x.level !== "green").length, "პრობლემური აგენტი", (c.team || []).some((x) => x.level === "red") ? "red" : "", "გუნდის ცხრილი") : cabTile("warn", "⚠️", t.warnings, "გაფრთხილება", t.warnings ? "orange" : "", "ამ თვეში")}
+  </div>`;
+  return `<div class="cab-hero"><div class="cab-av">${esc(cabInit(name))}</div><div class="cab-who"><b>${esc(name || "ჩემი კაბინეტი")}</b><span>${esc(role)}${c && c.me_team ? " · " + esc(c.me_team) : ""}${c ? " · განახლდა " + esc(String(c.generated_at || "").slice(11)) : ""}</span></div>
+    <button class="btn secondary cab-rf" id="cabRefresh" title="განახლება">🔄</button></div>${tiles}`;
+}
+/* Telegram ლიდის ბარათი კაბინეტში: აგენტი — დადასტურება/შედეგი (+ სავალდებულო follow-up), შეხვედრა, კრიტერიუმი; მენეჯერი — აგენტის არჩევა (ნაგულისხმევად ბინის აგენტი) */
+function cabTgCard(x, mgr) {
+  const st = CAB_TG_ST[x.status] || [x.status_label || x.status, "gray"], o = state.hub.mv.tgOpen && state.hub.mv.tgOpen.id === x.lead_id ? state.hub.mv.tgOpen.kind : "";
+  const hl = state.hub.mv.tgFocus === x.lead_id ? " cab-focus" : "";
+  const ags = (state.hub.mv.tgMgr && state.hub.mv.tgMgr.agents) || [];
+  const form = !o ? "" : `<div class="tg-prev"><b>${o === "contacted" ? "📞 დავუკავშირდი" : o === "waiting" ? "⏳ მოგვიანებით" : "🚫 ვერ ვასრულებ"}</b>
+      ${o === "decline" ? "" : `<div class="muted" style="font-size:12px;margin:4px 0">შემდეგი კონტაქტი (<b>სავალდებულოა</b> — CRM-ში follow-up იქმნება)</div><input class="tg-chat" id="cabDue" type="datetime-local" style="width:100%">
+        <div class="hub-row" style="margin-top:6px">${[["2 სთ", 2], ["ხვალ 11:00", "t11"], ["ზეგ 11:00", "d11"]].map(([l, v]) => `<button class="hub-chip" data-cab-due="${v}">${l}</button>`).join("")}</div>`}
+      <textarea class="tg-chat" id="cabNote" rows="2" style="width:100%;margin-top:6px" placeholder="${o === "decline" ? "რატომ ვერ ასრულებთ (სავალდებულოა)" : o === "contacted" ? "რა შეთანხმდით (სავალდებულოა)" : "შენიშვნა"}"></textarea>
+      <div class="tg-row"><button class="btn" data-cab-save="${esc(x.lead_id)}" data-k="${o}">💾 შენახვა</button><button class="btn secondary" data-cab-cancel="1">გაუქმება</button></div></div>`;
+  const mgrRow = mgr ? `<div class="tg-row"><select class="tg-ag" data-cab-ag="${esc(x.lead_id)}">${ags.map((a) => `<option value="${esc(a.agent_id)}" ${a.agent_id === x.listing_agent_id ? "selected" : ""}>${esc(a.name)}${a.agent_id === x.listing_agent_id ? " · ბინის აგენტი" : ""}</option>`).join("")}</select>
+      <button class="btn" data-cab-assign="${esc(x.lead_id)}">${x.status === "new" ? "👤 გადაბარება" : "🔁 სხვაზე"}</button></div>` : "";
+  const agentRow = mgr ? "" : `<div class="tg-row">${x.status === "assigned" ? `<button class="btn" data-cab-act="ack" data-id="${esc(x.lead_id)}">✅ ვადასტურებ</button>` : ""}
+      <button class="btn secondary" data-cab-open="contacted" data-id="${esc(x.lead_id)}">📞 დავუკავშირდი</button><button class="btn secondary" data-cab-open="waiting" data-id="${esc(x.lead_id)}">⏳ მოგვიანებით</button>
+      <button class="btn secondary" data-cab-open="decline" data-id="${esc(x.lead_id)}">🚫 ვერ ვასრულებ</button></div>
+    <div class="tg-row">${x.listing_key ? `<button class="btn secondary" data-cab-book="${esc(x.listing_key)}" data-id="${esc(x.lead_id)}">📅 შეხვედრა</button><button class="btn secondary" data-cab-ls="${esc(x.listing_key)}">🏠 ბინა</button>` : ""}<button class="btn secondary" data-cab-crit="${esc(x.lead_id)}">🎯 კრიტერიუმი</button></div>`;
+  const due = x.follow_up_at && new Date(String(x.follow_up_at).replace(" ", "T")) < new Date();
+  return `<div class="hub-ld cab-tg${hl}" data-cab-tg="${esc(x.lead_id)}"><div class="hub-ld-top"><div><span class="cab-src">📣 Telegram</span> <b>${esc(x.name || "—")}</b></div><span class="rc-cl-mini tg-st tg-${st[1]}">${esc(st[0])}${mgr && x.assigned ? " · " + esc(x.assigned) : ""}</span></div>
+    <div style="font-size:14px;margin:4px 0"><a href="tel:+${esc(x.phone)}">📞 +${esc(x.phone)}</a></div><div style="font-size:13px">🏠 ${esc(x.summary || "ზოგადი მოთხოვნა")}</div>
+    <div class="muted" style="font-size:12px">${esc(x.assigned_at || x.at || "")}${x.follow_up_at ? ` · <span class="${due ? "cab-late" : ""}">📅 follow-up ${esc(x.follow_up_at)}${due ? " — ვადა გავიდა" : ""}</span>` : ""}${x.agent_note ? ` · 💬 ${esc(x.agent_note)}` : ""}${mgr && x.status === "assigned" ? (x.seen ? " · 👀 გახსნა, არ დაუდასტურებია" : " · 👁 ჯერ არ გაუხსნია") : ""}</div>
+    ${mgrRow}${agentRow}${form}</div>`;
+}
+function cabTgSection(mv) {
+  const mine = mv.tgMine || [], mg = (mv.tgMgr && mv.tgMgr.leads) || [];
+  const mgrOpen = mg.filter((x) => x.status === "new" || x.status === "assigned");
+  let h = "";
+  if (mv.tgMgr) h += `<div class="hub-k" style="margin-top:4px">🆕 Telegram ლიდები — გადასაბარებელი / დაუდასტურებელი <span class="cnt">${mgrOpen.length}</span></div>` + (mgrOpen.map((x) => cabTgCard(x, true)).join("") || `<div class="empty">ყველა ლიდი გადაბარებული და დადასტურებულია 🎉</div>`);
+  if (mine.length) h += `<div class="hub-k" style="margin-top:10px">📣 ჩემი Telegram კლიენტები <span class="cnt">${mine.length}</span></div>` + mine.map((x) => cabTgCard(x, false)).join("");
+  return h;
+}
+function cabDueValue(v) {
+  const d = new Date();
+  if (v === "2") d.setHours(d.getHours() + 2);
+  else { d.setDate(d.getDate() + (v === "d11" ? 2 : 1)); d.setHours(11, 0, 0, 0); }
+  const p = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+async function cabLoadTg(mv) {
+  if (!state.tgAccess) await tgLoadAccess();
+  const a = state.tgAccess || {};
+  const [mine, mgr] = await Promise.all([
+    !a.can_mine ? Promise.resolve(null) : api("/api/tgnet/my-leads").then((r) => r.leads || []).catch(() => null),
+    a.can_leads ? api("/api/tgnet/leads").catch(() => null) : Promise.resolve(null)]);
+  mv.tgMine = mine || []; mv.tgMgr = mgr;
+  if (!state.tgm) state.tgm = { leads: null, open: null, seen: new Set() };
+  (mv.tgMine || []).filter((x) => x.status === "assigned" && !x.seen).forEach((x) => { if (!state.tgm.seen.has(x.lead_id)) { state.tgm.seen.add(x.lead_id); api("/api/tgnet/my-leads/" + encodeURIComponent(x.lead_id) + "/seen", { method: "POST", body: "{}" }).catch(() => {}); } });
+}
+function cabCabQS(mv) {
+  const f = mv.tf || {}, p = ["days=" + (f.days || 30)];
+  if (f.team) p.push("team=" + encodeURIComponent(f.team));
+  if (f.agent) p.push("agent=" + encodeURIComponent(f.agent));
+  if (f.problems) p.push("problems=1");
+  return "/api/cabinet?" + p.join("&");
+}
+function cabTeamBody(mv) {
+  const c = mv.cab;
+  if (!c || !c.manager) return `<div class="empty">მხოლოდ მენეჯერისთვის</div>`;
+  const f = mv.tf || (mv.tf = { days: 30 });
+  const chips = [7, 30, 90].map((d) => `<button class="hub-chip ${Number(f.days || 30) === d ? "on" : ""}" data-cab-days="${d}">${d} დღე</button>`).join("");
+  const bar = `<div class="hub-row" style="margin:6px 0">${chips}<button class="hub-chip ${f.problems ? "on" : ""}" data-cab-prob="1">🚩 მხოლოდ პრობლემური</button></div>
+    <div class="tg-row">${(c.teams || []).length ? `<select class="tg-ag" id="cabTeam"><option value="">ყველა გუნდი</option>${c.teams.map((t) => `<option ${f.team === t ? "selected" : ""}>${esc(t)}</option>`).join("")}</select>` : ""}
+      <select class="tg-ag" id="cabAgent"><option value="">ყველა აგენტი</option>${(c.agents || []).map((a) => `<option value="${esc(a.agent_id)}" ${f.agent === a.agent_id ? "selected" : ""}>${esc(a.name)}</option>`).join("")}</select></div>`;
+  const rows = (c.team || []).map((p) => `<div class="cab-row lv-${p.level}" data-cab-agent="${esc(p.agent_id)}">
+      <div class="cab-row-h"><span class="cab-dot"></span><b>${esc(p.name)}</b><small>${esc(p.team || "")}</small></div>
+      <div class="cab-nums">
+        <span class="${p.tg_unconfirmed ? "bad" : ""}" title="Telegram ლიდი დაუდასტურებელი">📣 ${p.tg_unconfirmed}/${p.tg_open}</span>
+        <span class="${p.clients_unseen ? "bad" : ""}" title="ღია კლიენტი (მიუღებელი)">📥 ${p.clients_open}${p.clients_unseen ? " (" + p.clients_unseen + "❗)" : ""}</span>
+        <span class="${p.followups_overdue + p.tg_overdue ? "bad" : ""}" title="ვადაგადაცილებული follow-up">⏰ ${p.followups_overdue + p.tg_overdue}</span>
+        <span title="შეხვედრა: ჩატარდა/სულ">📅 ${p.meetings_done}/${p.meetings}${p.no_show ? " 🚫" + p.no_show : ""}</span>
+        <span class="${p.attention ? "warn" : ""}" title="ყურადღება">🔔 ${p.attention}</span>
+        <span title="აქტიური ბინა / ექსკლუზივი">🏠 ${p.listings} · 🏘️ ${p.exclusives}</span>
+        <span class="${p.warnings ? "warn" : ""}" title="გაფრთხილება (თვე)">⚠️ ${p.warnings}</span></div></div>`).join("");
+  const legend = `<div class="muted" style="font-size:12px;margin:6px 0">🔴 — დაუდასტურებელი ლიდი ან ვადაგადაცილებული follow-up · 🟠 — ყურადღება/მიუღებელი კლიენტი · 🟢 — წესრიგშია. დააჭირეთ აგენტს — მხოლოდ მისი მონაცემები.</div>`;
+  return bar + legend + (rows || `<div class="empty">ამ ფილტრით ჩანაწერი არ არის</div>`);
+}
+function cabExclBody(mv) {
+  const rows = mv.excl;
+  if (!rows) return hubSkeleton();
+  const me = String((state.data && (state.data.agent_id || (state.data.agent || {}).agent_id)) || "");
+  const mgr = mv.cab && mv.cab.manager;
+  const list = rows.filter((r) => mgr || String(r.agent_id) === me);
+  if (!list.length) return `<div class="empty">აქტიური ექსკლუზივი არ არის. დამატება: ბოტში /exclusive ან ტაბი „ექსკლუზივები“.</div>`;
+  return `<div class="cab-ex-grid">${list.map((r) => `<div class="cab-ex"><div class="cab-ex-h"><b>${esc(r.location || r.address || "ექსკლუზივი")}</b>${r.price ? `<span>${esc(String(r.price))}${/\$/.test(String(r.price)) ? "" : "$"}</span>` : ""}</div>
+      <div class="muted">${esc([r.property_type, r.rooms && r.rooms + " ოთ.", r.area && r.area + " მ²", r.deal_type].filter(Boolean).join(" · "))}</div>
+      <div class="muted">${mgr ? "👤 " + esc(r.agent_name || "") + " · " : ""}📅 ${esc(String(r.created_at || "").slice(0, 10))}${r.collaboration_count ? " · 🤝 " + r.collaboration_count : ""}</div></div>`).join("")}</div>`;
+}
+
 
 function hubIso(d) { return d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") + "-" + String(d.getDate()).padStart(2, "0"); }
 function hubDayLabel(iso) {
@@ -5374,13 +5660,16 @@ async function hubLoadMeet() {
   const mv = state.hub.mv;
   mv.loading = true; mv.err = ""; hubDrawMeet();
   try {
-    const listless = ["clients", "attention", "criteria"].includes(mv.tab);          // ამ ჩანართებს შეხვედრების სია არ სჭირდება
+    const listless = ["clients", "attention", "criteria", "excl", "team"].includes(mv.tab);          // ამ ჩანართებს შეხვედრების სია არ სჭირდება
+    const side = Promise.all([api(cabCabQS(mv)).then((c) => { mv.cab = c && c.totals ? c : null; }).catch(() => {}), mv.tab === "clients" ? cabLoadTg(mv).catch(() => {}) : Promise.resolve(),
+      mv.tab === "excl" ? api("/api/exclusives").then((r) => { mv.excl = r.rows || []; }).catch(() => { mv.excl = []; }) : Promise.resolve()]);
     const mtab = listless ? "upcoming" : mv.tab;
     const [list, stats, leads, att, crit] = await Promise.all([api("/api/hub/meetings?view=" + encodeURIComponent(mtab) + (mtab === "past" ? "&days=60" : "")), api("/api/hub/stats?days=30"),
       api("/api/hub/leads?view=open").catch(() => ({ items: [], total: 0, unseen_mine: 0, can_manage: false, agents: [] })),
       api("/api/hub/attention").catch(() => ({ items: [], total: 0, counts: {} })),
       mv.tab === "criteria" ? api("/api/hub/criteria").catch(() => ({ items: [], total: 0 })) : Promise.resolve(mv.crit || { items: [], total: 0 })]);
     mv.items = listless ? [] : list.items; mv.meta = list.meta; mv.stats = stats; mv.leads = leads.items || []; mv.leadsMeta = leads; mv.att = att; mv.crit = crit;
+    await side;
     hubSetBadge();
   } catch (e) { mv.err = e.message || "შეცდომა"; }
   mv.loading = false;
@@ -5414,13 +5703,17 @@ function hubDrawMeet() {
   const s = mv.stats, tot = s && s.totals;
   const lm = mv.leadsMeta || {};
   const attN = (mv.att && mv.att.total) || 0;
-  const tabs = [["clients", `📥 კლიენტები${lm.total ? ` (${lm.total})` : ""}`], ["attention", `🔔 ყურადღება${attN ? ` (${attN})` : ""}`], ["criteria", "🎯 კრიტერიუმები"],
-    ["upcoming", "📅 შეხვედრები"], ["pending", `დასადასტურებელი${mv.meta && mv.meta.pending_for_me ? ` (${mv.meta.pending_for_me})` : ""}`], ["past", "ისტორია"]];
+  const tgN = (mv.tgMine || []).length + (((mv.tgMgr && mv.tgMgr.leads) || []).filter((x) => x.status === "new" || x.status === "assigned").length);
+  const tabs = [["clients", `📥 კლიენტები${(lm.total || 0) + tgN ? ` (${(lm.total || 0) + tgN})` : ""}`], ["attention", `🔔 ყურადღება${attN ? ` (${attN})` : ""}`], ["criteria", "🎯 კრიტერიუმები"],
+    ["upcoming", "📅 შეხვედრები"], ["pending", `🤝 დასადასტურებელი${mv.meta && mv.meta.pending_for_me ? ` (${mv.meta.pending_for_me})` : ""}`], ["excl", "🏘️ ექსკლუზივები"], ["past", "✅ ისტორია"]]
+    .concat(mv.cab && mv.cab.manager ? [["team", "👥 გუნდი"]] : []);
   const strip = tot ? `<div class="hub-ins-top"><div class="hub-stat"><b>${tot.today}</b><span>დღეს</span></div><div class="hub-stat"><b>${tot.tomorrow}</b><span>ხვალ</span></div>
       <div class="hub-stat ${tot.pending ? "warn" : ""}"><b>${tot.pending}</b><span>დასადასტურებელი</span></div><div class="hub-stat"><b>${tot.done}</b><span>ჩატარდა (30დ)</span></div><div class="hub-stat"><b>${tot.contracts}</b><span>ხელშეკრულება</span></div></div>` : "";
   let body = "";
   if (mv.err) body = `<div class="empty">⚠️ ${esc(mv.err)}</div>`;
-  else if (mv.tab === "clients") body = mv.loading && !mv.leads.length ? hubSkeleton() : hubLeadsBody(mv);
+  else if (mv.tab === "clients") body = mv.loading && !mv.leads.length && !(mv.tgMine || []).length ? hubSkeleton() : cabTgSection(mv) + `<div class="hub-k" style="margin-top:10px">📋 მენეჯერის მიერ გადმოცემული კლიენტები</div>` + hubLeadsBody(mv);
+  else if (mv.tab === "team") body = mv.loading && !mv.cab ? hubSkeleton() : cabTeamBody(mv);
+  else if (mv.tab === "excl") body = cabExclBody(mv);
   else if (mv.tab === "attention") body = mv.loading && !mv.att ? hubSkeleton() : hubAttBody(mv);
   else if (mv.tab === "criteria") body = mv.loading && !mv.crit ? hubSkeleton() : hubCritBody(mv);
   else if (mv.loading && !mv.items.length) body = hubSkeleton();
@@ -5435,8 +5728,10 @@ function hubDrawMeet() {
   const rank = (title, rows, valFn, sub) => rows && rows.length ? `<div class="hub-k" style="margin-top:12px">${title}</div>${rows.slice(0, 6).map((r, i) => `<div class="hub-rank"><span class="n">${i + 1}</span><span class="nm">${esc(r.name)}<small>${esc(r.team || "")}</small></span><span class="v">${valFn(r)}</span></div>`).join("")}` : "";
   const ranks = s ? rank(s.scope === "mine" ? "🏠 შენს ბინებზე შეხვედრები" : "🏠 ვის ბინებზეა ყველაზე მეტი დაინტერესება", s.owners, (r) => `<b>${r.meetings}</b> <small>· ${r.listings} ბინა</small>`)
     + rank(s.scope === "mine" ? "🚶 შენი შეხვედრები" : "🚶 ვინ დადის ყველაზე ხშირად შეხვედრებზე", s.requesters, (r) => `<b>${r.done}</b> <small>/ ${r.meetings}${r.no_show ? " · 🚫" + r.no_show : ""}${r.contracts ? " · 📑" + r.contracts : ""}</small>`) : "";
-  el.innerHTML = `${strip}<div class="hub-row" style="margin-top:10px">${tabs.map(([k, l]) => `<button class="hub-chip ${mv.tab === k ? "on" : ""}" data-mt-tab="${k}">${l}</button>`).join("")}</div>
-    <div class="hub-mt-list">${body}</div>${top}${ranks}`;
+  const deep = ["team", "excl"].includes(mv.tab);
+  el.innerHTML = `${cabHero(mv)}${!mv.cab && !deep ? strip : ""}<div class="hub-row cab-tabs" style="margin-top:10px">${tabs.map(([k, l]) => `<button class="hub-chip ${mv.tab === k ? "on" : ""}" data-mt-tab="${k}">${l}</button>`).join("")}</div>
+    <div class="hub-mt-list">${body}</div>${deep ? "" : top + ranks}`;
+  cabBind(el, mv);
   el.querySelectorAll("[data-mt-tab]").forEach((b) => { b.onclick = () => { hubHaptic(); mv.tab = b.dataset.mtTab; hubLoadMeet(); }; });
   el.querySelectorAll("[data-hub-top]").forEach((c) => { c.onclick = () => hubOpenDetail(c.dataset.hubTop); });
   el.querySelectorAll("[data-mt-act]").forEach((b) => {
@@ -5451,6 +5746,60 @@ function hubDrawMeet() {
   el.querySelectorAll("[data-crit-act]").forEach((b) => {
     b.onclick = () => { const c = ((mv.crit || {}).items || []).find((x) => x.criteria_id === b.closest("[data-crit-id]").dataset.critId); if (c) hubCritAct(c, b.dataset.critAct); };
   });
+}
+
+function cabBind(el, mv) {
+  const go = (tab) => { hubHaptic(); mv.tab = tab; hubLoadMeet(); };
+  const rf = document.getElementById("cabRefresh"); if (rf) rf.onclick = () => { hubHaptic(); hubLoadMeet(); };
+  el.querySelectorAll("[data-cab-go]").forEach((b) => {
+    b.onclick = () => {
+      const g = b.dataset.cabGo;
+      if (g === "mine") { state.hub.mine = true; hubSetView("list"); hubReload(); return; }
+      if (g === "warn") { toast("⚠️ გაფრთხილებები — მენეჯერთან/ბოტში /warnings"); return; }
+      go({ tgnew: "clients", tgconfirm: "clients" }[g] || g);
+    };
+  });
+  const reTg = async () => { mv.tgOpen = null; await cabLoadTg(mv); api(cabCabQS(mv)).then((c) => { if (c && c.totals) mv.cab = c; hubDrawMeet(); }).catch(() => {}); hubDrawMeet(); };
+  const act = async (id, body) => { try { await api("/api/tgnet/my-leads/" + encodeURIComponent(id) + "/action", { method: "POST", body: JSON.stringify(body) }); hubHaptic("ok"); toast("✅ შენახულია"); await reTg(); } catch (e) { toast(e.message || "შეცდომა"); } };
+  el.querySelectorAll("[data-cab-act]").forEach((b) => { b.onclick = () => act(b.dataset.id, { action: b.dataset.cabAct }); });
+  el.querySelectorAll("[data-cab-open]").forEach((b) => { b.onclick = () => { mv.tgOpen = { id: b.dataset.id, kind: b.dataset.cabOpen }; hubDrawMeet(); }; });
+  el.querySelectorAll("[data-cab-cancel]").forEach((b) => { b.onclick = () => { mv.tgOpen = null; hubDrawMeet(); }; });
+  el.querySelectorAll("[data-cab-due]").forEach((b) => { b.onclick = () => { const i = el.querySelector("#cabDue"); if (i) i.value = cabDueValue(b.dataset.cabDue); el.querySelectorAll("[data-cab-due]").forEach((x) => x.classList.toggle("on", x === b)); }; });
+  el.querySelectorAll("[data-cab-save]").forEach((b) => {
+    b.onclick = () => {
+      const due = (el.querySelector("#cabDue") || {}).value || "", note = ((el.querySelector("#cabNote") || {}).value || "").trim(), kind = b.dataset.k;
+      if (kind !== "decline" && !due) { toast("მიუთითეთ follow-up-ის თარიღი და საათი (სავალდებულოა)"); return; }
+      if (kind !== "waiting" && !note) { toast(kind === "decline" ? "მიუთითეთ რატომ ვერ ასრულებთ" : "დაწერეთ რა შეთანხმდით"); return; }
+      act(b.dataset.cabSave, { action: kind, note, follow_up_at: due.replace("T", " ") });
+    };
+  });
+  el.querySelectorAll("[data-cab-assign]").forEach((b) => {
+    b.onclick = async () => {
+      const id = b.dataset.cabAssign, sel = el.querySelector(`[data-cab-ag="${id}"]`);
+      if (!sel || !sel.value) { toast("აირჩიეთ აგენტი"); return; }
+      b.disabled = true;
+      try { await api("/api/tgnet/leads/" + encodeURIComponent(id) + "/assign", { method: "POST", body: JSON.stringify({ agent_id: sel.value }) }); hubHaptic("ok"); toast("✅ გადაბარდა — აგენტს შეტყობინება გაეგზავნა (დადასტურებამდე განმეორდება)"); await reTg(); }
+      catch (e) { toast(e.message || "შეცდომა"); b.disabled = false; }
+    };
+  });
+  el.querySelectorAll("[data-cab-ls]").forEach((b) => { b.onclick = () => hubOpenDetail(b.dataset.cabLs); });
+  el.querySelectorAll("[data-cab-book]").forEach((b) => {
+    b.onclick = async () => {
+      const x = (mv.tgMine || []).find((y) => y.lead_id === b.dataset.id) || {};
+      try { const it = (await api("/api/listings/" + encodeURIComponent(b.dataset.cabBook))).listing; hubBookForm(it, { client_name: x.name || "", client_phone: x.phone ? "+" + x.phone : "" }); }
+      catch (e) { toast(e.message || "შეცდომა"); }
+    };
+  });
+  el.querySelectorAll("[data-cab-crit]").forEach((b) => {
+    b.onclick = () => { const x = (mv.tgMine || []).find((y) => y.lead_id === b.dataset.cabCrit) || {}; hubCritForm({ client_name: x.name || "", client_phone: x.phone ? "+" + x.phone : "" }); };
+  });
+  el.querySelectorAll("[data-cab-days]").forEach((b) => { b.onclick = () => { mv.tf.days = Number(b.dataset.cabDays); hubLoadMeet(); }; });
+  el.querySelectorAll("[data-cab-prob]").forEach((b) => { b.onclick = () => { mv.tf.problems = !mv.tf.problems; hubLoadMeet(); }; });
+  const ts = el.querySelector("#cabTeam"); if (ts) ts.onchange = () => { mv.tf.team = ts.value; mv.tf.agent = ""; hubLoadMeet(); };
+  const as = el.querySelector("#cabAgent"); if (as) as.onchange = () => { mv.tf.agent = as.value; hubLoadMeet(); };
+  el.querySelectorAll("[data-cab-agent]").forEach((r) => { r.onclick = () => { mv.tf.agent = mv.tf.agent === r.dataset.cabAgent ? "" : r.dataset.cabAgent; hubLoadMeet(); }; });
+  const f = mv.tgFocus && el.querySelector(`[data-cab-tg="${CSS && CSS.escape ? CSS.escape(mv.tgFocus) : mv.tgFocus}"]`);
+  if (f) { try { f.scrollIntoView({ behavior: "smooth", block: "center" }); } catch (e) { /* ignore */ } setTimeout(() => { mv.tgFocus = ""; }, 4000); }
 }
 
 /* ---- 🔔 ყურადღება: დაგვიანებული Follow-up-ები (შედეგი არ ჩაწერილა / პასუხი არ გაცემულა / კლიენტი მიუღებელია / შეხვედრა არ დაგეგმილა) ---- */
@@ -5595,7 +5944,8 @@ function hubLeadsBody(mv) {
   return bar + mv.leads.map(hubLeadCard).join("");
 }
 function hubSetBadge() {
-  const mv = state.hub.mv, n = ((mv.meta && mv.meta.pending_for_me) || 0) + ((mv.leadsMeta && mv.leadsMeta.unseen_mine) || 0);
+  const mv = state.hub.mv, t = (mv.cab && mv.cab.totals) || {};
+  const n = ((mv.meta && mv.meta.pending_for_me) || 0) + ((mv.leadsMeta && mv.leadsMeta.unseen_mine) || 0) + (mv.cab && !mv.cab.manager ? (t.tg_unconfirmed || 0) : (t.tg_new || 0));
   state.hub.pendingForMe = n;
   const b = document.getElementById("hubMeetBadge"); if (b) { b.textContent = n ? ` ${n}` : ""; b.hidden = !n; }
 }
@@ -5711,8 +6061,9 @@ async function hubContract(mt) {
 }
 async function hubLoadMeetBadge() {
   try {
-    const [r, l] = await Promise.all([api("/api/hub/meetings?view=pending"), api("/api/hub/leads?view=open").catch(() => null)]);
     const mv = state.hub.mv;
+    const [r, l, c] = await Promise.all([api("/api/hub/meetings?view=pending"), api("/api/hub/leads?view=open").catch(() => null), api(cabCabQS(mv)).catch(() => null)]);
+    if (c && c.totals) mv.cab = c;
     mv.meta = Object.assign({}, mv.meta, r.meta);
     if (l) { mv.leadsMeta = l; mv.leads = l.items || []; }
     hubSetBadge();
@@ -5747,11 +6098,11 @@ async function hubAdminExport(kind) {
 
 async function renderHub(content) {
   const h = state.hub;
-  h.map = null; h.mapSeq++;
+  hubMapDispose(); h.mapSeq++;
   content.innerHTML = `
     <div class="card hub-head">
       <div class="hub-title"><h2>🏙️ განცხადებები</h2><span class="sub" id="hubCount"></span></div>
-      <div class="hub-seg"><button data-hub-view="list" class="${h.view === "list" ? "on" : ""}">📋 სია</button><button data-hub-view="map" class="${h.view === "map" ? "on" : ""}">🗺 რუკა</button><button data-hub-view="meet" class="${h.view === "meet" ? "on" : ""}">📥 სამუშაო<b id="hubMeetBadge" class="hub-badge" hidden></b></button></div>
+      <div class="hub-seg"><button data-hub-view="list" class="${h.view === "list" ? "on" : ""}">📋 სია</button><button data-hub-view="map" class="${h.view === "map" ? "on" : ""}">🗺 რუკა</button><button data-hub-view="meet" class="${h.view === "meet" ? "on" : ""}">👤 კაბინეტი<b id="hubMeetBadge" class="hub-badge" hidden></b></button></div>
       <div id="hubFilters" ${h.view === "meet" ? "hidden" : ""}>
         <div class="hub-search"><input id="hubQ" type="search" placeholder="მაგ: 3 ოთახი საბურთალო 500$-მდე ქირა · ID · მისამართი" value="${esc(h.q)}">
           <button class="btn secondary" id="hubFilterBtn">⚙️</button></div>
@@ -5872,7 +6223,7 @@ function tabsFor(role) {
   if (state.recAccess && state.recAccess.can_view) tabs.splice(tabs.indexOf(HUB_TAB) + 1, 0, REC_TAB);
   // 📣 Telegram ქსელი (TGNET): მხოლოდ დირექტორი (სერვერი ამბობს /api/tgnet/access), მხოლოდ ადმინის ხედში
   if (role === "admin" && state.tgAccess && (state.tgAccess.can_view || state.tgAccess.can_leads)) { tabs = tabs.slice(); tabs.push(TG_TAB); }
-  else if (state.tgAccess && state.tgAccess.can_mine) { tabs = tabs.slice(); tabs.push(TGM_TAB); }       // აგენტი: „ჩემი ლიდები“ (Telegram)
+  // აგენტის Telegram ლიდები ახლა კაბინეტშია (განცხადებები → 👤 კაბინეტი → კლიენტები) — ცალკე „ლიდები“ ტაბი დუბლი იყო; ძველი ბმული (tab=tgmine) კაბინეტზე გადადის
   return tabs;
 }
 
@@ -6070,7 +6421,8 @@ async function tgDeepLink() {
   state._tgDeep = true;
   await tgLoadAccess();
   const a = state.tgAccess || {};
-  state.tab[state.role] = (state.role === "admin" && (a.can_view || a.can_leads)) ? "tgnet" : (a.can_mine ? "tgmine" : state.tab[state.role]);
+  state.tab[state.role] = "hub";
+  state.hub.view = "meet"; state.hub.mv.tab = "clients"; state.hub.mv.tgFocus = q.get("tgl");
   try { history.replaceState(null, "", location.pathname); } catch (e) { /* ignore */ }
   await renderContent();
 }
@@ -6889,13 +7241,13 @@ function aiActionCard(a, i, j) {
   if (a.state === "failed") return `<div class="ai-act-card done err"><b>${esc(a.title)}</b><div>⚠️ ვერ შესრულდა: ${aiFmt(a.stateText || "სცადეთ ხელახლა — სთხოვეთ SAIRO-ს ახალი ბარათი")}</div></div>`;
   if (a.state === "cancelled") return `<div class="ai-act-card done"><b>${esc(a.title)}</b><div class="muted">✖ გაუქმდა</div></div>`;
   if (a.state === "expired") return `<div class="ai-act-card done"><b>${esc(a.title)}</b><div class="muted">⌛ დადასტურების ვადა გავიდა — სთხოვეთ SAIRO-ს ხელახლა</div></div>`;
-  const ed = a.editable || {}, isRec = a.type === "recruit_update";
+  const ed = a.editable || {}, isRec = a.type === "recruit_update" || String(a.type || "").startsWith("tg_"), isTg = String(a.type || "").startsWith("tg_");
   const fields = isRec ? "" : a.type === "followup_create"
     ? `<label>ვადა<input type="date" data-aiact-f="due_at" value="${esc(ed.due_at || "")}"></label><label>რა უნდა გაკეთდეს<input data-aiact-f="next_action" maxlength="500" value="${esc(ed.next_action || "")}"></label>`
     : `<label>ტექსტი<textarea rows="4" data-aiact-f="text" maxlength="800">${esc(ed.text || "")}</textarea></label>`;
-  return `<div class="ai-act-card" data-aicard="${k}"><div class="ai-act-h"><b>${esc(a.title)}</b>${a.external ? `<span class="badge amber">📤 გარე შეტყობინება</span>` : `<span class="badge gray">${isRec ? "ჩანაწერი კადრებში" : "ჩანაწერი CRM-ში"}</span>`}</div>
+  return `<div class="ai-act-card" data-aicard="${k}"><div class="ai-act-h"><b>${esc(a.title)}</b>${a.external ? `<span class="badge amber">📤 გარე შეტყობინება</span>` : `<span class="badge gray">${isTg ? "Telegram ლიდი / რიგი" : isRec ? "ჩანაწერი კადრებში" : "ჩანაწერი CRM-ში"}</span>`}</div>
     <div class="ai-act-r"><span class="muted">ვის ეხება:</span> ${esc(a.who)}</div>
-    <div class="ai-act-r"><span class="muted">რას გააკეთებს:</span><br>${isRec ? aiDiffs(a) : aiFmt(a.what)}</div>
+    <div class="ai-act-r"><span class="muted">რას გააკეთებს:</span><br>${isRec && !isTg ? aiDiffs(a) : aiFmt(a.what)}</div>
     <div class="ai-act-r"><span class="muted">რა მონაცემს იყენებს:</span> ${(a.uses || []).map(esc).join(" · ")}</div>
     <div class="ai-act-r"><span class="muted">რა შედეგს ელოდება:</span> ${esc(a.effect)}</div>
     ${isRec ? "" : `<details class="ai-act-edit"><summary>✏️ შეცვლა</summary><div class="ai-form">${fields}<button class="btn secondary" data-aiact="revise:${k}">განახლება (ახალი ბარათი)</button></div></details>`}
@@ -7285,7 +7637,7 @@ async function renderContent() {
     if (tab === "hub") { await renderHub(content); return; }
     if (tab === "recruit") { await renderRecruit(content); return; }
     if (tab === "tgnet") { await renderTgnet(content); return; }
-    if (tab === "tgmine") { await renderTgMine(content); return; }
+    if (tab === "tgmine") { state.tab[state.role] = "hub"; state.hub.view = "meet"; state.hub.mv.tab = "clients"; await renderContent(); return; }     // ძველი „ლიდები“ ტაბი -> კაბინეტი
     if (tab === "system") { await renderSystem(content); return; }
     if (tab === "ai") { await renderAi(content); return; }
     if (LAZY_ENDPOINTS[tab]) {

@@ -2277,10 +2277,9 @@ async def remind_before_shift_edge(context: ContextTypes.DEFAULT_TYPE):
         chat_id = a.get("telegram_chat_id")
         if not chat_id:
             continue
-        sched = sheets.get_agent_schedule(agent_id)
-        if not sched:
+        mode = sheets.mode_on(agent_id)          # კვირის გრაფიკი + დღევანდელი დამტკიცებული გაცვლა
+        if mode is None:
             continue
-        mode = str(sched.get(weekday_key) or "off")
         if mode == "off":
             continue
 
@@ -2844,10 +2843,9 @@ async def check_manager_notifications(context: ContextTypes.DEFAULT_TYPE):
         if not leads:
             continue
         agent_id = a["agent_id"]
-        sched = sheets.get_agent_schedule(agent_id)
-        if not sched:
+        mode = sheets.mode_on(agent_id)          # კვირის გრაფიკი + დღევანდელი დამტკიცებული გაცვლა
+        if mode is None:
             continue
-        mode = str(sched.get(weekday_key) or "off")
         if mode not in ("office_morning", "office_evening"):
             continue
         start_hour = 10 if mode == "office_morning" else 16
@@ -2903,10 +2901,9 @@ async def check_late_arrivals(context: ContextTypes.DEFAULT_TYPE):
         agent_id = a["agent_id"]
         if str(a.get("active", "")).strip().lower() == "no":
             continue
-        sched = sheets.get_agent_schedule(agent_id)
-        if not sched:
+        mode = sheets.mode_on(agent_id)          # კვირის გრაფიკი + დღევანდელი დამტკიცებული გაცვლა
+        if mode is None:
             continue
-        mode = str(sched.get(weekday_key) or "off")
         if mode not in ("office_morning", "office_evening"):
             continue
         try:
@@ -2916,6 +2913,9 @@ async def check_late_arrivals(context: ContextTypes.DEFAULT_TYPE):
             detail = shift_rules.late_arrival_due(mode, att, now)
             if not detail:
                 continue
+            note = sheets.swap_note(agent_id)
+            if note:
+                detail = f"{detail} · {note}"
             result = sheets.add_warning_once(
                 agent_id, "late_arrival", detail, exclusive_with=shift_rules.ATTENDANCE_TYPES)
         except Exception:
@@ -2941,10 +2941,9 @@ async def check_daily_compliance(context: ContextTypes.DEFAULT_TYPE):
         agent_id = a["agent_id"]
         if str(a.get("active", "")).strip().lower() == "no":
             continue
-        sched = sheets.get_agent_schedule(agent_id)
-        if not sched:
+        mode = sheets.mode_on(agent_id)          # კვირის გრაფიკი + დღევანდელი დამტკიცებული გაცვლა
+        if mode is None:
             continue
-        mode = str(sched.get(weekday_key) or "off")
         if mode == "off":
             continue
 
@@ -2953,8 +2952,9 @@ async def check_daily_compliance(context: ContextTypes.DEFAULT_TYPE):
             # "არ გამოცხადდა" მხოლოდ ვერგახსნილ ცვლაზე და მხოლოდ თუ დღეს
             # "დაგვიანება" უკვე არ ჩაწერილა იმავე გამოუცხადებლობაზე.
             if shift_rules.no_show_due(mode, att, now):
+                _sn = sheets.swap_note(agent_id)
                 result = sheets.add_warning_once(
-                    agent_id, "no_show", f"{today}: არ გამოცხადებულა",
+                    agent_id, "no_show", f"{today}: ცვლა ({SCHEDULE_MODE_LABELS.get(mode, mode)}) არ გახსნილა — არ გამოცხადებულა" + (f" · {_sn}" if _sn else ""),
                     exclusive_with=shift_rules.ATTENDANCE_TYPES)
                 await _notify_warning(context, a, "no_show", today, result)
             continue

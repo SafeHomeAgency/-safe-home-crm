@@ -124,6 +124,14 @@ def register(app, *, authed, audit, rate_limited) -> None:
         existing = bool(row.pop("_existing", False))
         if not existing:
             audit(agent, admin, "criteria_create", "criteria", row["criteria_id"])
+            try:                                   # ერთიანი კლიენტის ბარათი: კრიტერიუმის კლიენტიც CRM-ში (ფონურად; ხარვეზი შენახვას არ აფერხებს)
+                import crm2_sync
+                bmin, bmax = str(row.get("budget_min") or ""), str(row.get("budget_max") or "")
+                crm2_sync.criteria_created(str(row["criteria_id"]), str(row.get("agent_id") or (agent or {}).get("agent_id") or ""), str(row.get("client_phone") or ""),
+                                           str(row.get("client_name") or ""), str(row.get("deal_type") or ""), (f"{bmin}-{bmax}" if bmin or bmax else ""),
+                                           " · ".join(x for x in (str(row.get("deal_type") or ""), str(row.get("districts") or ""), (f"${bmin}-{bmax}" if bmin or bmax else "")) if x))
+            except Exception:  # noqa: BLE001
+                log.exception("კრიტერიუმი -> CRM ასახვა ვერ მოხერხდა")
         return jsonify(ok=True, existing=existing, criteria=m.project(row)), (200 if existing else 201)
 
     @app.post("/api/hub/criteria/<criteria_id>/status")

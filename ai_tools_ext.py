@@ -48,12 +48,13 @@ def perms(viewer: dict) -> dict:
 SECTIONS = {
     "taskhistory": ("📜 ისტორია", "all"), "meetings": ("🤝 შეხვედრები", "all"), "exclusives": ("🏘️ ექსკლუზივები", "all"), "myhomejobs": ("🏘️ MyHome", "all"),
     "questions": ("💬 კითხვები", "all"), "regulations": ("📘 ინსტრუქცია/წესები", "all"), "crm2": ("🗃️ CRM", "all"), "contracts": ("📑 ხელშეკრულებები", "all"),
-    "hub": ("🏙️ განცხადებები (კატალოგი, რუკა)", "all"), "ai": ("🦸 SAIRO", "all"),
+    "hub": ("🏙️ განცხადებები (კატალოგი, რუკა, 👤 პირადი კაბინეტი: კლიენტები, Telegram ლიდები, შეხვედრები, follow-up, გუნდის ცხრილი)", "all"), "ai": ("🦸 SAIRO", "all"),
+    "tgnet": ("📣 Telegram (არხები, რიგი, ლიდები)", "manager"),
     "today": ("🏠 დღეს", "agent"), "tasks": ("📋 დავალებები", "agent"), "kpi": ("📈 KPI", "agent"), "myattendance": ("🕘 დასწრება", "agent"), "mydayoffs": ("🏖️ შვებულება", "agent"),
     "overview": ("📊 მიმოხილვა", "manager"), "team": ("🧑‍🤝‍🧑 გუნდი", "manager"), "ranking": ("🏆 რეიტინგი", "manager"), "attendance": ("🕘 დასწრება (გუნდი)", "manager"),
     "districts": ("📍 რაიონები", "manager"), "agentrequests": ("📥 მოთხოვნები", "manager"), "admintasks": ("📄 დავალებები (გუნდი)", "manager"),
     "digest": ("🗞️ დღის ამბები", "manager"), "dayoffs": ("🗓️ შვებულებები", "manager"), "warnings": ("⚠️ გაფრთხილებები", "manager"), "swaps": ("🔁 სმენის გაცვლა", "manager"),
-    "reports": ("📝 რეპორტები", "manager"), "clients": ("👥 კლიენტები", "manager"), "myhomestats": ("📊 MyHome სტატისტიკა", "manager"),
+    "reports": ("📝 რეპორტები", "manager"), "myhomestats": ("📊 MyHome სტატისტიკა", "manager"),
     "agentsmgmt": ("🗂️ აგენტები", "admin"), "system": ("🩺 სისტემა", "admin"),
     "recruit": ("🧑‍💼 კადრები (აყვანა)", "recruit"), "finance": ("💰 ფინანსები", "finance"),
 }
@@ -104,6 +105,18 @@ TOOL_DEFS.update({
     "tg_queue": {"name": "tg_queue", "description": "Telegram-ზე გამოსაქვეყნებელი რიგის შეჯამება: რამდენი ელოდება დამტკიცებას, გასასწორებელია, დამტკიცებულია; ბოლო განცხადებები. მხოლოდ დირექტორი.", "input_schema": _obj({})},
     "tg_my_leads": {"name": "tg_my_leads", "description": "ჩემი Telegram ლიდები (აგენტისთვის): რომელი ელოდება დადასტურებას, რომელს აქვს follow-up და როდის. კლიენტის სახელი პლეისჰოლდერია.", "input_schema": _obj({})},
 })
+
+TOOL_DEFS.update({
+    "propose_tg_assign": {"name": "propose_tg_assign", "description": "მენეჯერი/დირექტორი: მოამზადე Telegram ლიდის გადაბარება აგენტზე (lead_ref — tg_leads-იდან, agent_ref — აგენტის id tg_leads.agents-იდან; ნაგულისხმევად ბინის აგენტი listing_agent_ref). **არაფერს ცვლის** — ეჩვენება ბარათი, სრულდება მხოლოდ დადასტურებით.",
+                          "input_schema": _obj({"lead_ref": {"type": "string"}, "agent_ref": {"type": "string"}}, ["lead_ref", "agent_ref"])},
+    "propose_tg_lead_result": {"name": "propose_tg_lead_result", "description": "აგენტი: მოამზადე თავისი Telegram ლიდის სტატუსი — ack (მივიღე), contacted (დავუკავშირდი: note სავალდებულოა), waiting (მოგვიანებით). contacted/waiting-ზე follow_up_at სავალდებულოა „YYYY-MM-DD HH:MM“ (მომავალში) — თუ მომხმარებელმა დრო არ თქვა, ჰკითხე. ბარათი — დადასტურებით.",
+                               "input_schema": _obj({"lead_ref": {"type": "string"}, "action": {"type": "string", "enum": ["ack", "contacted", "waiting"]}, "follow_up_at": {"type": "string"}, "note": {"type": "string"}}, ["lead_ref", "action"])},
+    "propose_tg_queue": {"name": "propose_tg_queue", "description": "მხოლოდ დირექტორი: მოამზადე Telegram რიგის განცხადებების (listing ID-ები tg_queue-დან, მაქს. 50) დამტკიცება ან უარყოფა. ბარათი — დადასტურებით.",
+                         "input_schema": _obj({"listing_keys": {"type": "array", "items": {"type": "string"}}, "action": {"type": "string", "enum": ["approve", "reject"]}}, ["listing_keys", "action"])},
+})
+TG_MANAGER_TOOLS.append("propose_tg_assign")
+TG_ADMIN_TOOLS.append("propose_tg_queue")
+TG_AGENT_TOOLS.append("propose_tg_lead_result")
 
 
 def names_for(viewer: dict) -> list[str]:
@@ -170,10 +183,15 @@ class ExtTools:
         for r in rows:
             at = tl._parse_local(r["assigned_at"] if r["status"] == "assigned" else r["at"])
             if r["status"] in ("new", "assigned") and at:
-                waiting.append({"client": self.pseudo.token("CLIENT", r["tg_name"] or "-"), "status": r["status"], "minutes": int((now - at).total_seconds() // 60), "seen": bool(r["seen_at"]),
-                                "agent": names.get(r["assigned_agent_id"], "")})
+                import tgnet_publisher as tp
+                lst = tp.get_listing(r["listing_key"]) if r["listing_key"] else None
+                waiting.append({"lead_ref": r["lead_id"], "client": self.pseudo.token("CLIENT", r["tg_name"] or "-"), "status": r["status"], "minutes": int((now - at).total_seconds() // 60), "seen": bool(r["seen_at"]),
+                                "agent": names.get(r["assigned_agent_id"], ""), "listing": r["listing_key"], "listing_agent_ref": str((lst or {}).get("agent_id") or ""), "listing_team": str((lst or {}).get("team") or "")})
         waiting.sort(key=lambda x: -x["minutes"])
-        return {"total": len(rows), "by_status": by, "per_agent_open": per_agent, "longest_waiting": waiting[:8], "note": "მიუბმელი ლიდის მისაბმელად მენეჯერი აპში ტაბი Telegram → ლიდები"}
+        ags = [{"agent_ref": str(a.get("agent_id")), "name": a.get("name"), "team": a.get("team", "")} for a in self._agents() if str(a.get("active", "yes")).lower() not in ("no", "false", "0")
+               and (self.viewer.get("admin") or str(a.get("team") or "") == str(self.viewer.get("team") or ""))]
+        return {"total": len(rows), "by_status": by, "per_agent_open": per_agent, "longest_waiting": waiting[:12], "agents": ags[:60],
+                "note": "გადასაბარებლად: propose_tg_assign(lead_ref, agent_ref) — ნაგულისხმევად listing_agent_ref (ბინის აგენტი). ან აპი → განცხადებები → 👤 კაბინეტი → კლიენტები"}
 
     def _t_tg_interest(self, args):
         import tgnet_publisher as tp
@@ -190,17 +208,37 @@ class ExtTools:
 
     def _t_tg_queue(self, args):
         import tgnet_store as ts
-        pg = ts.queue_page(limit=8)
+        pg = ts.queue_page(status=m.s(args.get("status"), 20), limit=20)
         return {"counts": pg["counts"], "total": pg["total"], "latest": [{"listing": g["listing_key"], "status": g["status"], "summary": g["summary"], "problem": g["error"]} for g in pg["groups"]],
-                "note": "დასამტკიცებლად ტაბი Telegram → რიგი (მონიშვნით ერთიანადაც შეიძლება)"}
+                "note": "დასამტკიცებლად: propose_tg_queue(listing_keys, approve|reject) — ბარათით; ან ტაბი Telegram → რიგი (მონიშვნით ერთიანადაც)"}
 
     def _t_tg_my_leads(self, args):
         import tgnet_leads as tl
         import tgnet_publisher as tp
         flow = tl.Flow(None, get_listing=tp.get_listing, agents=self._agents)
         items = flow.my_leads(m.s(self.viewer.get("agent_id"), 40))
-        return {"total": len(items), "leads": [{"client": self.pseudo.token("CLIENT", x["name"] or "-"), "status": x["status"], "listing": x["summary"], "seen": x["seen"], "follow_up": x["follow_up_at"]} for x in items[:12]],
-                "note": "დასადასტურებლად/შედეგის ჩასაწერად აპი → ლიდები (follow-up სავალდებულოა)"}
+        return {"total": len(items), "leads": [{"lead_ref": x["lead_id"], "client": self.pseudo.token("CLIENT", x["name"] or "-"), "status": x["status"], "listing": x["summary"], "seen": x["seen"], "follow_up": x["follow_up_at"]} for x in items[:12]],
+                "note": "სტატუსის ჩასაწერად: propose_tg_lead_result(lead_ref, action, follow_up_at, note) — follow-up სავალდებულოა; ან აპი → განცხადებები → 👤 კაბინეტი"}
+
+    def _t_propose_tg_assign(self, args):
+        import ai_actions
+        card = ai_actions.propose(self.viewer, "tg_assign", {"lead_id": m.s(args.get("lead_ref"), 40), "agent_id": m.s(args.get("agent_ref"), 40)}, self._agents())
+        self.actions.append(card)
+        return {"proposed": True, "action_id": card["action_id"], "note": "ბარათი ეკრანზეა; გადაბარება შესრულდება მხოლოდ დადასტურების შემდეგ."}
+
+    def _t_propose_tg_lead_result(self, args):
+        import ai_actions
+        payload = {"lead_id": m.s(args.get("lead_ref"), 40), "action": m.s(args.get("action"), 20), "follow_up_at": m.s(args.get("follow_up_at"), 20), "note": self.pseudo.restore(m.s(args.get("note"), 300))}
+        card = ai_actions.propose(self.viewer, "tg_lead_result", payload, self._agents())
+        self.actions.append(card)
+        return {"proposed": True, "action_id": card["action_id"], "note": "ბარათი ეკრანზეა; ჩაიწერება მხოლოდ დადასტურების შემდეგ."}
+
+    def _t_propose_tg_queue(self, args):
+        import ai_actions
+        keys = [m.s(k, 40) for k in (args.get("listing_keys") or []) if m.s(k, 40)]
+        card = ai_actions.propose(self.viewer, "tg_queue_decide", {"keys": keys, "action": m.s(args.get("action"), 20)}, self._agents())
+        self.actions.append(card)
+        return {"proposed": True, "action_id": card["action_id"], "note": "ბარათი ეკრანზეა; შესრულდება მხოლოდ დადასტურების შემდეგ."}
 
     # ---------------------------------------------------------------- კადრები
     def _t_recruit_day(self, args):

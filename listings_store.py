@@ -397,6 +397,41 @@ def set_active(listing_id: str, viewer: dict, active: bool) -> dict:
         return {"listing_id": _s(r.get("listing_id")), "active": "yes" if active else "no"}
 
 
+MAX_BULK = 40      # Google Sheets-ის ჩაწერის ლიმიტი (60/წთ) — ერთ მოთხოვნაში ზომიერად
+
+
+def set_active_many(listing_ids, viewer: dict, active: bool) -> dict:
+    """მონიშნული განცხადებების ერთიანი გათიშვა (გაქირავდა/გაიყიდა) ან გააქტიურება. უფლება თითოეულზე ცალკე (მფლობელი/გუნდის ლიდერი/ადმინი) —
+    სხვისი გამოტოვდება. ჩანაწერი არ იშლება. აბრუნებს {changed, skipped, not_found}."""
+    ids = []
+    for i in listing_ids or []:
+        s = _s(i, 40)
+        if s and s not in ids:
+            ids.append(s)
+    if not ids:
+        raise ListingError("მონიშნეთ განცხადებები")
+    if len(ids) > MAX_BULK:
+        raise ListingError(f"ერთდროულად მაქსიმუმ {MAX_BULK}")
+    out = {"changed": 0, "skipped": 0, "not_found": 0, "same": 0}
+    want = "yes" if active else "no"
+    with _lock:
+        rows = {_s(r.get("listing_id")): r for r in all_rows(fresh=True)}
+        for lid in ids:
+            r = rows.get(lid)
+            if not r:
+                out["not_found"] += 1
+                continue
+            if not is_privileged(r, viewer):
+                out["skipped"] += 1
+                continue
+            if (_s(r.get("active")) or "yes").lower() == want:
+                out["same"] += 1
+                continue
+            _backend.update(m.LISTINGS_SHEET, m.LISTING_HEADERS, lid, {"active": want, "last_updated_at": now_str()})
+            out["changed"] += 1
+    return out
+
+
 def map_points(f: dict, viewer: dict, now: datetime.datetime | None = None, limit: int = 5000) -> dict:
     """რუკისთვის: ფილტრებს დაქვემდებარებული განცხადებები **რეალური კოორდინატებით** (გამოგონილ წერტილს არ ვხატავთ). მხოლოდ საჯარო ველები."""
     now = now or now_dt()

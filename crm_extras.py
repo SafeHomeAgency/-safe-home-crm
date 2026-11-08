@@ -726,8 +726,7 @@ def attendance_overview(day_str: str, team: str | None = None, agent_id: str | N
     rows = []
     for a in agents:
         aid = str(a.get("agent_id"))
-        sched = sheets.get_agent_schedule(aid) or {}
-        expected = str(sched.get(weekday_key) or "off")
+        expected = sheets.mode_on(aid, day) or "off"          # გაცვლის ჩათვლით (მხოლოდ ამ თარიღზე)
         rows.append(_row_for(a, day_str, att_by.get(aid), ev_by.get(aid, []), expected, (aid, day_str) in dayoffs))
 
     summary = {

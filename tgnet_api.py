@@ -50,6 +50,8 @@ def register(app, *, authed, audit, rate_limited, client_factory=None, notify=No
     def _is_lead_mgr(agent, admin) -> bool:
         return bool(admin) or str((agent or {}).get("role") or "").strip() == "team_lead"
 
+    globals()["FLOW"] = _flow                 # SAIRO-ს დადასტურებული მოქმედებებისთვის (ai_actions: ლიდის გადაბარება/შედეგი) — იგივე Flow, იგივე შეტყობინებები
+
     def _guard(fn):
         @functools.wraps(fn)
         def wrapper(*a, **kw):
