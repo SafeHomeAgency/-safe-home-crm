@@ -5299,8 +5299,9 @@ async function hubOpenBuilding(b) {
 }
 function hubPill(g) {
   const rent = g.n === 1 && /ქირ/.test(g.items[0].deal || "");
-  const label = g.n === 1 ? hubShort(g.items[0].price) + (rent ? "/თვე" : "") : `from ${hubShort(g.minPrice)} <b>${g.n}</b>`;
-  return `<div class="hub-pill fr-b-${g.fr} ${g.n > 1 ? "multi" : ""} ${g.n === 1 && g.items[0].mine ? "mine" : ""}">${label}</div>`;
+  if (g.n > 1) return `<div class="hub-dot fr-b-${g.fr} ${g.n >= 50 ? "xl" : g.n >= 10 ? "lg" : ""}" title="from ${hubShort(g.minPrice)}">${g.n}</div>`;      // ჯგუფი — კომპაქტური წრე (განიერი „from $…“ ნიშნები ერთმანეთს ფარავდა)
+  const label = hubShort(g.items[0].price) + (rent ? "/თვე" : "");
+  return `<div class="hub-pill fr-b-${g.fr} ${g.items[0].mine ? "mine" : ""}">${label}</div>`;
 }
 async function hubMapRefresh() {
   const h = state.hub, box = document.getElementById("hubMapBox");
@@ -5322,8 +5323,8 @@ async function hubMapRefresh() {
       <div class="hub-map-legend"><span class="fr-green"><i></i>ახალი</span><span class="fr-orange"><i></i>საშუალო</span><span class="fr-red"><i></i>ძველი</span></div>
       <div class="hub-mprev" id="hubMapPrev" hidden></div>`;
     const map = L.map("hubMapCanvas", { zoomControl: true, attributionControl: true, preferCanvas: true, zoomSnap: 0.5, wheelPxPerZoomLevel: 90, markerZoomAnimation: false }).setView([41.7151, 44.8271], 12);
-    L.tileLayer("https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png", { maxZoom: 19, subdomains: "abcd", updateWhenIdle: true, keepBuffer: 2,
-      attribution: "© OpenStreetMap © CARTO" }).addTo(map);   /* მზა მუქი ფილები — CSS filter აღარ არის (ის ტელეფონზე რუკას ანელებდა/ჭედავდა) */
+    L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", { maxZoom: 19, updateWhenIdle: true, keepBuffer: 2, attribution: "© OpenStreetMap" }).addTo(map);
+    /* OpenStreetMap — გასაღების გარეშე მუშაობს Telegram-ის ფანჯარაშიც (CARTO-მ „API KEY REQUIRED“ აჩვენა). CSS filter აღარ არის — ის რუკას ანელებდა/აჭედებდა. */
     const layer = L.layerGroup().addTo(map);
     h.map = { map, layer, fitted: false, points: [], me: null };
     map.on("zoomend moveend", () => hubMapDrawSoon());
@@ -5419,12 +5420,12 @@ function hubMapDraw() {
   m.sig = sig;
   m.layer.clearLayers();
   const proj = (lat, lng) => { const p = m.map.latLngToContainerPoint([lat, lng]); return { x: p.x, y: p.y }; };
-  const split = hubBuildings(vis);
+  const split = m.map.getZoom() >= 16 ? hubBuildings(vis) : { buildings: [], singles: vis };
   split.buildings.forEach((g) => {
     const mk = L.marker([g.lat, g.lng], { icon: L.divIcon({ className: "hub-pin", html: hubBldPill(g), iconSize: null }), zIndexOffset: 500 }).addTo(m.layer);
     mk.on("click", () => hubOpenBuilding(g));
   });
-  hubCluster(split.singles, proj, 70).forEach((g) => {
+  hubCluster(split.singles, proj, 84).forEach((g) => {
     const mk = L.marker([g.lat, g.lng], { icon: L.divIcon({ className: "hub-pin", html: hubPill(g), iconSize: null }) }).addTo(m.layer);
     mk.on("click", () => {
       hubHaptic();

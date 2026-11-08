@@ -840,10 +840,10 @@ button.chip { cursor: pointer; font-family: inherit; }
 #hubChips .hub-row::-webkit-scrollbar { display: none; }
 .hub-chip { white-space: nowrap; flex: 0 0 auto; }
 .hub-ph { aspect-ratio: 16 / 11; }
-.hub-mapbox .leaflet-container { background: #0b1a2a; }
+.hub-mapbox .leaflet-container { background: #e8e4dc; }
 .hub-map-top { left: auto; right: 10px; }
 .hub-map-top .hub-row { flex-wrap: nowrap; }
-/* მუქი ფილები CARTO-დან — CSS filter მოხსნილია (ტელეფონზე რუკას აჭედებდა) */
+/* რუკის ფილებზე CSS filter აღარ არის (ტელეფონზე რუკას აჭედებდა); ფილები — OpenStreetMap */
 .modal .hub-row .btn, .hub-priv .hub-row .btn { flex: 1 1 30%; white-space: nowrap; padding: 11px 8px; font-size: 13px; }
 
 /* ---- Property Hub: შეხვედრები (ბინიდან დაგეგმვა, სია, ტოპები) ---- */
@@ -1262,3 +1262,6 @@ b,strong{font-weight:700}
 .cab-hero .cab-rf{width:auto;flex:0 0 auto;padding:8px 12px}
 .cab-tg a,.hub-ld a[href^="tel:"]{color:#e9c46a;font-weight:700;text-decoration:none}
 .cab-tg .tg-row .btn{flex:1 1 auto;min-width:0}
+.hub-dot{width:34px;height:34px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-weight:800;font-size:13px;color:#fff;background:#2a9d8f;border:3px solid #fff;box-shadow:0 3px 10px rgba(0,0,0,.35);transform:translate(-50%,-50%);font-variant-numeric:tabular-nums}
+.hub-dot.lg{width:42px;height:42px;font-size:14px}.hub-dot.xl{width:50px;height:50px;font-size:15px}
+.hub-dot.fr-b-orange{background:#e76f51}.hub-dot.fr-b-red{background:#c1121f}.hub-dot.fr-b-grey{background:#6c757d}

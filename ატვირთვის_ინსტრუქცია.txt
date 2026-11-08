@@ -1,27 +1,10 @@
 ატვირთვა GitHub-ზე (Add file -> Upload files), შემდეგ Railway Redeploy.
-ფაილების რაოდენობა: 19  (იხ. MANIFEST.json — sha256).
+ფაილების რაოდენობა: 2  (იხ. MANIFEST.json — sha256).
 MANIFEST.json GitHub-ზე ასატვირთი არ არის (ინფორმაციულია).
 
 არ ატვირთოთ/არ შეცვალოთ რეპოში უკვე არსებული: db, migrate_sheets_to_postgres, sheets, index.html, Procfile.
 ახალი ცხრილები Google Sheets-ში თავისით შეიქმნება (ClientCriteria, ...). პაროლები/გასაღებები ამ ნაკრებში არ არის.
 
 ფაილები:
-  ai_actions.py
-  ai_service.py
-  ai_tools_ext.py
   app.js
-  app_guide.py
-  bot.py
-  cabinet_api.py
-  criteria_api.py
-  crm2_api.py
-  crm2_sync.py
-  crm_extras.py
-  kpi.py
-  listings_api.py
-  listings_store.py
-  sheets_gspread.py
-  sheets_postgres.py
   style.css
-  tgnet_api.py
-  webserver.py
