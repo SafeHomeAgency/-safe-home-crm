@@ -4,6 +4,7 @@ import collections
 import datetime
 import json
 import logging
+import os
 import random
 import threading
 import time
@@ -139,32 +140,97 @@ def _worksheet(name: str) -> "_RetryingWorksheet":
     return _RetryingWorksheet(ws)
 
 
-def _cached_records(name: str) -> list[dict]:
-    """`name` ცხრილის ყველა სტრიქონი — მოკლევადიანი კეშით (იხ. ზემოთ).
+def _cache_ttl() -> float:
+    try:
+        return max(5.0, float(os.environ.get("SHEETS_CACHE_TTL", "60")))
+    except ValueError:
+        return 60.0
 
-    `numericise_ignore=['all']`: gspread ნაგულისხმევად თავად ცდილობს
-    ამოიცნოს, "ტექსტივით გამოიყურება თუ რიცხვივით" თითოეული უჯრედი,
-    და თუ მთლიანად ციფრებისგან შედგება (მაგ. `job_id`/`agent_id`-ის
-    შემთხვევითი hex კოდი, რომელიც შემთხვევით მთლიანად ციფრებზე
-    გამოვიდა) — ჩუმად აქცევს Python int-ად. ეს შემდეგ ტექსტური
-    შედარებით ძებნას (`==`, `ws.find(...)`) ამტვრევს, რადგან int != str.
-    ეს სქემის საწყის პრინციპსაც არღვევს — აქ ყველაფერი TEXT-ია,
-    გამონაკლისის გარეშე — ამიტომ ეს ავტომატური გარდაქმნა მთლიანად
-    გამორთულია."""
+
+_STALE_MAX_SECONDS = 600.0          # ამაზე ძველს აღარ ვაბრუნებთ — თავიდან ვკითხულობთ
+_FRESH_OK_SECONDS = 2.5             # "fresh" წაკითხვა: ბოლო 2.5 წმ-ში წაკითხული (და შემდეგ არ შეცვლილა) = იგივეა, Google-ს ორჯერ არ ვთხოვთ
+_gen: dict[str, int] = {}           # ცხრილის "თაობა": ყოველი ჩაწერა ზრდის — ფონური წაკითხვა, რომელიც ჩაწერამდე დაიწყო, ძველს არ ჩაწერს კეშში
+_fetch_locks: dict[str, threading.Lock] = {}
+_refreshing: set = set()
+
+
+def _fetch_lock(name: str) -> threading.Lock:
+    with _records_cache_lock:
+        lk = _fetch_locks.get(name)
+        if lk is None:
+            lk = _fetch_locks[name] = threading.Lock()
+        return lk
+
+
+def _load_into_cache(name: str) -> list[dict]:
+    """Google-იდან ერთი წაკითხვა -> კეში (თუ შუალედში ჩაწერა არ მომხდარა)."""
+    with _records_cache_lock:
+        g0 = _gen.get(name, 0)
+    t0 = time.monotonic()
+    data = _worksheet(name).get_all_records(numericise_ignore=['all'])
+    with _records_cache_lock:
+        if _gen.get(name, 0) == g0:
+            _records_cache[name] = (t0, data)
+    return data
+
+
+def _bg_refresh(name: str) -> None:
+    try:
+        with _fetch_lock(name):
+            _load_into_cache(name)
+    except Exception:  # noqa: BLE001 — ფონური განახლება; ძველი მონაცემი რჩება, შემდეგი წაკითხვა ისევ სცდის
+        logging.getLogger("safehome-crm-sheets").warning("ფონური წაკითხვა ვერ მოხერხდა: %s", name, exc_info=True)
+    finally:
+        with _records_cache_lock:
+            _refreshing.discard(name)
+
+
+def _cached_records(name: str) -> list[dict]:
+    """`name` ცხრილის ყველა სტრიქონი — **სწრაფი კეშით**:
+      * ყველა ჩაწერა ამ პროცესიდან ხდება (ბოტი + Mini App ერთ პროცესშია) და მაშინვე შლის კეშს -> საკუთარი/კოლეგის ცვლილება მაშინვე ჩანს;
+      * SHEETS_CACHE_TTL (ნაგულისხმევად 60 წმ) — მხოლოდ ხელით ცხრილში შეცვლილის (Google Sheets-ში პირდაპირ) დაგვიანებაა;
+      * ვადაგასულზე: ძველს **მაშინვე** ვაბრუნებთ და ფონურად ვაახლებთ (stale-while-revalidate) — მომხმარებელი Google-ს არასდროს ელოდება;
+      * ერთდროულ მოთხოვნებზე Google-ს ერთხელ ვკითხულობთ (single-flight) — 429-ის „ზვავი“ აღარ ხდება.
+    (ადრე: 6 წმ კეში -> ყოველ გახსნაზე მთლიანი ცხრილები თავიდან, ლიმიტი 60/წთ, 429-ზე 15 წმ-მდე ლოდინი = „ჭედავს“.)
+
+    `numericise_ignore=['all']`: ყველაფერი TEXT-ია (hex/ციფრული ID-ები int-ად არ იქცევა)."""
     now = time.monotonic()
     with _records_cache_lock:
         hit = _records_cache.get(name)
-        if hit and (now - hit[0]) < _CACHE_TTL_SECONDS:
+    if hit:
+        age = now - hit[0]
+        if age < _cache_ttl():
             return hit[1]
-    data = _worksheet(name).get_all_records(numericise_ignore=['all'])
-    with _records_cache_lock:
-        _records_cache[name] = (now, data)
-    return data
+        if age < _STALE_MAX_SECONDS:
+            with _records_cache_lock:
+                start = name not in _refreshing
+                if start:
+                    _refreshing.add(name)
+            if start:
+                threading.Thread(target=_bg_refresh, args=(name,), daemon=True, name=f"sheets-refresh-{name}").start()
+            return hit[1]
+    with _fetch_lock(name):                       # ერთი ცივი წაკითხვა ყველასთვის
+        with _records_cache_lock:
+            hit = _records_cache.get(name)
+        if hit and time.monotonic() - hit[0] < _cache_ttl():
+            return hit[1]
+        return _load_into_cache(name)
+
+
+def _fresh_records(name: str) -> list[dict]:
+    """ნამდვილად ახალი მონაცემი (ჩაწერისთვის, სტრიქონის ნომრის გამოსათვლელად): ბოლო 2.5 წმ-ში წაკითხული ან Google-იდან. კეშიც ახლდება."""
+    with _fetch_lock(name):
+        with _records_cache_lock:
+            hit = _records_cache.get(name)
+        if hit and time.monotonic() - hit[0] < _FRESH_OK_SECONDS:
+            return hit[1]
+        return _load_into_cache(name)
 
 
 def _invalidate(name: str) -> None:
     with _records_cache_lock:
         _records_cache.pop(name, None)
+        _gen[name] = _gen.get(name, 0) + 1
     try:                                      # live-განახლება: ცვლილების მრიცხველი (ბოტის/ფონური ჩაწერებიც ჩანს); ხარვეზმა ჩაწერას არ უნდა შეუშალოს
         import live_feed
         live_feed.bump(name)
@@ -1335,7 +1401,7 @@ def clock_in(agent_id: str) -> str:
     with _lock:
         ws = _attendance_ws()
         today = _today_str()
-        records = _cached_records(config.ATTENDANCE_SHEET_NAME)
+        records = _fresh_records(config.ATTENDANCE_SHEET_NAME)
         for idx, r in enumerate(records, start=2):
             if str(r.get("agent_id")) == str(agent_id) and str(r.get("date")) == today:
                 if r.get("clock_in"):
@@ -1359,7 +1425,7 @@ def clock_out(agent_id: str) -> str:
     with _lock:
         ws = _attendance_ws()
         today = _today_str()
-        records = _cached_records(config.ATTENDANCE_SHEET_NAME)
+        records = _fresh_records(config.ATTENDANCE_SHEET_NAME)
         for idx, r in enumerate(records, start=2):
             if str(r.get("agent_id")) == str(agent_id) and str(r.get("date")) == today:
                 if not r.get("clock_in"):
@@ -1393,7 +1459,7 @@ def set_daily_count(agent_id: str, count: int, site: int | None = None,
     today = _today_str()
     with _lock:
         ws = _attendance_ws()
-        records = _cached_records(config.ATTENDANCE_SHEET_NAME)
+        records = _fresh_records(config.ATTENDANCE_SHEET_NAME)
         for idx, r in enumerate(records, start=2):
             if str(r.get("agent_id")) == str(agent_id) and str(r.get("date")) == today:
                 ws.update_cell(idx, ATTENDANCE_HEADERS.index("count_submitted") + 1, count)
@@ -1511,7 +1577,7 @@ def dismiss_warnings_for_day(agent_id: str, day, reason: str = "დამტკ�
     want = day.strftime(crm_time.DATE_FMT)
     with _lock:
         ws = _warnings_ws()
-        records = _cached_records(config.WARNINGS_SHEET_NAME)
+        records = _fresh_records(config.WARNINGS_SHEET_NAME)
         now = _now()
         updates = []
         for idx, r in enumerate(records, start=2):
@@ -1595,7 +1661,7 @@ def delete_warnings(warning_ids: list, deleted_by: str = "") -> int:
         ws = _warnings_ws()
         _invalidate(config.WARNINGS_SHEET_NAME)
         updates = []
-        for idx, r in enumerate(_cached_records(config.WARNINGS_SHEET_NAME), start=2):
+        for idx, r in enumerate(_fresh_records(config.WARNINGS_SHEET_NAME), start=2):
             if str(r.get("warning_id")) in ids and str(r.get("status") or "active") != "deleted":
                 updates.append({"range": f"G{idx}:H{idx}", "values": [["deleted", f"წაშალა: {deleted_by or 'დირექტორი'}"[:200]]]})
         if updates:
@@ -1655,7 +1721,7 @@ def request_warning_dismissals_bulk(warning_ids: list, requested_by: str, reason
     out: list[dict] = []
     with _lock:
         ws = _warnings_ws()
-        records = _cached_records(config.WARNINGS_SHEET_NAME)
+        records = _fresh_records(config.WARNINGS_SHEET_NAME)
         requester_name = agent_name_by_id(requested_by)
         now = _now()
         updates = []
@@ -1687,7 +1753,7 @@ def decide_warning_dismissals_bulk(warning_ids: list, approve: bool, decided_by:
     out: list[dict] = []
     with _lock:
         ws = _warnings_ws()
-        records = _cached_records(config.WARNINGS_SHEET_NAME)
+        records = _fresh_records(config.WARNINGS_SHEET_NAME)
         now = _now()
         updates = []
         for idx, r in enumerate(records, start=2):
@@ -3009,7 +3075,7 @@ def set_district_assignment(week_start: str, agent_id: str, districts: list,
     team = str(agent.get("team", "")).strip()
     with _lock:
         ws = _district_assignments_ws()
-        records = _cached_records(config.DISTRICT_ASSIGNMENTS_SHEET_NAME)
+        records = _fresh_records(config.DISTRICT_ASSIGNMENTS_SHEET_NAME)
         for idx, r in enumerate(records, start=2):
             if (str(r.get("week_start", "")).strip() == str(week_start).strip()
                     and str(r.get("agent_id")) == str(agent_id)):
@@ -3076,7 +3142,7 @@ def set_app_setting(key: str, value: str, updated_by: str = "") -> None:
     key = str(key).strip()
     with _lock:
         ws = _app_settings_ws()
-        records = _cached_records(config.APP_SETTINGS_SHEET_NAME)
+        records = _fresh_records(config.APP_SETTINGS_SHEET_NAME)
         for idx, r in enumerate(records, start=2):
             if str(r.get("key", "")).strip() == key:
                 ws.update(f"A{idx}", [[key, str(value), _now(), updated_by]])

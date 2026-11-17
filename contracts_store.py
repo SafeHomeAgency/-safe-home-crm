@@ -51,7 +51,7 @@ class SheetsBackend:
         self.ensure()
         sg = self._sg()
         if fresh:
-            return sg._worksheet(name).get_all_records(numericise_ignore=["all"])
+            return sg._fresh_records(name)          # ერთდროულ "fresh" მოთხოვნებზე Google-ს ერთხელ (2.5 წმ ფანჯარა); კეშიც ახლდება
         return sg._cached_records(name)
 
     def append(self, name: str, headers: list[str], d: dict) -> None:

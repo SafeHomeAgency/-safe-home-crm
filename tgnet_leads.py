@@ -269,7 +269,7 @@ class Flow:
 
     def my_leads(self, agent_id: str) -> list[dict]:
         out = []
-        for r in st.list_lead_rows(fresh=True):
+        for r in st.list_lead_rows():                 # კეშიდან: ყველა ჩაწერა ამ პროცესიდანაა და კეშს მაშინვე ასუფთავებს
             if r["kind"] != "lead" or str(r["assigned_agent_id"]) != str(agent_id) or r["status"] == "closed":
                 continue
             lst = self.get_listing(r["listing_key"]) if r["listing_key"] else None
@@ -334,7 +334,7 @@ def _short(s) -> str:
 def leads_view(get_listing, agents, viewer_team: str = "", admin: bool = True) -> dict:
     """მენეჯერის ეკრანი: ლიდები (ახლები ზევით) + „ყველაზე დაინტერესებული განცხადებები“. თიმლიდერი მხოლოდ თავისი გუნდის განცხადებებს ხედავს."""
     names = {str(a.get("agent_id")): str(a.get("name") or "") for a in agents()}
-    out, rows = [], st.list_lead_rows(fresh=True)
+    out, rows = [], st.list_lead_rows()                 # კეშიდან (ჩაწერისას მაშინვე სუფთავდება) — ეკრანის გახსნა Google-ს აღარ ელოდება
     for r in rows:
         if r["kind"] != "lead" or r["status"] == "closed":          # დახურული (წაშლილი) ეკრანზე აღარ ჩანს — ჩანაწერი რჩება აუდიტისთვის
             continue

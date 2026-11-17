@@ -56,6 +56,8 @@ def parse_filters(args=None) -> dict:
         "pets": g("pets") if g("pets") in ("yes", "no", "ask") else "",
         "turkeys": "yes" if g("turkeys") in ("yes", "1", "true") else "",
         "street": g("street")[:60],
+        # ძველი (🟠/🔴/ნაცრისფერი) ნაგულისხმევად დამალულია ზოგად სიასა და რუკაზე; all=1 -> ყველა. „ჩემი“/ფავორიტები/ID-ით ძებნა ყოველთვის ყველას აჩვენებს
+        "show_old": g("all") in ("1", "true", "yes"),
     }
 
 

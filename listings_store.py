@@ -291,11 +291,37 @@ def _sort(rows: list[dict], key: str, now: datetime.datetime) -> list[dict]:
     return sorted(rows, key=newest, reverse=True)
 
 
+HIDE_OLD_DEFAULT = ("orange", "red", "grey")
+
+
+def hidden_colors(f: dict) -> set:
+    """რომელი ფერები იმალება: მხოლოდ ზოგად ხედში (არა „ჩემი“, ფავორიტები, ID/ტექსტით ძებნა, ფერის არჩევა, all=1). ადმინს შეუძლია შეცვალოს (HUB_HIDE_OLD)."""
+    import os
+    if f.get("show_old") or f.get("mine") or f.get("ids") or f.get("freshness") or f.get("agent_id") or re.search(r"\d{5,}", str(f.get("q") or "")):
+        return set()
+    if "show_old" not in f:                          # ძველი გამომძახებლები (ტესტები/შიდა) — უცვლელი ქცევა
+        return set()
+    raw = os.environ.get("HUB_HIDE_OLD")
+    cols = HIDE_OLD_DEFAULT if raw is None else tuple(c.strip() for c in raw.split(",") if c.strip())
+    return {c for c in cols if c in m.FRESH_LABELS}
+
+
 def query(f: dict, viewer: dict, now: datetime.datetime | None = None) -> dict:
     """f — უკვე ვალიდირებული ფილტრები (listings_api); viewer = {agent_id, role, team, admin}."""
     now = now or now_dt()
     th = m.thresholds()
     rows = all_rows()
+    hide = hidden_colors(f)
+    hidden_old = 0
+    if hide:
+        keep = []
+        for r in rows:
+            if m.freshness(r, now, th)["color"] in hide:
+                if _match(r, f, viewer):
+                    hidden_old += 1
+                continue
+            keep.append(r)
+        rows = keep
     base = [r for r in rows if _match(r, f, viewer)]
     wanted = {c for c in (f.get("freshness") or []) if c in m.FRESH_LABELS}
     if wanted:
@@ -343,7 +369,8 @@ def query(f: dict, viewer: dict, now: datetime.datetime | None = None) -> dict:
                    "streets": streets, "cities": cities, "fresh": fcount,
                    "deal_types": sorted({_s(r.get("deal_type")) for r in visible_all if _s(r.get("deal_type"))}),
                    "property_types": sorted({_s(r.get("property_type")) for r in visible_all if _s(r.get("property_type"))})},
-        "meta": {"total_all": len(visible_all), "mine_total": mine_total, "thresholds": th, "fresh_labels": m.FRESH_LABELS},
+        "meta": {"total_all": len(visible_all), "mine_total": mine_total, "thresholds": th, "fresh_labels": m.FRESH_LABELS,
+                 "hidden_old": hidden_old, "hidden_colors": sorted(hide)},
     }
 
 
@@ -437,11 +464,15 @@ def map_points(f: dict, viewer: dict, now: datetime.datetime | None = None, limi
     now = now or now_dt()
     th = m.thresholds()
     wanted = {c for c in (f.get("freshness") or []) if c in m.FRESH_LABELS}
-    pts, nocoord = [], 0
+    hide = hidden_colors(f)
+    pts, nocoord, hidden_old = [], 0, 0
     for r in all_rows():
         if not _match(r, f, viewer):
             continue
         fr = m.freshness(r, now, th)["color"]
+        if fr in hide:
+            hidden_old += 1
+            continue
         if wanted and fr not in wanted:
             continue
         lat, lng = m.num(r.get("lat")), m.num(r.get("lng"))
@@ -449,7 +480,7 @@ def map_points(f: dict, viewer: dict, now: datetime.datetime | None = None, limi
             nocoord += 1
             continue
         ph = m.photo_list(r)
-        pts.append({"id": _s(r.get("listing_id")), "lat": lat, "lng": lng, "price": m.num(r.get("price_usd")), "deal": _s(r.get("deal_type")),
+        pts.append({"id": _s(r.get("listing_id")), "lat": round(lat, 6), "lng": round(lng, 6), "price": m.num(r.get("price_usd")), "deal": _s(r.get("deal_type")),
                     "rooms": _s(r.get("rooms")), "area": m.num(r.get("area")), "fr": fr, "photo": ph[0] if ph else "",
                     "floor": _s(r.get("floor")), "floors": _s(r.get("floors")), "addr": _s(r.get("address")), "b": m.building_key(r),
                     "district": _s(r.get("district")), "mine": bool(viewer.get("agent_id") and _s(r.get("agent_id")) == _s(viewer.get("agent_id"))),
@@ -458,7 +489,7 @@ def map_points(f: dict, viewer: dict, now: datetime.datetime | None = None, limi
     pts.sort(key=lambda p: (p["_c"], p["id"]), reverse=True)
     for p in pts:
         p.pop("_c", None)
-    return {"points": pts[:limit], "total": len(pts), "no_coords": nocoord, "truncated": len(pts) > limit}
+    return {"points": pts[:limit], "total": len(pts), "no_coords": nocoord, "truncated": len(pts) > limit, "hidden_old": hidden_old}
 
 
 def insights(viewer: dict, now: datetime.datetime | None = None) -> dict:

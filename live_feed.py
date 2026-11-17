@@ -16,8 +16,14 @@ _at = 0.0
 _names: dict[str, int] = {}
 
 
+# ტექნიკური ჩანაწერები (ჟურნალები, worker-ის სიგნალი, სესიები) — მომხმარებლის ეკრანზე არაფერს ცვლის; ადრე ამაზე ყველა გახსნილი ეკრანი რამდენიმე წამში თავიდან იტვირთებოდა.
+QUIET = {"AuditLog", "WorkerHeartbeat", "TgLog", "AiActions", "AiUsage", "AiLog", "AiConversations", "AiMessages", "LeadGuardLog", "NotificationLog", "Sessions", "RateLimit", "SystemHealth"}
+
+
 def bump(name: str = "") -> None:
     global _seq, _at
+    if name in QUIET or str(name).startswith(("Ai", "Log", "/internal/worker", "/api/ai/")):
+        return
     with _lock:
         _seq += 1
         _at = time.time()
@@ -28,6 +34,16 @@ def bump(name: str = "") -> None:
 def snapshot() -> dict:
     with _lock:
         return {"seq": _seq, "epoch": _epoch, "at": int(_at)}
+
+
+def snapshot_since(since) -> dict:
+    """snapshot + რა შეიცვალა `since`-ის მერე (ცხრილის სახელები / API გზები) — კლიენტი მხოლოდ საჭირო ეკრანს აახლებს."""
+    out = snapshot()
+    try:
+        out["changed"] = changed_since(int(since))[:40] if since not in (None, "") else []
+    except (TypeError, ValueError):
+        out["changed"] = []
+    return out
 
 
 def changed_since(since: int) -> list[str]:

@@ -4914,6 +4914,7 @@ function hubQS(page, forMap) {
   add("floors_min", h.tmin); add("floors_max", h.tmax); add("pets", e.pets);
   if (e.turkeys) p.push("turkeys=yes");
   add("street", h.street);
+  if (h.showOld) p.push("all=1");                    // ძველები (🟠/🔴/ნაცრისფერი) ნაგულისხმევად დამალულია — სერვერზე
   if (h.notFirst) p.push("not_first=1");
   if (h.notLast) p.push("not_last=1");
   if (h.mine) p.push("mine=1");
@@ -4971,7 +4972,8 @@ function hubDrawChips() {
       <button class="hub-chip ${h.favOnly ? "on" : ""}" data-hub-favonly="1">♥ ფავორიტები (${hubFavs().length})</button>
       <button class="hub-chip ${h.myDist ? "on" : ""}" data-hub-mydist="1">📍 ჩემი რაიონები</button></div>
     ${h.myDist ? `<div class="hub-note" style="margin-bottom:8px">${h.myDistNames && h.myDistNames.length ? "📍 ამ კვირის რაიონები: " + h.myDistNames.map(esc).join(", ") : "ამ კვირას რაიონი ჯერ არ გაქვთ მინიჭებული — ორშაბათს ავტომატურად გადანაწილდება ან მენეჯერი მოგანიჭებთ."}</div>` : ""}
-    <div class="hub-row">${["green", "orange", "red", "grey"].map((c) => `<button class="hub-chip fr-${c} ${h.fresh.includes(c) ? "on" : ""}" data-hub-fr="${c}"><i></i>${HUB_FR[c]}${fc[c] != null ? ` <b>${fc[c]}</b>` : ""}</button>`).join("")}</div>
+    <div class="hub-row">${["green", "orange", "red", "grey"].map((c) => `<button class="hub-chip fr-${c} ${h.fresh.includes(c) ? "on" : ""}" data-hub-fr="${c}"><i></i>${HUB_FR[c]}${fc[c] ? ` <b>${fc[c]}</b>` : ""}</button>`).join("")}
+      ${h.meta && (h.meta.hidden_old || h.showOld) ? `<button class="hub-chip ${h.showOld ? "on" : ""}" data-hub-old="1" title="ძველი განცხადებები ზოგად სიაში დამალულია (არ წაშლილა). „⭐ ჩემი“-ში ყოველთვის ჩანს — დაადასტურეთ და ისევ გამწვანდება.">🕘 ${h.showOld ? "ძველების დამალვა" : `ძველებიც (${h.meta.hidden_old})`}</button>` : ""}</div>
     ${sm.chips.length ? `<div class="hub-row hub-smart"><span class="hub-k" style="margin:0">ჭკვიანი ძიება:</span>${sm.chips.map((c) => `<span class="hub-chip on">${esc(c)}</span>`).join("")}</div>` : ""}`;
   const fb = document.getElementById("hubFilterBtn");
   if (fb) { const n = hubActiveCount(); fb.textContent = "⚙️" + (n ? " " + n : ""); fb.classList.toggle("hub-on", n > 0); }
@@ -4979,6 +4981,7 @@ function hubDrawChips() {
   el.querySelectorAll("[data-hub-mine]").forEach((b) => { b.onclick = () => { hubHaptic(); h.mine = !h.mine; hubReload(); }; });
   el.querySelectorAll("[data-hub-mydist]").forEach((b) => { b.onclick = () => { hubHaptic(); h.myDist = !h.myDist; hubReload(); }; });
   el.querySelectorAll("[data-hub-favonly]").forEach((b) => { b.onclick = () => { hubHaptic(); h.favOnly = !h.favOnly; hubReload(); }; });
+  el.querySelectorAll("[data-hub-old]").forEach((b) => { b.onclick = () => { hubHaptic(); h.showOld = !h.showOld; if (h.map) h.map.fitted = false; hubReload(); }; });
   el.querySelectorAll("[data-hub-fr]").forEach((b) => { b.onclick = () => { hubHaptic(); const c = b.dataset.hubFr; h.fresh = h.fresh.includes(c) ? h.fresh.filter((x) => x !== c) : h.fresh.concat(c); hubReload(); }; });
 }
 /* პანელის ველების მნიშვნელობები state-ში (ღილაკზე დაჭერისას პანელი თავიდან იხატება — ჩაწერილი არ უნდა დაიკარგოს) */
@@ -5342,7 +5345,7 @@ async function hubMapRefresh() {
   h.map.points = data.points; h.map.ver = (h.map.ver || 0) + 1; h.map.sig = null;
   const byCity = hubMapCityCounts(data.points);
   box.querySelectorAll("[data-hub-city]").forEach((b) => { const n = byCity[b.dataset.hubCity] || 0; b.innerHTML = `${esc(b.dataset.hubCity)}${n ? ` <b>${n}</b>` : ""}`; });
-  if (info) info.textContent = `🗺 ${data.total} განცხადება რუკაზე${data.no_coords ? ` · ${data.no_coords} კოორდინატის გარეშე (სიაში ჩანს)` : ""}${data.truncated ? " · ნაწილი (დააზუსტეთ ფილტრი)" : ""}`;
+  if (info) info.textContent = `🗺 ${data.total} განცხადება რუკაზე${data.no_coords ? ` · ${data.no_coords} კოორდინატის გარეშე (სიაში ჩანს)` : ""}${data.hidden_old ? ` · 🕘 ${data.hidden_old} ძველი დამალულია (ზემოთ „ძველებიც“)` : ""}${data.truncated ? " · ნაწილი (დააზუსტეთ ფილტრი)" : ""}`;
   if (data.points.length && !h.map.fitted) {
     h.map.fitted = true;
     // საწყისი ხედი — ქალაქი, სადაც ყველაზე მეტი განცხადებაა (თბილისი+ბათუმი ერთად ძალიან შორიდან ჩანდა); რაიონის/ქუჩის ფილტრზე — ზუსტად იმ წერტილებზე
@@ -6261,25 +6264,75 @@ function liveIdle() {
   if (mb && !mb.hidden) return false;
   return Date.now() - L.input > 15000;                // ბოლო 15 წმ-ში არაფერი უკრეფია (დაუსრულებელი ფორმა არ დაიკარგოს)
 }
+/* რომელ ეკრანს რომელი ცვლილება ეხება (ცხრილის სახელი / API გზა). სხვა ცვლილებაზე ეკრანი არ იტვირთება თავიდან (ადრე ნებისმიერზე — ყველას, ყოველ რამდენიმე წამში). */
+const LIVE_DEPS = {
+  today: ["Tasks", "Attendance", "Meetings", "Reports", "MyHomeJobs", "Warnings", "DayOff", "Schedule", "ShiftSwaps", "District", "/api/tasks", "/api/attendance", "/api/report"],
+  tasks: ["Tasks", "/api/tasks"], kpi: ["Tasks", "Attendance", "Meetings", "Reports", "MyHomeJobs", "Warnings", "HubMeetings", "Clients"],
+  overview: ["Tasks", "Attendance", "Meetings", "Reports", "MyHomeJobs", "Warnings", "DayOff", "Agents", "HubMeetings"], team: ["Agents", "Attendance", "Tasks", "Warnings", "Schedule", "DayOff"],
+  ranking: ["Tasks", "Meetings", "Reports", "MyHomeJobs", "Attendance", "HubMeetings", "Clients"],
+  hub: ["Listings", "HubMeetings", "ClientCriteria", "Tasks", "TgLeads", "Exclusives", "Clients", "FollowUps", "/api/hub", "/api/listings", "/api/tgnet", "/api/tasks", "/api/crm2"],
+  myhomejobs: ["MyHomeJobs", "/api/myhome"], myhomestats: ["MyHomeJobs"], warnings: ["Warnings", "DayOff", "ShiftSwaps", "/api/warnings"],
+  dayoffs: ["DayOff", "/api/dayoff"], mydayoffs: ["DayOff", "/api/dayoff"], swaps: ["ShiftSwaps", "Schedule", "/api/swaps"],
+  crm2: ["Clients", "FollowUps", "Activities", "Owners", "Properties", "/api/crm2"], tgnet: ["TgChannels", "TgPosts", "TgLeads", "TgSettings", "/api/tgnet", "Listings"],
+  finance: ["Fin", "/api/finance"], contracts: ["Contract", "/api/contracts"], exclusives: ["Exclusive", "/api/exclusives"], meetings: ["Meetings", "/api/meetings", "/api/hub"],
+  questions: ["Questions", "/api/questions"], attendance: ["Attendance", "Schedule", "DayOff", "ShiftSwaps", "/api/attendance"], myattendance: ["Attendance", "/api/attendance"],
+  districts: ["District", "/api/districts"], agentrequests: ["AgentRequests", "/api/agent-requests"], reports: ["Reports", "/api/reports"], agentsmgmt: ["Agents", "/api/agents"],
+  admintasks: ["Tasks", "/api/tasks"], taskhistory: ["Tasks"], recruit: ["ecruit", "/api/recruit"], regulations: [],
+};
+const LIVE_DASH = new Set(["today", "tasks", "kpi", "overview", "team", "ranking"]);
+function liveRelevant(tab, changed) {
+  const deps = LIVE_DEPS[tab];
+  if (!deps || !Array.isArray(changed) || !changed.length) return true;                    // უცნობი ეკრანი / ახალი სერვერი -> განახლება
+  return changed.some((n) => { const s = String(n).toLowerCase(); return deps.some((k) => s.includes(k.toLowerCase())); });
+}
+/* ეკრანის „რბილი“ განახლება: ძველი ჩანს მანამ, სანამ ახალი არ მოვა („იტვირთება…“ არ ჩნდება), სქროლი რჩება ადგილზე, შეცდომისას ძველი რჩება. */
+async function liveSoftRender(tab) {
+  if (state.tab[state.role] !== tab) return;
+  const y = window.scrollY, old = lazyCache[tab];
+  state._liveSoft = true;
+  try {
+    if (LIVE_DASH.has(tab)) {
+      const d = await api("/api/dashboard?period=" + encodeURIComponent(state.period));
+      if (state.tab[state.role] !== tab) return;
+      state.data = d; updateSubtitle();
+    } else if (tab === "hub") {
+      const h = state.hub;
+      if (h.view === "meet") await hubLoadMeet();
+      else if (h.view === "list") { await hubLoad(false); hubLoadIns(); }
+      hubLoadMeetBadge();
+      return;
+    } else if (old !== undefined) delete lazyCache[tab];
+    await renderContent();
+    if (old !== undefined && lazyCache[tab] === undefined) { lazyCache[tab] = old; await renderContent(); }   // ქსელის ხარვეზი — ძველი ხედი რჩება
+  } finally {
+    state._liveSoft = false;
+    try { window.scrollTo(0, y); } catch (e) { /* ignore */ }
+  }
+}
 async function liveTick(force) {
   const L = state.live;
   if (L.busy || (document.hidden && !force)) return;
   L.busy = true;
   try {
-    const d = await api("/api/live?nocache=1");
+    const d = await api("/api/live?nocache=1&since=" + (L.seq == null ? "" : L.seq));
     if (L.seq === null) { L.seq = d.seq; L.epoch = d.epoch; return; }
     if (d.seq === L.seq && d.epoch === L.epoch) return;
-    if (Date.now() - L.self < 4000) { L.seq = d.seq; L.epoch = d.epoch; return; }        // ჩემივე ცვლილებაა — ეკრანი უკვე განახლდა
-    if (!liveIdle() || Date.now() - L.last < 8000) return;                                // მოგვიანებით (მრიცხველს არ ვაახლებთ — შემდეგი ცდა ისევ ნახავს)
-    L.seq = d.seq; L.epoch = d.epoch;
     const tab = state.tab[state.role];
+    if (d.epoch === L.epoch && !liveRelevant(tab, d.changed)) {                             // ცვლილება ამ ეკრანს არ ეხება — სხვა ტაბებს მოგვიანებით (გადასვლისას) განვაახლებთ
+      L.seq = d.seq;
+      state.lazyStale = new Set([...(state.lazyStale || []), ...Object.keys(lazyCache)]);
+      return;
+    }
+    if (Date.now() - L.self < 4000) { L.seq = d.seq; L.epoch = d.epoch; return; }        // ჩემივე ცვლილებაა — ეკრანი უკვე განახლდა
+    if (!liveIdle() || Date.now() - L.last < 6000) return;                                // მოგვიანებით (მრიცხველს არ ვაახლებთ — შემდეგი ცდა ისევ ნახავს)
+    L.seq = d.seq; L.epoch = d.epoch;
     if (LIVE_SKIP.has(tab) || (tab === "hub" && state.hub && state.hub.view === "map")) return;
     L.last = Date.now();
     try { _apiGetCache.clear(); } catch (e) { /* ignore */ }
-    for (const k in lazyCache) delete lazyCache[k];
+    state.lazyStale = new Set(Object.keys(lazyCache).filter((k) => k !== tab));             // სხვა ტაბები: ძველი ჩანს მყისიერად, ახალი — ფონურად გადასვლისას
     if (state.rec) { state.rec.home = null; state.rec.list = null; state.rec.cal = null; state.rec.stats = null; }
     if (state.tg) { state.tg.data = null; state.tg.queue = null; state.tg.leads = null; }
-    await renderContent();
+    await liveSoftRender(tab);
   } catch (e) { /* ქსელი/401 — შემდეგ ცდაზე */ } finally { L.busy = false; }
 }
 function liveStart() {
@@ -7642,8 +7695,9 @@ async function renderContent() {
     if (tab === "system") { await renderSystem(content); return; }
     if (tab === "ai") { await renderAi(content); return; }
     if (LAZY_ENDPOINTS[tab]) {
+      if (lazyCache[tab] && state.lazyStale && state.lazyStale.delete(tab)) setTimeout(() => liveSoftRender(tab), 30);   // ძველი ჩანს მყისიერად, ახალი — ფონურად
       if (!lazyCache[tab]) {
-        content.innerHTML = `<div class="card"><div class="empty">იტვირთება…</div></div>`;
+        if (!state._liveSoft) content.innerHTML = `<div class="card"><div class="empty">იტვირთება…</div></div>`;
         try {
           let url = LAZY_ENDPOINTS[tab];
           const params = [];

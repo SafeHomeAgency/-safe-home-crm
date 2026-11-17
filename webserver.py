@@ -124,7 +124,7 @@ def api_live():
     if err:
         return err
     import live_feed
-    return jsonify(**live_feed.snapshot())
+    return jsonify(**live_feed.snapshot_since(request.args.get("since")))
 
 
 _GZIP_TYPES = ("text/html", "text/css", "text/plain", "application/javascript", "text/javascript", "application/json")
@@ -3248,6 +3248,14 @@ listings_api.register(
     interest=lambda: hubmeet_store.interest_counts(30),
     my_districts=lambda agent_id: _agent_districts_for(agent_id, crm_time.week_start().strftime(crm_time.DATE_FMT)),
 )
+
+# safehome.ge საჯარო საიტი — მუშაობს მხოლოდ SITE_HOSTS ჰოსტზე (CRM-ის ჰოსტზე არაფერს ცვლის); SITE_ENABLED=0 გამორთავს
+try:
+    import site_public  # noqa: E402
+
+    site_public.register(app, get_rows=listings_store.all_rows)
+except Exception:  # noqa: BLE001 — საიტის ჩავარდნა CRM-ს არ აჩერებს
+    log.exception("site_public ვერ ჩაირთო")
 
 
 def _hub_find_listing(listing_id):
