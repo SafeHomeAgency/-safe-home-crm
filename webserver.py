@@ -25,6 +25,7 @@ import json
 import logging
 import os
 import re
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -324,6 +325,10 @@ def _validate_init_data(init_data: str, quiet: bool = False) -> dict | None:
     None-ს."""
     # PHASE 1.5: HMAC + auth_date ვადა (crm_security.validate_init_data).
     # ლოგში მხოლოდ მოკლე მიზეზი იწერება — initData/hash არასდროს.
+    if not init_data:
+        site = _validate_site_auth()
+        if site:
+            return site
     user, reason = crm_security.validate_init_data(
         init_data, config.TELEGRAM_BOT_TOKEN,
         config.INITDATA_MAX_AGE_SECONDS, config.INITDATA_FUTURE_SKEW_SECONDS,
@@ -333,6 +338,34 @@ def _validate_init_data(init_data: str, quiet: bool = False) -> dict | None:
             log.warning("initData უარყოფილია: %s", reason)
         return None
     return {"user": user["user"], "auth_date": user["auth_date"]}
+
+
+def _validate_site_auth() -> dict | None:
+    """საიტის ხიდი (X-Site-Auth): `<telegram_id>.<exp>.<hmac_sha256(SITE_BRIDGE_SECRET, "<id>.<exp>")>`.
+    საიტი მომხმარებელს თავისი სესიით ადასტურებს და ხელს აწერს მოკლე ვადით; აქ მომხმარებელი ისე ამოიცნობა, თითქოს
+    Mini App-იდან შემოვიდა — როლები/უფლებები უცვლელია (აგენტების ცხრილი + ADMIN_CHAT_IDS). საიდუმლო ცარიელია -> გამორთულია."""
+    secret = config.SITE_BRIDGE_SECRET
+    if not secret:
+        return None
+    try:
+        hdr = request.headers.get("X-Site-Auth", "")
+    except RuntimeError:  # request-ის კონტექსტის გარეშე
+        return None
+    if not hdr:
+        return None
+    try:
+        tid, exp, mac = hdr.split(".")
+        tid_i, exp_i = int(tid), int(exp)
+    except ValueError:
+        return None
+    now = int(time.time())
+    if exp_i < now or exp_i > now + 180:
+        return None
+    good = hmac.new(secret.encode(), f"{tid_i}.{exp_i}".encode(), hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(good, mac):
+        log.warning("X-Site-Auth უარყოფილია: ხელმოწერა")
+        return None
+    return {"user": {"id": tid_i}, "auth_date": now}
 
 
 def _authed_agent():

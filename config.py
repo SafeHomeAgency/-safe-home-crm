@@ -105,6 +105,9 @@ def _int_list(name: str, default: str) -> list[int]:
 INITDATA_MAX_AGE_SECONDS = int(os.environ.get("TELEGRAM_INITDATA_MAX_AGE_SECONDS", "86400"))
 # რამდენი წამით "მომავალში" დაშვებულია auth_date (საათების უმნიშვნელო სხვაობა)
 INITDATA_FUTURE_SKEW_SECONDS = int(os.environ.get("TELEGRAM_INITDATA_FUTURE_SKEW_SECONDS", "60"))
+# საიტის (safehome.ge /work/) ხიდი: საიტი აგზავნის `X-Site-Auth: <telegram_id>.<exp>.<hmac_sha256>` (ვადა ≤ 3 წთ).
+# ცარიელი -> ხიდი გამორთულია (ნაგულისხმევი). მნიშვნელობა მხოლოდ Railway Variables-ში, იგივე რაც საიტის CRM_BRIDGE_SECRET.
+SITE_BRIDGE_SECRET = os.environ.get("SITE_BRIDGE_SECRET", "")
 
 # worker heartbeat: რამდენი წამის შემდეგ ითვლება worker stale/offline
 WORKER_HEARTBEAT_STALE_SECONDS = int(os.environ.get("WORKER_HEARTBEAT_STALE_SECONDS", "300"))
