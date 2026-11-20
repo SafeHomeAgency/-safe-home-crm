@@ -1,0 +1,6 @@
+Railway -> CRM სერვისი -> Variables -> New Variable
+
+სახელი:  SITE_BRIDGE_SECRET
+მნიშვნელობა:  cba7e6db2620877172ecde8389d1174a68b749a799c4d732bf1e608e5342adf1
+
+(ეს ფაილი ატვირთვის შემდეგ წაშალე. ჩატში არ ჩასვა.)
