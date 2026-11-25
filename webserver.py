@@ -713,6 +713,14 @@ def api_myhome_jobs_create():
 
     team = str(agent.get("team", "")).strip()
     account = sheets.get_myhome_account_for_team(team)
+    # აგენტს პირადი, ადმინის მიერ დადასტურებული ექსთენშენი თუ აქვს (საკუთარი MyHome ანგარიშით) — job მასზე მიდის
+    try:
+        import myhome_ext_accounts
+        _own = myhome_ext_accounts.label_for_agent(agent.get("agent_id"))
+        if _own:
+            account = {"manager_label": _own}
+    except Exception:  # noqa: BLE001
+        log.exception("ექსთენშენის ანგარიშის შემოწმება ვერ მოხერხდა")
     if not account or not str(account.get("manager_label", "")).strip():
         return jsonify(
             error="თქვენი გუნდისთვის MyHome ანგარიში ჯერ არაა მიბმული — მიმართეთ ადმინს"
@@ -2818,8 +2826,6 @@ def _authed_worker():
     (MYHOME_WORKER_API_KEYS=label=key,...): ასეთი გასაღები მხოლოდ თავისი იარლიყის (manager_label / worker_id=ext-<label>) მოთხოვნებს
     ემსახურება, ამიტომ ერთი კომპიუტერის გასაღები სხვა ანგარიშის job-ებს ვერ აიღებს და ცალკე ბათილდება."""
     keys = getattr(config, "MYHOME_WORKER_API_KEYS", {}) or {}
-    if not config.MYHOME_WORKER_API_KEY and not keys:
-        return jsonify(error="ეს endpoint გამორთულია"), 404
     got = request.headers.get("Authorization", "")
     if config.MYHOME_WORKER_API_KEY and hmac.compare_digest(got, f"Bearer {config.MYHOME_WORKER_API_KEY}"):
         return None
@@ -2827,6 +2833,16 @@ def _authed_worker():
     for label, key in keys.items():
         if hmac.compare_digest(got, f"Bearer {key}"):
             bound = label
+    if bound is None:
+        # Chrome Web Store-ის ექსთენშენი: ადმინის მიერ დადასტურებული პირადი გასაღები (shx_…) — მხოლოდ თავის იარლიყზე
+        try:
+            import myhome_ext_accounts
+            bound = myhome_ext_accounts.label_for_key(got)
+        except Exception:  # noqa: BLE001
+            log.exception("ექსთენშენის გასაღების შემოწმება ვერ მოხერხდა")
+            bound = None
+    if bound is None and not config.MYHOME_WORKER_API_KEY and not keys and not got.startswith("Bearer shx_"):
+        return jsonify(error="ეს endpoint გამორთულია"), 404
     if bound is None:
         return jsonify(error="ავტორიზაცია ვერ დადასტურდა"), 401
     label = str(request.args.get("manager_label") or "").strip()
@@ -3236,6 +3252,39 @@ myhome_accounts_api.register(
     app, authed=_authed_agent, authed_worker=_authed_worker, audit=_audit,
     rate_limited=rate_limited, sheets=_SheetsProxy(), get_agents=lambda: sheets.get_agents(),
 )
+
+
+# Chrome Web Store-ის ექსთენშენი: ანგარიშის მოთხოვნა -> ადმინის დადასტურება Telegram-ში -> პირადი გასაღები
+_EXT_KEY_ALLOWED = re.compile(r"^/internal/(myhome-jobs/next|myhome-jobs/[^/]+/(complete|stage)|worker/heartbeat|ext/base(/\d+)?)$")
+
+
+@app.before_request
+def _ext_key_scope():
+    """აგენტის ექსთენშენის გასაღებს (shx_…) მხოლოდ საკუთარი job-ების აღება/დასრულება და „ბაზაში“ ჩაწერა შეუძლია —
+    ექსპორტი, მასობრივი შექმნა, პაროლების რიგი და სხვა შიდა endpoint-ები მისთვის დახურულია."""
+    if request.path.startswith("/internal/") and request.headers.get("Authorization", "").startswith("Bearer shx_") \
+            and not _EXT_KEY_ALLOWED.match(request.path):
+        return jsonify(error="ამ გასაღებით მიუწვდომელია"), 403
+    return None
+
+
+def _ext_notify_admins(text, markup=None):
+    for _admin_id in config.ADMIN_CHAT_IDS:
+        try:
+            _send_telegram_message(_admin_id, text, reply_markup=markup)
+        except Exception:  # noqa: BLE001
+            log.exception("ექსთენშენის მოთხოვნის შეტყობინება ვერ გაიგზავნა")
+
+
+try:
+    import myhome_ext_accounts  # noqa: E402
+    myhome_ext_accounts.register(
+        app, authed=_authed_agent, authed_worker=_authed_worker, audit=_audit, sheets=_SheetsProxy(),
+        get_agents=lambda: sheets.get_agents(), notify_admins=_ext_notify_admins,
+        sheety_url=os.environ.get("SHEETY_URL", "").strip(),
+    )
+except Exception:  # noqa: BLE001
+    log.exception("myhome_ext_accounts ვერ ჩაირთო")
 
 
 # ხელშეკრულებების აღრიცხვა (Contract Management): /api/contracts/... — ახალი endpoint-ები, არსებულს არ ცვლის

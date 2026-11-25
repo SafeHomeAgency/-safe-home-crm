@@ -173,6 +173,9 @@ def register(app, *, authed, authed_worker, audit, rate_limited, sheets, get_age
     @app.get("/internal/worker/pending-accounts")
     @rate_limited("worker")
     def worker_pending_accounts():
+        # Chrome Web Store-ის ექსთენშენის (აგენტის) გასაღებს სხვისი პაროლების ნახვის უფლება არ აქვს
+        if request.headers.get("Authorization", "").startswith("Bearer shx_"):
+            return jsonify(error="ამ გასაღებით მიუწვდომელია"), 403
         err = authed_worker()
         if err:
             return err
@@ -181,6 +184,8 @@ def register(app, *, authed, authed_worker, audit, rate_limited, sheets, get_age
     @app.post("/internal/worker/accounts-ack")
     @rate_limited("worker")
     def worker_accounts_ack():
+        if request.headers.get("Authorization", "").startswith("Bearer shx_"):
+            return jsonify(error="ამ გასაღებით მიუწვდომელია"), 403
         err = authed_worker()
         if err:
             return err

@@ -2462,6 +2462,9 @@ async function openMhAccountsModal() {
   box.innerHTML = `
     <h3>⚙️ MyHome ანგარიშები<button class="close" id="modalClose">✕</button></h3>
     ${list}
+    <h3 style="margin-top:14px">🧩 ექსთენშენის ანგარიშები</h3>
+    <div class="sub" style="white-space:normal;margin-bottom:6px">აგენტები Chrome-ის ექსთენშენიდან ითხოვენ დაკავშირებას. დადასტურებული მუშაობს, სანამ არ წაშლით.</div>
+    <div id="extAccBox"><div class="empty">იტვირთება…</div></div>
     <h3 style="margin-top:14px">➕ ახალი ანგარიში / განახლება</h3>
     <div class="sub" style="white-space:normal;margin-bottom:6px">
       🔒 ელფოსტა და პაროლი სერვერზე არ ინახება — worker მათ რამდენიმე წამში იღებს და მხოლოდ საკუთარ კომპიუტერზე წერს.
@@ -2480,6 +2483,7 @@ async function openMhAccountsModal() {
       <div class="sub" id="mhaStatus" style="white-space:normal"></div>
     </div>`;
   document.getElementById("modalClose").onclick = closeDetail;
+  renderExtAccounts();
 
   // არსებულ იარლიყზე დაჭერა ავსებს იარლიყს/თიმს/სახელს (პაროლის შესაცვლელად)
   box.querySelectorAll("[data-mh-acc]").forEach((el) => {
@@ -2535,6 +2539,63 @@ async function openMhAccountsModal() {
       btn.disabled = false;
     }
   };
+}
+
+/* ექსთენშენის (Chrome Web Store) ანგარიშები: მოთხოვნების დადასტურება/უარყოფა და დადასტურებულის წაშლა */
+const _EXT_ST = { pending: "⏳ ელოდება დადასტურებას", approved: "✅ აქტიური", revoked: "🗑 წაშლილი" };
+async function renderExtAccounts() {
+  const host = document.getElementById("extAccBox");
+  if (!host) return;
+  let d;
+  try { d = await api("/api/ext-accounts"); }
+  catch (e) { host.innerHTML = `<div class="empty">⚠️ ${esc(e.message)}</div>`; return; }
+  const rows = (d.rows || []).filter((r) => r.status !== "revoked").concat((d.rows || []).filter((r) => r.status === "revoked").slice(0, 5));
+  if (!rows.length) { host.innerHTML = `<div class="empty">მოთხოვნები ჯერ არ არის</div>`; return; }
+  const agentOpts = (d.agents || []).map((a) => `<option value="${esc(a.agent_id)}">${esc(a.name)}${a.team ? " · " + esc(a.team) : ""}</option>`).join("");
+  const teamOpts = (d.teams || []).map((t) => `<option value="${esc(t)}">${esc(t)}</option>`).join("");
+  host.innerHTML = rows.map((r) => {
+    const who = r.mode === "agent" ? `აგენტი: ${esc(r.agent_name || r.agent_id || "?")}` : (r.team ? `თიმი: ${esc(r.team)}` : "");
+    const pend = r.status === "pending" ? `
+      <div class="qa-compose" style="margin-top:6px">
+        <select data-ext-mode="${esc(r.id)}">
+          <option value="agent"${r.agent_id ? " selected" : ""}>პირადი — მხოლოდ ამ აგენტის განცხადებები</option>
+          <option value="team"${r.agent_id ? "" : " selected"}>თიმის — მთელი თიმის განცხადებები</option>
+        </select>
+        <select data-ext-agent="${esc(r.id)}"><option value="">— აგენტი —</option>${agentOpts}</select>
+        <select data-ext-team="${esc(r.id)}"><option value="">— თიმი —</option>${teamOpts}</select>
+        <div style="display:flex;gap:6px">
+          <button class="btn" data-ext-act="approve" data-ext-id="${esc(r.id)}">✅ დადასტურება</button>
+          <button class="btn secondary" data-ext-act="reject" data-ext-id="${esc(r.id)}">❌ უარყოფა</button>
+        </div>
+      </div>` : r.status === "approved" ? `
+      <div style="margin-top:6px"><button class="btn secondary" style="width:auto;padding:6px 12px;font-size:12.5px" data-ext-act="revoke" data-ext-id="${esc(r.id)}">🗑 წაშლა (გასაღები გაუქმდება)</button></div>` : "";
+    return `<div class="list-row"><div class="avatar">🧩</div><div class="main">
+        <div class="title">${esc(r.name)} <span class="sub">· ${esc(r.label)}</span></div>
+        <div class="sub">${_EXT_ST[r.status] || esc(r.status)}${who ? " · " + who : ""} · ☎ ${esc(r.phone)}</div>
+        <div class="sub">განცხადებაზე: ${esc(r.contact_name)} · ${esc(r.contact_phone)}${r.myhome_email ? " · " + esc(r.myhome_email) : ""}</div>
+        ${pend}</div></div>`;
+  }).join("");
+  rows.forEach((r) => {
+    const a = host.querySelector(`[data-ext-agent="${r.id}"]`); if (a && r.agent_id) a.value = r.agent_id;
+  });
+  host.querySelectorAll("[data-ext-act]").forEach((b) => {
+    b.onclick = async () => {
+      const id = b.dataset.extId, act = b.dataset.extAct;
+      if (act === "revoke" && !confirm("წავშალო? ამ კომპიუტერზე ექსთენშენი მაშინვე შეწყვეტს განცხადებების დადებას.")) return;
+      const body = {};
+      if (act === "approve") {
+        body.mode = host.querySelector(`[data-ext-mode="${id}"]`).value;
+        body.agent_id = host.querySelector(`[data-ext-agent="${id}"]`).value;
+        body.team = host.querySelector(`[data-ext-team="${id}"]`).value;
+        if (body.mode === "agent" && !body.agent_id) { toast("აირჩიეთ აგენტი"); return; }
+        if (body.mode === "team" && !body.team) { toast("აირჩიეთ თიმი"); return; }
+      }
+      b.disabled = true;
+      try { const res = await api(`/api/ext-accounts/${encodeURIComponent(id)}/${act}`, { method: "POST", body: JSON.stringify(body) }); toast(res.message || "✅"); }
+      catch (e) { toast(e.message || "შეცდომა"); }
+      renderExtAccounts();
+    };
+  });
 }
 
 function renderMyHomeJobs(rows, role) {

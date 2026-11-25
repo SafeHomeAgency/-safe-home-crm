@@ -703,6 +703,39 @@ async def dayoff_reason(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 
+async def ext_account_decide(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Chrome-ის ექსთენშენის ანგარიშის მოთხოვნა: ✅/❌ ადმინის Telegram-იდან."""
+    query = update.callback_query
+    if not is_admin(update.effective_chat.id):
+        await query.answer()
+        return
+    import myhome_ext_accounts
+    myhome_ext_accounts.init(sheets)
+    action, req_id = query.data.split(":", 1)
+    who = (update.effective_user.full_name if update.effective_user else "") or "admin"
+    try:
+        ok, msg, rec = await asyncio.to_thread(
+            myhome_ext_accounts.decide, req_id, "approve" if action == "exa_ok" else "reject", by=who)
+    except Exception:  # noqa: BLE001
+        log.exception("ექსთენშენის მოთხოვნის გადაწყვეტა ჩავარდა")
+        await query.answer("შეცდომა — სცადეთ Mini App-იდან", show_alert=True)
+        return
+    if not ok:
+        await query.answer(msg, show_alert=True)
+        return
+    await query.answer()
+    extra = ""
+    if rec and rec.get("status") == "approved":
+        extra = (f"\nიარლიყი: {rec.get('label')} · " +
+                 (f"აგენტის პირადი ანგარიში ({rec.get('agent_name') or rec.get('agent_id')})" if rec.get("mode") == "agent"
+                  else f"თიმი {rec.get('team')}") +
+                 "\nწასაშლელად: Mini App → MyHome → ⚙️ ანგარიშები")
+    try:
+        await query.edit_message_text(query.message.text + f"\n\n{msg}{extra}")
+    except Exception:  # noqa: BLE001
+        pass
+
+
 async def dayoff_decide(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     if not is_admin(update.effective_chat.id):
@@ -3183,6 +3216,7 @@ def main():
     app.add_handler(CommandHandler("exclusives", exclusives_list))
     app.add_handler(CommandHandler("swaps", swaps_list))
     app.add_handler(CallbackQueryHandler(dayoff_decide, pattern=r"^do_(ok|no):"))
+    app.add_handler(CallbackQueryHandler(ext_account_decide, pattern=r"^exa_(ok|no):"))
 
     app.add_handler(ConversationHandler(
         entry_points=[CommandHandler("addagent", addagent_start)],
