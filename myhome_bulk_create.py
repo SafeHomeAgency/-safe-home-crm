@@ -47,6 +47,14 @@ def register(app, *, authed_worker, rate_limited, sheets, send_message) -> None:
         team = str(agent.get("team", "")).strip()
         account = sheets.get_myhome_account_for_team(team)
         label = str((account or {}).get("manager_label", "")).strip()
+        # აგენტს პირადი, ადმინის მიერ დადასტურებული ექსთენშენი თუ აქვს (Chrome Web Store) — Mini App-ის მსგავსად job მასზე მიდის
+        try:
+            import myhome_ext_accounts
+            own = myhome_ext_accounts.label_for_agent(agent_id)
+            if own:
+                label = own
+        except Exception:  # noqa: BLE001 — მოდული/საცავი მიუწვდომელია -> ძველი ქცევა (თიმის ანგარიში)
+            pass
         if label != manager_label:
             return jsonify(error=f"აგენტის გუნდის ანგარიში არის „{label or '—'}“, არა „{manager_label}“", code="label_mismatch"), 409
 

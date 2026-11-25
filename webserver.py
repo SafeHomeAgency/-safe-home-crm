@@ -2847,6 +2847,9 @@ def _authed_worker():
         return jsonify(error="ავტორიზაცია ვერ დადასტურდა"), 401
     label = str(request.args.get("manager_label") or "").strip()
     wid = str(request.args.get("worker_id") or (request.get_json(silent=True) or {}).get("worker_id") or "").strip()
+    if not label and not wid and request.path.startswith("/internal/ext/base"):
+        # „ბაზის“ (Sheety) proxy job-ს/ანგარიშს არ ეხება — იარლიყის გარეშე მოთხოვნაც დაშვებულია (ადრე 403 key_scope ბრუნდებოდა)
+        return None
     ok = (label or wid) and (not label or label == bound) and (not wid or wid == f"ext-{bound}")
     if not ok:
         return jsonify(error="ეს გასაღები სხვა ანგარიშისთვისაა", code="key_scope"), 403
