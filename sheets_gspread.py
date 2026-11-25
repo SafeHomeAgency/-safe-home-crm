@@ -70,6 +70,34 @@ def _count_api_call(method: str) -> None:
 def _count_api_error(status) -> None:
     with _api_lock:
         _api_err["429" if status == 429 else "5xx" if (status or 0) >= 500 else "other"] += 1
+    if status == 429:
+        _start_cooldown()
+
+
+# 429-ის „დამცველი“ (2026-11-25): Google-მა ლიმიტი (60 წაკითხვა/წთ) რომ დაგვიბრუნა, ყველა წაკითხვა ერთდროულად ჩერდება
+# SHEETS_429_COOLDOWN წამით — ამ დროს _cached_records ბოლო ცნობილ მონაცემს აბრუნებს მყისიერად (Google-ს არ ეკითხება),
+# ხოლო რაც მაინც Google-ს სჭირდება (ჩაწერა/ახალი წაკითხვა), ლოდინს ერთ საერთო ვადამდე აკეთებს და არა 1-2-4 წმ-ში
+# ხელახლა „დაშენებით“ (ადრე: ყოველი მოთხოვნა 5-ჯერ ცდიდა, თითო ცდა ისევ კვოტას ხარჯავდა -> ბოტი/Mini App ჭედავდა).
+def _cooldown_seconds() -> float:
+    try:
+        return min(60.0, max(0.0, float(os.environ.get("SHEETS_429_COOLDOWN", "20"))))
+    except ValueError:
+        return 20.0
+
+
+_cooldown = {"until": 0.0}
+
+
+def _start_cooldown() -> None:
+    sec = _cooldown_seconds()
+    if sec <= 0:
+        return
+    with _api_lock:
+        _cooldown["until"] = max(_cooldown["until"], time.monotonic() + sec)
+
+
+def _cooldown_left() -> float:
+    return max(0.0, _cooldown["until"] - time.monotonic())
 
 
 def api_call_stats() -> dict:
@@ -89,7 +117,8 @@ def api_call_stats() -> dict:
             lo += 1
         peak = max(peak, hi - lo + 1)
     return {"backend": "sheets", "reads_1m": _n(60, True), "writes_1m": _n(60, False), "reads_5m": _n(300, True),
-            "writes_5m": _n(300, False), "peak_reads_1m_last10m": peak, "errors": errs, "quota_reads_per_min": 60}
+            "writes_5m": _n(300, False), "peak_reads_1m_last10m": peak, "errors": errs, "quota_reads_per_min": 60,
+            "cooldown_left": round(_cooldown_left(), 1)}
 
 
 class _RetryingWorksheet:
@@ -109,6 +138,11 @@ class _RetryingWorksheet:
             delay = 1.0
             last_exc = None
             for _attempt in range(5):
+                # წაკითხვის ლიმიტი ამოწურულია — Google-ს ახლა არ ვეკითხებით (ცდა მაინც ჩავარდებოდა და კვოტას დახარჯავდა)
+                if name in _READ_METHODS:
+                    wait = min(_cooldown_left(), 20.0)
+                    if wait > 0:
+                        time.sleep(wait + random.uniform(0, 1.5))
                 _count_api_call(name)
                 try:
                     return attr(*args, **kwargs)
@@ -120,7 +154,14 @@ class _RetryingWorksheet:
                     except Exception:
                         status = None
                     _count_api_error(status)
-                    if status in (429, 500, 502, 503, 504) or status is None:
+                    if status == 429:
+                        if _attempt >= 3:
+                            break
+                        # ერთი საერთო ვადა ყველასთვის (+ მცირე გაფანტვა), რომ ლიმიტის გახსნისთანავე ყველამ ერთად არ „დააწვეს“
+                        time.sleep(max(delay, min(_cooldown_left(), 20.0)) + random.uniform(0, 1.5))
+                        delay = min(delay * 2, 15)
+                        continue
+                    if status in (500, 502, 503, 504) or status is None:
                         time.sleep(delay + random.uniform(0, 0.4))
                         delay = min(delay * 2, 15)
                         continue
@@ -169,9 +210,16 @@ def _load_into_cache(name: str) -> list[dict]:
     t0 = time.monotonic()
     data = _worksheet(name).get_all_records(numericise_ignore=['all'])
     with _records_cache_lock:
+        _last_known[name] = (t0, data)
         if _gen.get(name, 0) == g0:
             _records_cache[name] = (t0, data)
     return data
+
+
+# ბოლო წარმატებით წაკითხული ასლი თითო ცხრილზე — ჩაწერა (_invalidate) მას არ შლის. გამოიყენება **მხოლოდ** 429-ის დამცველის
+# დროს, როცა Google-ს წაკითხვა მაინც არ შეიძლება: მომხმარებელი რამდენიმე წამით ძველს ხედავს, მაგრამ ეკრანი არ ჭედავს.
+# გადაწყვეტილებები (claim/complete/stage) ამას არ ეყრდნობა — ისინი _fresh_job_row-ით ახლიდან კითხულობენ.
+_last_known: dict[str, tuple[float, list[dict]]] = {}
 
 
 def _bg_refresh(name: str) -> None:
@@ -202,6 +250,8 @@ def _cached_records(name: str) -> list[dict]:
         if age < _cache_ttl():
             return hit[1]
         if age < _STALE_MAX_SECONDS:
+            if _cooldown_left() > 0:              # 429-ის დამცველი: ფონურ განახლებასაც არ ვიწყებთ — ლიმიტის გახსნის შემდეგ
+                return hit[1]
             with _records_cache_lock:
                 start = name not in _refreshing
                 if start:
@@ -209,6 +259,11 @@ def _cached_records(name: str) -> list[dict]:
             if start:
                 threading.Thread(target=_bg_refresh, args=(name,), daemon=True, name=f"sheets-refresh-{name}").start()
             return hit[1]
+    if _cooldown_left() > 0:                      # კეში ჩაწერამ წაშალა, Google კი ახლა ლიმიტზეა — ბოლო ცნობილი ასლი, ლოდინის გარეშე
+        with _records_cache_lock:
+            last = _last_known.get(name)
+        if last and time.monotonic() - last[0] < _STALE_MAX_SECONDS:
+            return last[1]
     with _fetch_lock(name):                       # ერთი ცივი წაკითხვა ყველასთვის
         with _records_cache_lock:
             hit = _records_cache.get(name)
@@ -2896,15 +2951,19 @@ def record_worker_heartbeat(worker_id: str, status: str = "online",
             return dict(zip(WORKER_HEARTBEAT_HEADERS, prev[2]))
         # ცალკე საკეტი (არა გლობალური `_lock`): heartbeat-ის ქსელური ჩაწერა სხვა Sheets-ოპერაციებს არ ბლოკავს
         ws = _worker_heartbeat_ws()
-        cell = ws.find(worker_id, in_column=1) if worker_id else None
-        if cell:
-            first = gspread.utils.rowcol_to_a1(cell.row, 1)
-            last = gspread.utils.rowcol_to_a1(cell.row, len(WORKER_HEARTBEAT_HEADERS))
+        # სტრიქონის ნომერი მეხსიერებიდან (10 წთ-მდე, იმავე worksheet-ზე) — ყოველ heartbeat-ზე `find` (= 1 წაკითხვა) აღარ გვჭირდება
+        row_no, found_at = (prev[4], prev[5]) if (prev and len(prev) > 5 and prev[3] == ws_key) else (None, 0.0)
+        if not (row_no and now_m - found_at < 600):
+            cell = ws.find(worker_id, in_column=1) if worker_id else None
+            row_no, found_at = (cell.row, now_m) if cell else (None, 0.0)
+        if row_no:
+            first = gspread.utils.rowcol_to_a1(row_no, 1)
+            last = gspread.utils.rowcol_to_a1(row_no, len(WORKER_HEARTBEAT_HEADERS))
             ws.batch_update([{"range": f"{first}:{last}", "values": [row]}])
         else:
             ws.append_row(row)
         _invalidate(config.WORKER_HEARTBEAT_SHEET_NAME)
-        _hb_state[worker_id] = (now_m, sig, row, id(_ws_cache.get(config.WORKER_HEARTBEAT_SHEET_NAME)))
+        _hb_state[worker_id] = (now_m, sig, row, id(_ws_cache.get(config.WORKER_HEARTBEAT_SHEET_NAME)), row_no, found_at)
     return dict(zip(WORKER_HEARTBEAT_HEADERS, row))
 
 
